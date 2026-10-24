@@ -62,11 +62,11 @@ const PARTITION = (catalog, entities, refNames = false) => ({ type: 'array', uni
 const BOUND = { anyOf: [{ type: 'integer', minimum: 0, title: 'an offset' }, { const: 'unbounded', title: '"unbounded"' }] };
 const FRAME = {
   type: 'object', additionalProperties: false,
-  description: 'Window frame. ROWS = physical row offsets; RANGE = value offsets on the ORDER BY key (for a rolling N-DAY window, order by a unix_date column and use range with preceding:N). Omit for the default frame.',
+  description: 'Window frame (a rolling N-day window: order by a unix_date column, mode range, preceding N).',
   properties: {
-    mode: { enum: ['rows', 'range'], description: 'rows = physical rows; range = value-based on the order key.' },
-    preceding: { ...BOUND, description: 'Lower bound: a row (or value) offset, or "unbounded" (default unbounded).' },
-    following: { ...BOUND, description: 'Upper bound: an offset, "unbounded", or 0/omitted = CURRENT ROW.' },
+    mode: { enum: ['rows', 'range'] },
+    preceding: { ...BOUND, description: 'Default unbounded.' },
+    following: { ...BOUND, description: 'Default the current row.' },
   },
 };
 
@@ -94,25 +94,25 @@ export function overSchema(catalog, { entities = true, frame = false, refNames =
 // the parameters a function may take, by name — each function's form picks its own. `ref` is the
 // definition a CASE's branches and conditions are (expressions of the same kind as the case).
 const params = ({ ref }) => ({
-  places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places (default 0).' },
+  places: { type: 'integer', minimum: 0, maximum: 12 },
   type: TYPE,
-  start: { type: 'integer', minimum: 1, description: '1-based start position.' },
-  len: { type: 'integer', minimum: 0, description: 'Length in characters (optional).' },
-  search: { type: 'string', description: 'Substring to find.' },
-  replacement: { type: 'string', description: 'What replaces it.' },
-  field: { type: 'string', description: 'The field of the JSON object to read.' },
-  index: { type: 'integer', minimum: 1, description: '1-based index.' },
-  unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'The unit of the difference: the whole units elapsed from the first argument to the second, truncated toward zero (1 h 59 min is 1 hour; a day is 24 hours, not a calendar boundary — date_trunc both to the day for calendar days), an integer, negative when the second is earlier.' },
-  grain: { enum: GRAINS, description: 'The time bucket to truncate to (a week starts on Monday, the ISO week).' },
-  part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract: dow is the ISO day of the week (Monday 1 … Sunday 7), week the ISO week number — on every warehouse.' },
-  timezone: { type: 'string', minLength: 1, description: 'An IANA timezone name (Europe/Berlin, America/New_York, UTC).' },
-  clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
-  sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). It is one expression: no ; or comment, a text with one in `args` as { value }. E.g. { fn: "raw", sql: "POWER({1}, {2})", args: [{ column: "base" }, { column: "exponent" }] }.' },
-  cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` a list of conditions that all hold, `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'The conditions this branch takes: all of them hold.'), then: { $ref: ref } } } },
-  else: { $ref: ref, description: 'The value when no branch holds (default NULL — under an aggregate, the rows it leaves out). Under count / count_distinct leave it out: count would count those rows, count_distinct their else value as one more.' },
-  offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
-  default: { ...SCALAR, description: 'The constant when the offset row does not exist.' },
-  percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' },
+  start: { type: 'integer', minimum: 1, description: '1-based.' },
+  len: { type: 'integer', minimum: 0 },
+  search: { type: 'string' },
+  replacement: { type: 'string' },
+  field: { type: 'string' },
+  index: { type: 'integer', minimum: 1, description: '1-based.' },
+  unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'Whole units elapsed, truncated toward zero; a day is 24 hours, not a calendar day.' },
+  grain: { enum: GRAINS, description: 'A week is the ISO week (from Monday).' },
+  part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'dow: Monday 1 … Sunday 7; week: the ISO week.' },
+  timezone: { type: 'string', minLength: 1, description: 'An IANA name.' },
+  clamp_zero: { type: 'boolean', description: 'Default true: a negative or missing result is 0.' },
+  sql: { type: 'string', description: 'One dialect SQL expression; each column is an item of `args`, placed as {1}, {2}, … (a column name written in the SQL is refused; write keywords in upper case). E.g. "POWER({1}, {2})".' },
+  cases: { type: 'array', minItems: 1, description: 'The first branch whose conditions all hold wins.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'All of them hold.'), then: { $ref: ref } } } },
+  else: { $ref: ref, description: 'Default NULL; not under count / count_distinct.' },
+  offset: { type: 'integer', minimum: 1 },
+  default: { ...SCALAR },
+  percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: '0.95 for p95.' },
   over: { $ref: OVER_REF },
 });
 
@@ -596,9 +596,9 @@ export const isAggregateCall = (e) => isObj(e) && Object.hasOwn(FNS, e.fn ?? '')
 
 // ── The leaves, as the schema offers them ────────────────────────────────────────────────────────────
 /** { column } — a column of the rows here (checked when built, with the columns there are). */
-export const columnLeaf = (description = 'A column of the rows here: a pipeline step\'s, a stored table\'s, a semantic model\'s (a column, an entity key, an amount the catalog marks aggregatable).') => form({ title: 'a column — { column }', required: ['column'], properties: { column: { type: 'string', description } } });
+export const columnLeaf = (description = 'A column of the rows here.') => form({ title: 'a column — { column }', required: ['column'], properties: { column: { type: 'string', description } } });
 /** { value } — a constant: a string, a number, a boolean or null; never a list. */
-export const valueLeaf = () => form({ title: 'a constant — { value }', required: ['value'], properties: { value: { ...SCALAR, description: 'A string, a number, a boolean or null — never a list (in / not_in take each member as an argument of its own). A constant is compared in the type of what it meets.' } } });
+export const valueLeaf = () => form({ title: 'a constant — { value }', required: ['value'], properties: { value: { ...SCALAR, description: 'Never a list (in / not_in take each member as an argument).' } } });
 /** { now: true } — the current time. */
 export const nowLeaf = () => form({ title: 'the current time — { now: true }', required: ['now'], properties: { now: { const: true } } });
 /** { property, field? } — an event property among `values`, read where it is stored, of the type the
@@ -606,10 +606,10 @@ export const nowLeaf = () => form({ title: 'the current time — { now: true }',
  *  lists the same names.) */
 export const propertyLeaf = (values) => form({
   title: 'an event property — { property }', required: ['property'],
-  description: 'An event property of the pipeline\'s or the semantic model\'s source (semantic_index lists them) — a scalar, an array or a JSON object, read where it is stored (its own column, or the event_data payload) as the type the catalog declares; cast converts it.',
+  description: 'An event property of the source, read as the type the catalog declares.',
   properties: {
     property: strEnum(values || []),
-    field: { type: 'string', description: 'One field of a JSON object property, read as text.' },
+    field: { type: 'string', description: 'A field of a JSON object property, as text.' },
   },
 });
 
@@ -677,7 +677,7 @@ const LEAF_SAID = {
 const either = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} or ${xs[xs.length - 1]}` : xs[0] || '');
 
 /** How an aggregate folds rows, said where one is offered: a conditional one folds a case. */
-const FOLD_SAID = 'A conditional one folds a case, missing on the other rows — the rows where c holds { fn: "count", args: [{ fn: "case", cases: [{ when: [c], then: { value: 1 } }] }] }, their revenue { fn: "sum", args: [{ fn: "case", cases: [{ when: [c], then: { column: "price" } }] }] }; average of the first case with else: { value: 0 } is the share of the rows where c holds. A count / count_distinct takes no else: count would count the other rows, count_distinct their else value as one more.';
+const FOLD_SAID = 'An aggregate takes no where: a conditional one folds a case — { fn: "count", args: [{ fn: "case", cases: [{ when: [c], then: { value: 1 } }] }] }; count / count_distinct take no else.';
 
 /**
  * THE EXPRESSION SCHEMA — one definition of a KIND (EXPR_KINDS: the row expression `$defs.expr` unless
@@ -743,23 +743,17 @@ export function exprSchema(catalog, { project = null, places = null, kind = 'exp
   const leafSaid = [...Object.keys(ROW_LEAVES).filter((k) => leaves.includes(k)).map((k) => LEAF_SAID[k]), ...(refLeaves.length ? [`what a ref names that holds a value (${refLeaves.map((k) => REFS[k].says).join(', ')})`] : [])];
   // the places the definition is for, each once (none named: every place there is)
   const ownPlaces = at ? at.filter((p, i) => at.findIndex((q) => q.what === p.what) === i) : Object.values(PLACES);
-  const noRaw = at && has('raw') ? ownPlaces.filter((p) => !p.fns.includes('raw')).map((p) => `${p.what} takes no raw`) : [];
   const aggregates = AGGREGATE_FNS.filter((fn) => offered.includes(fn));
   const text = [
     leaves.length
-      ? `An expression: a leaf — ${either(leafSaid)} — or a function { fn, args: [expressions], …its parameters }, its arguments expressions themselves, nested to any depth.`
-      : `ONE aggregate of the rows { fn, args: [row expressions], …its parameters } — ${either(aggregates)}; count with no args counts the rows, percentile takes \`percentile\`. It folds the rows its argument has a value on, skipping a missing value; its arguments are values of each row, with no aggregate in them — a formula over several aggregates is several measures and a derived metric.`,
-    ...(ownPlaces.length > 1 ? [`Each place takes some of them, and a refusal says which — ${ownPlaces.map((p) => `${p.what}: ${p.leaves.map((k) => LEAVES[k].says).join(', ')}`).join('; ')}${noRaw.length ? `; ${noRaw.join('; ')}` : ''}.`] : []),
-    // where what a place leaves out is written instead — its hint, as its refusal says it
-    ...(at ? ownPlaces.filter((p) => p.hint).map((p) => (ownPlaces.length > 1 ? `For ${p.what}: ${p.hint.charAt(0).toLowerCase()}${p.hint.slice(1)}.` : `${p.hint}.`)) : []),
-    ...(leaveOut.includes('aggregate') ? ['An aggregate is no value of a row: it stands only as a measure\'s expr.'] : []),
-    ...(leaves.includes('column') && has('round', 'div', 'sub') ? ['round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }.'] : []),
-    ...(CONDITION_FNS.some((fn) => offered.includes(fn)) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
-    ...(aggregates.length && leaves.length ? [`An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with \`percentile\`, …) folds rows where a measure is written, skipping a missing value. ${FOLD_SAID}`] : []),
-    ...(aggregates.length && !leaves.length ? [FOLD_SAID] : []),
-    ...(has('hll_init') ? ['Distinct counts that add up across buckets: hll_init [x] folds values into a sketch; hll_merge_partial [sketch] merges sketches into a sketch (a coarser bucket); hll_merge [sketch] merges them into the count; hll_extract [sketch] reads the count of one sketch in a row.'] : []),
-    ...(windows ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
-    ...(has('raw') ? ['raw is a build\'s escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
+      ? `An expression: a leaf — ${either(leafSaid)} — or { fn, args: [expressions], …its parameters }, nested.`
+      : `ONE aggregate { fn, args: [row expressions] } — a formula over several aggregates is several measures and a derived metric.`,
+    ...(ownPlaces.length > 1 ? ['Each place takes some of these; a refusal names what it takes.'] : []),
+    ...(leaveOut.includes('aggregate') ? ['An aggregate stands only as a measure\'s expr.'] : []),
+    ...(CONDITION_FNS.some((fn) => offered.includes(fn)) ? ['A comparison with a missing value does not hold (test it with is_null).'] : []),
+    ...(aggregates.length ? [FOLD_SAID] : []),
+    ...(windows ? ['With `over`, in a compute stage only, an aggregate or a ranking function is a window.'] : []),
+    ...(has('raw') ? ['raw: dialect SQL in `sql`, its columns in `args` as {1}, {2}, ….'] : []),
   ].join(' ');
   // what an argument is, said once beside the forms that take one
   const nested = {

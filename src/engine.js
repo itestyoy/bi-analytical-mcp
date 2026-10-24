@@ -15,7 +15,7 @@
 // the validation and the task start, so a boundary between them would be a second name for the same
 // object, not a dependency cut:
 //   this file                     the constructor, contexts, the task delegates, the small tools
-//                                 (context, delete_context, memory, time, experiment, explore_errors), the time spine
+//                                 (context, memory, experiment, explore_errors), the time spine
 //   engine/semantic-index.js      semantic_index and its catalog views, recipes
 //   engine/semantic-build.js      build / update / delete a semantic model, a pipeline model
 //   engine/semantic-query.js      query_model: references, the metric-query shell
@@ -24,7 +24,7 @@
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
 //   engine/task-results.js        reading a task back, query_model, display_model_result
 
-import { buildSchemas, transportSchema, MAX_WAIT_SECONDS, METHOD_CONTRACTS } from './schema.js';
+import { buildSchemas, transportSchema, METHOD_CONTRACTS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE, UNKNOWN_TASK } from './validate.js';
 import { abTest, srmCheck, sampleSize } from './experiment.js';
@@ -49,7 +49,6 @@ import { MemoryStore } from './memory.js';
 import { openStore } from './store.js';
 import { ErrorLog, readGenerated } from './error-log.js';
 import { getDialect } from './dialects/index.js';
-import { currentSignal } from './request-context.js';
 import { semanticIndexMethods } from './engine/semantic-index.js';
 import { WarehouseProbe } from './engine/warehouse-probe.js';
 import { PipelineAdvisor } from './engine/pipeline-warnings.js';
@@ -87,7 +86,7 @@ export const TASK_KINDS = {
 const DESCRIBED_TASKS = 5;
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -144,7 +143,7 @@ export class Engine {
     for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
     for (const st of featureStatus || []) if (st.available === false) this.errors.record({ source: 'startup', severity: 'warning', stage: 'feature', message: `the feature '${st.id}' is not offered: ${st.reason}` });
     // one schema per tool, and apart from them the input contracts of the methods tools hand to (src/schema.js);
-    // what the features this deployment runs hold in a context is removed by delete_context, in their forms
+    // what the features this deployment runs hold in a context is removed by context({ action: "delete" }), in their forms
     const deletes = featureDeletes(features, catalog);
     this._featureDeletes = new Map(deletes.map((d) => [d.what, d]));
     const built = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [], deletes });
@@ -156,7 +155,11 @@ export class Engine {
     // (above, by its name); a feature's by its own definition.
     this.features = features;
     this.featureStatus = featureStatus;
-    this.tools = toolRegistry([...CORE_TOOLS, ...featureToolDefinitions(features)]);
+    // (the result cards — display_model_result and the card's own drill_result — are offered only where the
+    // deployment asks for them, MCP_RESULT_CARDS: off, neither tool nor its schema exists)
+    this.resultCards = !!resultCards;
+    for (const def of CORE_TOOLS) if (def.resultCard && !this.resultCards) delete this.schemas[def.name];
+    this.tools = toolRegistry([...CORE_TOOLS.filter((def) => this.resultCards || !def.resultCard), ...featureToolDefinitions(features)]);
     for (const def of this.tools.values()) {
       if (def.feature) {
         if (Object.prototype.hasOwnProperty.call(this.schemas, def.name) || typeof this[def.name] === 'function') throw new Error(`feature tool '${def.name}' collides with a core tool`);
@@ -474,12 +477,13 @@ export class Engine {
   }
 
   /**
-   * The context tool reads (list, describe); delete_context removes. Each hands its input to the
-   * method that does the work, held to that method's own contract.
+   * The context tool: list, describe, delete. Each hands its input to the method that does the work,
+   * held to that method's own contract.
    */
   async context(input = {}) {
     this._validate('context', input);
     if (input.action === 'list') return this._listContexts(input);
+    if (input.action === 'delete') { const { action: _delete, ...target } = input; return this._deleteFromContext(target); }
     const { action: _describe, ...describe } = input;
     const out = await this._describeContext(describe);
     // the tasks run on it, by id (its `tasks` are the builds' names): what a read, a from_task, a card take
@@ -491,8 +495,7 @@ export class Engine {
 
   /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context
    *  holds, handed to the feature in its own form (src/features.js deletes). */
-  async delete_context(input = {}) {
-    this._validate('delete_context', input);
+  async _deleteFromContext(input) {
     const contributed = this._featureDeletes?.get(input.what);
     if (contributed) {
       const { what: _what, ...fields } = input;
@@ -506,7 +509,7 @@ export class Engine {
   }
 
   _dropContext(input) {
-    this._validate('delete_context.context', input);
+    this._validate('context.delete', input);
     if (this.ctxs.has(input.context_id) && this.ctxs.get(input.context_id).state?.pinned) throw new ToolError(`context '${input.context_id}' serves a semantic model of the dbt project's own layer for as long as the server runs — it is read from the project at start, not built here, so there is nothing to drop`, { stage: 'validate', field: 'context_id' });
     // A context whose materialized prefix another draft READS cannot just vanish: the fork's
     // `{{ ref() }}` would resolve to a relation that no longer exists. Name the consumers and let
@@ -625,31 +628,6 @@ export class Engine {
   /** The memory tool (src/engine/memory.js — engine.notes). */
   memory(input) {
     return this.notes.run(input);
-  }
-
-  /**
-   * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
-   * waiting for a task is its side's query tool ({ task_ids }), which returns the moment it is done.
-   *
-   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
-   * call, so a caller that asks for a minute gets a dropped connection rather than a minute — the
-   * schema refuses more than the cap. The cap is reported back (`cap_seconds`) so the pacing can be
-   * planned from the answer instead of from the description.
-   */
-  async time(input) {
-    this._validate('time', input);
-    // the schema bounds it to [0, MAX_WAIT_SECONDS]: a longer wait is refused, never cut short silently
-    const seconds = Number(input.seconds) || 0;
-    const startedAt = new Date().toISOString();
-    // a cancelled call (the client gave up, a task was cancelled) stops waiting at once
-    const signal = currentSignal();
-    let cancelled = false;
-    await new Promise((resolve) => {
-      const t = setTimeout(resolve, seconds * 1000);
-      signal?.addEventListener?.('abort', () => { cancelled = true; clearTimeout(t); resolve(); }, { once: true });
-    });
-    const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
-    return { ok: true, waited_seconds: waited, cap_seconds: MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   /**

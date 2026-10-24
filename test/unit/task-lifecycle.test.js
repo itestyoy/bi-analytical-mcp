@@ -35,7 +35,7 @@ function orderedRunner() {
   return r;
 }
 
-const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('tasks') }), runner });
+const engine = (runner) => new Engine({ resultCards: true, catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('tasks') }), runner });
 const TASK = { name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] };
 // a metric query is its steps: these metrics steps, and the steps a test puts before or after one
 const CNT = { stage: 'metrics', metrics: ['cnt'] };
@@ -552,7 +552,7 @@ test('a stored result is paged by the warehouse, each page in one shape, the bui
 test('a drawn pivot keeps opening after a restart, and whatever envelope the host puts on its read', async () => {
   const { runTool } = await import('../../src/mcp-surface.js');
   const root = tempDir('drawn');
-  const make = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: root, registryPath: join(root, 'registry.json') }), runner, dbPath: join(root, 'mcp.sqlite') });
+  const make = (runner) => new Engine({ resultCards: true, catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: root, registryPath: join(root, 'registry.json') }), runner, dbPath: join(root, 'mcp.sqlite') });
   const rows = { ok: true, columns: [{ name: 'event_name' }, { name: 'n' }], rows: [{ event_name: 'level_completed', n: 3 }] };
   const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
   const e1 = make(runner);

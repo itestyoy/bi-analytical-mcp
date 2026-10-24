@@ -169,7 +169,8 @@ export async function makeEngine(opts = {}) {
   const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;
   if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
   if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project });
+  // MCP_RESULT_CARDS: a model result drawn as a card (display_model_result, drill_result) — off unless asked for
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project, resultCards: opts.resultCards ?? S.MCP_RESULT_CARDS });
   // Persistence surfaces as semantic_index({ request: { status } }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

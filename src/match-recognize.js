@@ -388,38 +388,37 @@ function betweenStepsChoices(catalog) {
 function matchRecognizeSchema(catalog) {
   const step = {
     type: 'object', additionalProperties: false, required: ['event_name'],
-    description: 'One funnel step: an event, and optionally conditions the row must meet.',
     properties: {
-      name: { type: 'string', pattern: NAME, description: 'Step name — its output columns are reached_<name> and at_<name> (default s1, s2, …).' },
-      event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, of the pipeline\'s own source (a funnel scans one table).' },
-      where: conditionSlot('#/$defs/expr', 'Conditions the step\'s row meets as well, all of them — on columns here or an event property: { fn: "eq", args: [{ property: "<a property of the event>" }, { value: "<its value>" }] }.'),
+      name: { type: 'string', pattern: NAME, description: 'Gives reached_<name> and at_<name> (default s1, s2, …).' },
+      event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()) },
+      where: conditionSlot('#/$defs/expr', 'More conditions on the step\'s row.'),
     },
   };
   const capture = {
     type: 'object', additionalProperties: false, required: ['name', 'step', 'column'],
     properties: {
-      name: { type: 'string', pattern: NAME, description: 'The output column it becomes.' },
-      step: { type: 'string', pattern: NAME, description: 'The step whose row it is read from.' },
-      column: { type: 'string', pattern: NAME, description: 'A column here (an event property is read into one by a compute stage before).' },
+      name: { type: 'string', pattern: NAME },
+      step: { type: 'string', pattern: NAME },
+      column: { type: 'string', pattern: NAME },
     },
   };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path: matches the steps in order within each partition (per user by default), ordered by `order_by`. Out: the partition_by column(s), then for each step reached_<step> (boolean) and at_<step> (when), completed, furthest_step_name, first_seen_at (= the first step\'s time), and each capture. A conversion or the time between two steps is computed from those by the stages after (an aggregate counting where a step was reached — { fn: "count", args: [{ fn: "case", cases: [{ when: [{ column: "reached_<step>" }], then: { value: 1 } }] }] } — and compute date_diff). Filter the events before it with a where stage.',
+    description: 'An ordered funnel per partition (per user by default). Out: partition_by, reached_<step> and at_<step> per step, completed, furthest_step_name, first_seen_at, the captures.',
     properties: {
       stage: { enum: ['match_recognize'] },
       partition_by: {
         type: 'array', minItems: 1, items: partitionItem(catalog),
-        description: 'What one sequence is: column(s), a declared relationship { entity }, or both (one sequence per user per level). Default: the source\'s relationship toward the users model.',
+        description: 'Default: the user.',
       },
-      order_by: { type: 'string', pattern: NAME, description: 'The sequence axis (default: the event time).' },
-      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition = the first match per partition (counts players); one_per_match = one row per occurrence of the first step (counts situations; matches may overlap).' },
+      order_by: { type: 'string', pattern: NAME, description: 'Default: the event time.' },
+      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_match: a row per occurrence of the first step.' },
       between_steps: {
         enum: betweenStepsChoices(catalog), default: 'any',
-        description: `What may come between two consecutive steps: "any" (default) = anything — the next later occurrence of the next step, repeats in between allowed; "gap" = only events that are no step${betweenStepsChoices(catalog).includes('none') ? '; "none" = nothing — each step is the immediately next event' : ''}. The same on every warehouse.`,
+        description: `Between two steps: any (default) = anything; gap = only events that are no step${betweenStepsChoices(catalog).includes('none') ? '; none = nothing' : ''}.`,
       },
-      steps: { type: 'array', minItems: 2, items: step, description: 'The ordered steps (≥ 2).' },
-      capture: { type: 'array', items: capture, description: 'Values to carry out of the match: the value a column holds at a step.' },
+      steps: { type: 'array', minItems: 2, items: step },
+      capture: { type: 'array', items: capture, description: 'A column\'s value at a step.' },
     },
   };
 }

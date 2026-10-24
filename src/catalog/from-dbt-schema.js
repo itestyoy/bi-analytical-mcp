@@ -67,9 +67,10 @@ export function dbtSchemaToCatalog(doc) {
     // The physical partition column (cost hint): queries should constrain it (or the
     // time column) to prune the scan. Surfaced statically — no live runner needed.
     if (mcp.partition_column) m.partition_column = mcp.partition_column;
-    // The partition column is the DAY of the time axis — an event is stored under its own day.
-    // A source that files a late-arriving event under the day it ARRIVED says how late one may
-    // be: partition_late_days: N reads N more days after a window, so no late event is missed.
+    // The partition column is a DAY an event is filed under: its own, or a later one where it
+    // arrived late. partition_late_days: N says how late one may be — N more days are read after a
+    // window (DEFAULT_PARTITION_LATE_DAYS, src/time-range.js, where it is not said; 0 for a source
+    // that files every event under its own day), so no event that arrived is missed.
     if (mcp.partition_late_days != null) {
       const n = mcp.partition_late_days;
       if (!Number.isInteger(n) || n < 0) throw new Error(`model '${model.name}': meta.mcp.partition_late_days must be a whole number of days (0 or more), got ${JSON.stringify(n)}`);

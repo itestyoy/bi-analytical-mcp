@@ -660,16 +660,16 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   const reread = await readDone(first.task_id);
   assert.equal(reread.events, first.events, 'T21: the first build\'s task still says its rows');
 
-  // delete_context in the feature's own form removes one eventstream: the context keeps the other, and the
+  // a context delete in the feature's own form removes one eventstream: the context keeps the other, and the
   // task that read the removed one still reads its rows — its tables stay until the context is dropped
-  const removed = await engine.delete_context({ what: 'eventstream', context_id: ctx, eventstream: 'origin_copy' });
+  const removed = await engine.context({ action: 'delete', what: 'eventstream', context_id: ctx, eventstream: 'origin_copy' });
   assert.deepEqual([removed.removed, removed.eventstream], [true, 'origin_copy']);
   assert.deepEqual(Object.keys(await described()), ['origin'], 'one eventstream removed, the other kept');
   assert.deepEqual((await readDone(q.task_id, EVERY_ROW)).analyses.transition_graph, a.analyses.transition_graph, 'the task that read the removed eventstream reads the same rows');
-  await assert.rejects(engine.delete_context({ what: 'eventstream', context_id: ctx, eventstream: 'origin_copy' }), (e) => e.field === 'eventstream' && /no eventstream 'origin_copy'/.test(e.message), 'an eventstream the context no longer holds');
+  await assert.rejects(engine.context({ action: 'delete', what: 'eventstream', context_id: ctx, eventstream: 'origin_copy' }), (e) => e.field === 'eventstream' && /no eventstream 'origin_copy'/.test(e.message), 'an eventstream the context no longer holds');
 
   // T28 — a task whose context is gone is refused as gone
-  await engine.delete_context({ context_id: ctx, force: true });
+  await engine.context({ action: 'delete', context_id: ctx, force: true });
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'transition_graph' } }), (e) => e.code === 'result_gone' && e.stage === 'validate', 'T28: a task whose context is gone');
 });
 

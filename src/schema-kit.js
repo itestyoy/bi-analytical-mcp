@@ -81,12 +81,12 @@ export const TIMEZONE = { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_+-]*(/[A
  * (src/time-range.js resolveTimeRange reads it). Only which axis it bounds differs from one place to
  * another, and that is the window's own `description`.
  */
-export function timeRange(description, { timezone = 'Optional IANA timezone (e.g. "Europe/Berlin"): start and end are read as wall-clock time there and converted to UTC instants — a pipeline filters at them exactly; a metric query counts the whole UTC days they fall in. Omit to read them as UTC.' } = {}) {
+export function timeRange(description, { timezone = 'start and end are wall-clock there; default UTC.' } = {}) {
   return {
     type: 'object', additionalProperties: false, description,
     properties: {
-      start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' },
-      end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
+      start: { ...ISO_TIME, description: 'Inclusive.' },
+      end: { ...ISO_TIME, description: 'Inclusive; a date is the whole day.' },
       timezone: { ...TIMEZONE, description: timezone },
     },
   };

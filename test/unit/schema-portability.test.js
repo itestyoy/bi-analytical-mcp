@@ -40,7 +40,7 @@ const allSchemas = (path) => {
   const c = loadCatalog(path, {});
   return { ...buildSchemas(c), build_retentioneering_model: transportSchema(eventstreamSchema(c)), query_retentioneering_model: transportSchema(pathQuerySchema()), display_retentioneering_result: transportSchema(pathDisplaySchema()) };
 };
-const listed = (path) => buildToolDefs(new Engine({ catalog: loadCatalog(path, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('portable') }) }));
+const listed = (path) => buildToolDefs(new Engine({ resultCards: true, catalog: loadCatalog(path, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('portable') }) }));
 
 // the constructs outside what every host's API takes — anywhere in a schema, not only at its root
 const NOT_PORTABLE = ['oneOf', 'allOf', 'not', 'if', 'then', 'else', 'dependentRequired', 'dependentSchemas', 'discriminator'];

@@ -72,7 +72,7 @@ export const pipelineDraftMethods = {
     if (input.action === 'discard') {
       delete ctx.state.draft;
       // (the context stays — it may hold a built model or a layer — and says how it goes too)
-      return { context_id: ctx.id, action: 'discard', discarded: true, note: `the draft is gone; context ${ctx.id} stays (delete_context({ request: { context_id: "${ctx.id}" } }) removes it)` };
+      return { context_id: ctx.id, action: 'discard', discarded: true, note: `the draft is gone; context ${ctx.id} stays (context({ request: { action: "delete", context_id: "${ctx.id}" } }) removes it)` };
     }
     return this._draftMaterialize(ctx, draft); // materialize (the final build step)
   },
@@ -231,7 +231,7 @@ export const pipelineDraftMethods = {
       if (st?.building && forBuild) {
         throw new ToolError(
           `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
-          + `Wait for it with query_model({ request: { task_ids: ['${st.building}'] } }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with edit_step at or before step ${list[i].at} — or delete_context({ request: { what: 'pipeline_model' } }) — and materialize again.`,
+          + `Wait for it with query_model({ request: { task_ids: ['${st.building}'] } }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with edit_step at or before step ${list[i].at} — or context({ request: { action: 'delete', what: 'pipeline_model' } }) — and materialize again.`,
           { stage: 'validate', field: 'context_id' },
         );
       }
@@ -652,7 +652,7 @@ export const pipelineDraftMethods = {
       recommendations: [
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.context_id} is unchanged — branch variants freely.`,
         ...(broken ? [`The copied steps do not build as they are: ${broken}`] : []),
-        ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — delete_context on it is refused unless forced.`] : []),
+        ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — deleting it is refused unless forced.`] : []),
         `Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }).`,
       ],
     };

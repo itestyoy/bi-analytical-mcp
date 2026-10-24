@@ -209,7 +209,7 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   host offers it (the graph grows into the frame). A distribution is drawn as its
   histogram and a diff as heatmaps (the difference shaded above and below zero); describe, a
   conversion rate and per-path metrics have no card — their numbers come back for the answer.
-- **`delete_context`** takes one more form while the feature is on — `{ what: "eventstream",
+- **`context`** takes one more delete form while the feature is on — `{ action: "delete", what: "eventstream",
   context_id, eventstream }` removes one eventstream from its context (its tables stay until the
   context is dropped); off, the form does not exist.
 
@@ -348,7 +348,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is
   carried only by a `display_model_result` that drew, or an `experiment` called with `card: true`. The
-  tools whose answer has one shape and no card (`time`, `context`, `delete_context`, `memory`,
+  tools whose answer has one shape and no card (`context`, `memory`,
   `explore_errors`) declare an `outputSchema` and carry every successful
   answer as `structuredContent` too; every other answer is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.

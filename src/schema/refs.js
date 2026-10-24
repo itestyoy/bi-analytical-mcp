@@ -94,13 +94,13 @@ export function refForms(catalog, { project = null, via: offerVia = true, timeCo
   const models = catalog ? catalog.modelKeys() : [];
   const facts = catalog ? catalog.facts : [];
   const unavailable = Object.keys(catalog?.unavailableModels?.() || {});
-  const grain = { enum: grains, description: 'The time bucket, for a time dimension (default: its own granularity).' };
+  const grain = { enum: grains };
   const entities = entityNames(catalog, project);
   return {
-    source: models.length ? [form({ title: '{ source }', required: ['source'], properties: { source: { enum: [...models, ...unavailable], description: 'A model of the catalog — an events source, the users model, the experiments, a measures source.' } } })] : [],
+    source: models.length ? [form({ title: '{ source }', required: ['source'], properties: { source: { enum: [...models, ...unavailable] } } })] : [],
     source_event: facts.map((f) => form({
       title: `{ source: "${f}", event }`, required: ['source', 'event'],
-      properties: { source: { const: f, description: `The events source '${f}'.` }, event: strEnum(catalog.eventNames(f), `An event '${f}' declares.`) },
+      properties: { source: { const: f }, event: strEnum(catalog.eventNames(f)) },
     })),
     source_column: models.flatMap((k) => {
       const columns = refColumns(catalog, k, { timeColumns: withTime, keyColumns: withKeys });
@@ -109,11 +109,11 @@ export function refForms(catalog, { project = null, via: offerVia = true, timeCo
       return [form({
         title: `{ source: "${k}", column }`, required: ['source', 'column'],
         properties: {
-          source: { const: k, description: `The model '${k}'.` },
-          column: strEnum(columns, `A column of '${k}', as semantic_index({ request: { source: "${k}" } }) lists it.`),
-          ...(vias.length > 1 ? { via: { enum: vias, description: `The relationship '${k}' is reached through — several lead to it.` } } : {}),
+          source: { const: k },
+          column: strEnum(columns),
+          ...(vias.length > 1 ? { via: { enum: vias, description: 'The relationship: several lead here.' } } : {}),
           // a time column of the model grouped by at a bucket of its own (an install week)
-          ...(offerVia && timeColumns(catalog, k).length ? { grain: { ...grain, description: `For a time column of '${k}' (${timeColumns(catalog, k).join(', ')}): the bucket it is grouped by (default: its own granularity).` } } : {}),
+          ...(offerVia && timeColumns(catalog, k).length ? { grain } : {}),
         },
       })];
     }),
@@ -121,21 +121,21 @@ export function refForms(catalog, { project = null, via: offerVia = true, timeCo
       const props = catalog.eventProps(f);
       // the enum carries no sentence of its own, so the transport folds it with the { property } leaf's
       // where the two lists are one (a catalog of one events source)
-      return props.length ? [form({ title: `{ source: "${f}", property }`, description: `An event property of '${f}', read where it is stored.`, required: ['source', 'property'], properties: { source: { const: f, description: `The events source '${f}'.` }, property: strEnum(props) } })] : [];
+      return props.length ? [form({ title: `{ source: "${f}", property }`, required: ['source', 'property'], properties: { source: { const: f }, property: strEnum(props) } })] : [];
     }),
     dimension: [form({
       title: '{ semantic_model, dimension }', required: ['semantic_model', 'dimension'],
-      description: 'A dimension of a semantic model, named by where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context\'s own>"] for its own, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. A dimension a task computed ({ name, expr }) is named so too.',
+      description: 'semantic_model: the chain of models it is reached through — ["<own>"], ["X"], ["A", "X"].',
       properties: {
         // (a build's own table is a semantic model of its context under the build's name — no name of the catalog)
-        semantic_model: { type: 'array', minItems: 1, items: { anyOf: [strEnum(semanticModelNames(catalog, project)), { type: 'string', pattern: '^[a-z][a-z0-9_]{2,40}$', description: 'A build\'s own table, named as the build: the semantic model its semantic_model step stands on.' }] }, description: 'The chain of semantic models the dimension is reached through, in order, ending with the one that carries it.' },
-        dimension: { type: 'string', minLength: 1, description: 'The dimension\'s name, as its semantic model declares it.' },
+        semantic_model: { type: 'array', minItems: 1, items: { anyOf: [strEnum(semanticModelNames(catalog, project)), { type: 'string', pattern: '^[a-z][a-z0-9_]{2,40}$', description: 'A build\'s own table, by the build\'s name.' }] } },
+        dimension: { type: 'string', minLength: 1 },
         grain,
       },
     })],
-    entity: entities.length ? [form({ title: '{ entity }', required: ['entity'], description: 'An entity — a key a semantic model declares (a relationship of the catalog, an entity of the project) — by name: grouped by, one row per key value.', properties: { entity: { enum: entities, description: 'The entity\'s name.' } } })] : [],
-    metric: [form({ title: '{ metric }', required: ['metric'], properties: { metric: { type: 'string', minLength: 1, description: 'A metric, by its name.' } } })],
-    time: [form({ title: '{ time: "metric_time" }', required: ['time'], properties: { time: { const: 'metric_time', description: 'The metric time axis.' }, grain } })],
+    entity: entities.length ? [form({ title: '{ entity }', required: ['entity'], description: 'A key: one row per key value.', properties: { entity: { enum: entities } } })] : [],
+    metric: [form({ title: '{ metric }', required: ['metric'], properties: { metric: { type: 'string', minLength: 1 } } })],
+    time: [form({ title: '{ time: "metric_time" }', required: ['time'], properties: { time: { const: 'metric_time' }, grain } })],
   };
 }
 
@@ -151,7 +151,7 @@ const GROUP_SAID = { catalog: 'the catalog', semantic: 'the semantic layer' };
 const REF_SAID = {
   source: 'a source ({ source })',
   source_event: 'one of its events ({ source, event })',
-  source_column: 'a column of a model ({ source, column } — users.country is { source: "users", column: "country" })',
+  source_column: 'a column of a model ({ source, column })',
   source_property: 'an event property ({ source, property })',
   dimension: 'a dimension of a semantic model ({ semantic_model, dimension })',
   entity: 'an entity',
@@ -181,9 +181,8 @@ export function refSchema(catalog, { project = null, places = null } = {}) {
   const forms = refForms(catalog, { project, via: !at || at.some((p) => p.via), timeColumns: !!at && at.every((p) => p.timeColumns), keyColumns: !!at && at.every((p) => p.keyColumns) });
   const kinds = Object.keys(REFS).filter((k) => (!at || at.some((p) => p.takes.includes(k))) && forms[k].length);
   const byGroup = Object.keys(REF_GROUPS).map((group) => [group, kinds.filter((k) => REFS[k].group === group)]).filter(([, ks]) => ks.length);
-  const several = !at || new Set(at.map((p) => p.takes.join())).size > 1;
   return {
-    description: `A thing of ${byGroup.map(([g]) => GROUP_SAID[g]).join(' or ')}, named by where it lives: ${byGroup.map(([, ks]) => ks.map((k) => REF_SAID[k]).join(', ')).join('; ')}.${several ? ' Each place takes some of them.' : ''}`,
+    description: `A thing of ${byGroup.map(([g]) => GROUP_SAID[g]).join(' or ')}, named by where it lives: ${byGroup.map(([, ks]) => ks.map((k) => REF_SAID[k]).join(', ')).join('; ')}.`,
     anyOf: byGroup.map(([group, ks]) => ({ title: REF_GROUPS[group], anyOf: ks.flatMap((k) => forms[k]) })),
   };
 }

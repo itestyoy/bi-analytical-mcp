@@ -21,7 +21,7 @@ test('a refused call is kept with its arguments, and explore_errors reads it bac
   const bad = { context_id: 'ctx_nope', steps: [{ stage: 'metrics', metrics: ['x'] }] };
   assert.equal((await runTool(engine, 'query_model', { request: bad })).result.isError, true);
   assert.equal((await runTool(engine, 'no_such_tool', { request: { a: 1 } })).result.isError, true);
-  await runTool(engine, 'time', { request: { seconds: 0 } }); // a call that works is not an error
+  await runTool(engine, 'context', { request: { action: 'list' } }); // a call that works is not an error
   const page = payload(await runTool(engine, 'explore_errors', { request: {} }));
   assert.equal(page.total, 2);
   assert.deepEqual(page.errors.map((e) => e.tool), ['no_such_tool', 'query_model']);

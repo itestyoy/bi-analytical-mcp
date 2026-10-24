@@ -38,10 +38,9 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 | `query_model` | Every query and every task read: a query is `steps` — with one `metrics` step a metric query (where steps before it, the pipeline's read stages re-slicing its result after it), without one a read of the stored pipeline table in the same read stages |
 | `display_model_result` / `drill_result` | Draw a model result as a card (once); a drawn card's drill-down read |
 | `experiment` | A/B statistics over numbers the caller brings |
-| `context` / `delete_context` | Read / remove the contexts builds produce |
+| `context` | List, describe and delete the contexts builds produce |
 | `memory` | Durable analyst notes linked to catalog entities |
 | `explore_errors` | The kept failures, with what reproduces them |
-| `time` | A timer |
 | `build_retentioneering_model` / `query_retentioneering_model` / `display_retentioneering_result` | The retentioneering feature (only with `MCP_RETENTIONEERING=on`) |
 
 ## Notes

@@ -21,7 +21,7 @@ test('a task is addressed by its id alone — no table name or path reaches a re
   assert.equal(v('drill_result', { task_id: 'aabbccddeeff', steps: [{ stage: 'limit', limit: 1 }], table: 'qr_aabbccddeeff' }).ok, false);
 });
 test('context_id is pattern-constrained (no path traversal) on all context tools', () => {
-  for (const tool of ['query_model', 'delete_context.context', 'context.describe']) {
+  for (const tool of ['query_model', 'context.delete', 'context.describe']) {
     const base = tool === 'query_model' ? { steps: [{ stage: 'metrics', metrics: ['m'] }] } : {};
     assert.equal(v(tool, { ...base, context_id: '../../../etc/passwd' }).ok, false, `${tool} should reject traversal`);
     assert.equal(v(tool, { ...base, context_id: 'a/b' }).ok, false, `${tool} should reject slashes`);

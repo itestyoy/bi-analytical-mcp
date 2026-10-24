@@ -227,8 +227,8 @@ test('a metric is cut by the columns its own rows reach: another model\'s column
 test('a model removed with its metrics (cascade) stays removed: the build\'s semantic_model step says the same', opts, async (t) => {
   if (skip(t) || !ctx) return;
   // without cascade the refusal says how to take the metrics with it
-  await assert.rejects(() => engine.delete_context({ what: 'semantic_model', context_id: ctx, semantic_model: 'acquisition' }), /metrics depend on this model's measures: spend — add cascade: true/);
-  const removed = await engine.delete_context({ what: 'semantic_model', context_id: ctx, semantic_model: 'acquisition', cascade: true });
+  await assert.rejects(() => engine.context({ action: 'delete', what: 'semantic_model', context_id: ctx, semantic_model: 'acquisition' }), /metrics depend on this model's measures: spend — add cascade: true/);
+  const removed = await engine.context({ action: 'delete', what: 'semantic_model', context_id: ctx, semantic_model: 'acquisition', cascade: true });
   assert.equal(removed.removed, true);
   const { steps } = await engine.build_model({ action: 'preview', context_id: ctx });
   const layer = steps.find((x) => x.stage === 'semantic_model');
@@ -395,7 +395,7 @@ test('a model the layer only joins is removed with its join: grouping by it is r
   const country = { source: 'users', column: 'country' };
   const before = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
-  const removed = await engine.delete_context({ what: 'semantic_model', context_id: out.context_id, semantic_model: 'users' });
+  const removed = await engine.context({ action: 'delete', what: 'semantic_model', context_id: out.context_id, semantic_model: 'users' });
   assert.equal(removed.removed, true, JSON.stringify(removed));
   const { steps } = await engine.build_model({ action: 'preview', context_id: out.context_id });
   assert.equal(steps.find((x) => x.stage === 'semantic_model').join, undefined);
@@ -405,6 +405,6 @@ test('a model the layer only joins is removed with its join: grouping by it is r
   const [{ n }] = (await wh.query(`select count(*) as n from fct_analytics_events where device_time >= '${WINDOW.start}' and device_time < '2026-02-01'`)).rows;
   assert.equal(num(total.rows[0].evts), num(n));
   // a model the layer neither declares on nor joins: said so, with what it holds
-  const none = await engine.delete_context({ what: 'semantic_model', context_id: out.context_id, semantic_model: 'acquisition' });
+  const none = await engine.context({ action: 'delete', what: 'semantic_model', context_id: out.context_id, semantic_model: 'acquisition' });
   assert.deepEqual([none.removed, /holds 'events'/.test(none.reason)], [false, true], JSON.stringify(none));
 });

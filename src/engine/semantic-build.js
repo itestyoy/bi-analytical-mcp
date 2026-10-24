@@ -85,7 +85,7 @@ export const semanticBuildMethods = {
 
   /** Delete a pipeline model: remove its files + state and re-parse. */
   async _deletePipelineModel(input) {
-    this._validate('delete_context.pipeline_model', input);
+    this._validate('context.delete_pipeline_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no pipeline model registered in this context' };
     const model = ctx.state.model;
@@ -106,7 +106,7 @@ export const semanticBuildMethods = {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: `the model is removed: no task reads its rows any more (a read of one says so). The ${stored} object itself is dropped from the warehouse with the context (delete_context({ request: { context_id } })) or by the store's cleanup of ephemeral objects.` };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: `the model is removed: no task reads its rows any more (a read of one says so). The ${stored} object itself is dropped from the warehouse with the context (context({ request: { action: 'delete', context_id } })) or by the store's cleanup of ephemeral objects.` };
   },
 
   /**
@@ -243,7 +243,7 @@ export const semanticBuildMethods = {
     return Object.entries(this._catalogOf(ctx).models[model]?.measures || {}).filter(([, mm]) => mm?.agg).map(([n]) => n);
   },
 
-  /** delete_context semantic_model on a layer that is a step only: its measures over the model (`source`)
+  /** A delete of a semantic_model on a layer that is a step only: its measures over the model (`source`)
    *  and its join go, and the metrics that read them — with cascade, else refused naming them. */
   _deleteFromLayerStep(ctx, draft, modelKey, cascade) {
     const st = draft.semantic;
@@ -277,7 +277,7 @@ export const semanticBuildMethods = {
   },
 
   async _deleteSemanticModel(input) {
-    this._validate('delete_context.semantic_model', input);
+    this._validate('context.delete_semantic_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     const draft0 = ctx.state.draft;

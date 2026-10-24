@@ -241,7 +241,7 @@ test('what the project does not define is refused in the call, naming what it do
   await refused({ steps: [{ stage: 'metrics', metrics: ['project_events_total'], group_by: [{ entity: 'media_source' }] }] }, /not one project_events_total can be grouped by.*player/);
   // the project's contexts are read as they are: not built on, not dropped
   await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', context_id: ACQ, name: 'xyz', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'cnt', expr: { fn: 'count' } }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] }] })), /own semantic layer/);
-  await assert.rejects(Promise.resolve().then(() => raw.delete_context({ context_id: ACQ })), /nothing to drop/);
+  await assert.rejects(Promise.resolve().then(() => raw.context({ action: 'delete', context_id: ACQ })), /nothing to drop/);
   // …by any tool that would write into it
   await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', name: 'xyz', source: 'events', context_id: ACQ })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, kind: 'inner', attrs: [{ column: 'country' }] }] } })), /own semantic layer/);

@@ -21,7 +21,7 @@
 //                as outputSchema, and every successful answer carries structuredContent — never on a tool with a view
 
 const NAME = /^[a-z][a-z0-9_]*$/;
-const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'cardField', 'appsOnly', 'appCallable', 'feature']);
+const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'cardField', 'appsOnly', 'appCallable', 'feature', 'resultCard']);
 
 /** A tool definition, checked: a missing or mistyped field is a defect found at start, not in a call. */
 export function defineTool(def) {

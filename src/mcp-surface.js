@@ -21,7 +21,9 @@ import { TaskRegistry } from './tasks.js';
 
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
 const RESULT_CARDS = `RESULT CARDS
-In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with query_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
+In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with query_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
+// the experiment's own card: drawn wherever the host renders MCP Apps, with or without the result cards
+const EXPERIMENT_CARD = 'An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words.';
 
 /** Where the skills are served: the root every skill URI shares, so the core names it at one length however many there are. */
 function skillRoot(uris) {
@@ -40,7 +42,7 @@ function skillRoot(uris) {
  * follows is for a client that reads on. Nothing a single call needs lives only here — every tool
  * description stands on its own, and the spec asks instructions not to repeat them.
  */
-function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = {}) {
+function coreInstructions({ apps = false, cards = false, skillUris = [], featureLines = [] } = {}) {
   return [
     `Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_model (a one-off table — funnels, sessions, pivots — or, as its last step, reusable named metrics) → query_model. Warehouse work returns a task_id at once; read it back with query_model. ${SELF_REFUSAL_BRIEF}.`,
     '',
@@ -52,7 +54,7 @@ function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = 
     `For ${RESEARCH_SCOPE}, first read ${RESEARCH_ROUTE}.`,
     'Answer as soon as a result answers the question; query again for numbers that look wrong or another cut, not to re-confirm a result you have.',
     ...featureLines,
-    ...(apps ? ['Draw one card per question with display_model_result (RESULT CARDS below).'] : []),
+    ...(apps && cards ? ['Draw one card per question with display_model_result (RESULT CARDS below).'] : []),
     ...(skillUris.length ? [`The guides are also Agent Skills, under ${skillRoot(skillUris)} (skills/list).`] : []),
   ].join('\n');
 }
@@ -77,7 +79,7 @@ WHERE THE DETAIL IS
 - semantic_index({ request: { recipe: "<id>" } }): one warehouse-proven payload in full; the overview lists the ids, and a real question usually combines two or three.
 - semantic_index({ request: { guide: "python" } }): the frame rules for a python stage, where the overview's python_models says it is available; the SQL stages before it prepare the table it reads.
 - memory: record a vague phrase you tracked down to a real field, or a gotcha, linked to the catalog entities it concerns; it resurfaces on their semantic_index views and in semantic_index({ request: { search } }).
-- context({ request: { action } }): list or describe a workspace (context_id) and the models in it; delete_context removes one.`;
+- context({ request: { action } }): list, describe or delete a workspace (context_id) and the models in it.`;
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
@@ -361,9 +363,9 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     : '';
   // the core block first (within the budget a client may cut to), the detail after it
   const instructionsFor = (offer = {}) => [
-    coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? skillUris : [], featureLines }),
+    coreInstructions({ apps: !!offer.apps, cards: engine.resultCards, skillUris: offer.skills ? skillUris : [], featureLines }),
     `\n\n${SERVER_DESCRIPTION}`,
-    offer.apps ? `\n\n${RESULT_CARDS}` : '',
+    offer.apps ? `\n\n${engine.resultCards ? `${RESULT_CARDS} ${EXPERIMENT_CARD}` : `RESULT CARDS\n${EXPERIMENT_CARD}`}` : '',
     offer.skills ? skillPointer : '',
   ].join('');
   // built once: the SDK builds a server per request, and the definitions never change in a process

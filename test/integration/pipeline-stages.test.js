@@ -1135,6 +1135,11 @@ test('a where on the time axis, alone or before a funnel, reads the same rows wi
   try { model.partition_late_days = 0; early = await mrPipe(byDay); } finally { model.partition_late_days = late; }
   const n = (rows) => Object.fromEntries(rows.map((r) => [String(r.utc_day).slice(0, 10), Number(r.n)]));
   assert.deepEqual(n(early.rows), { '2026-01-01': 4, '2026-01-02': 30 });
+  // a source that does not say how late an event may be filed is read with the server's own margin:
+  // the late events are in the day they happened, as when the source declares its three days
+  let unsaid;
+  try { delete model.partition_late_days; unsaid = await mrPipe(byDay); } finally { model.partition_late_days = late; }
+  assert.deepEqual(n(unsaid.rows), { '2026-01-01': 9, '2026-01-02': 30 });
 });
 
 // Four former tests over the one build: what each asserted is labelled with its old title.

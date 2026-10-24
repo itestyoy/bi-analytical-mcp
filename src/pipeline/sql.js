@@ -21,8 +21,8 @@ export function statAccuracyNote(catalog) {
   let approx = [];
   try { approx = getDialect(catalog?.dialect)?.approximateStats || []; } catch { approx = []; }
   return approx.length
-    ? `ON THIS WAREHOUSE ${approx.join('/')} are APPROXIMATE (sketch-based, which is what makes them cheap on a large table) — say so when you report the number; the other measures are exact.`
-    : 'On this warehouse every measure here is exact.';
+    ? `On this warehouse ${approx.join('/')} are approximate — say so when you report the number.`
+    : '';
 }
 
 // An operand is an EXPRESSION (src/pipeline/compute.js: a column, an event property, a constant, now, or
@@ -38,7 +38,7 @@ export const EXPR = { $ref: '#/$defs/expr' };
  * int, the number a value or a text holds, rounded half away from zero.
  */
 export const TYPES = ['int', 'numeric', 'float', 'string'];
-export const TYPE = { enum: TYPES, description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query; int is the number a value or a text holds, rounded half away from zero: "9.99" → 10, "2.5" → 3), what a raw expression yields (none said: not claimed), a CASE\'s result (converted to it). A moment has no word here: date_trunc, in_timezone and a time column make one, and a raw that yields one says no type.' };
+export const TYPE = { enum: TYPES, description: 'cast is safe: what will not convert is NULL; int rounds half away from zero.' };
 
 /**
  * ONE SORT KEY — the order_by stage's keys (a build's, a read's, the steps after a metric query) and a

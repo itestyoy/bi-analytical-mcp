@@ -23,7 +23,7 @@ import { isNumericType } from '../dialects/base.js';
 /** A slot that names a column of the rows: its name — and after a metrics step also what the query named
  *  it by (a group_by item as group_by names it, a metric as { metric }), resolved to the result's column. */
 const columnSlot = (refNames, base = { type: 'string' }) => (refNames ? { anyOf: [base, { $ref: '#/$defs/ref' }] } : base);
-const REF_NAMES_NOTE = ' After a metrics step a column may also be named as the query names it: a group_by item as group_by names it ({ source, column }, { time: "metric_time", grain }…), a metric as { metric }.';
+const REF_NAMES_NOTE = ' After a metrics step: also a group_by item as group_by names it, or { metric }.';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
@@ -74,7 +74,7 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Keep only rows where all conditions hold. A condition is an expression that is true or false: a comparison ({ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }), in / between / is_null / a text test, and / or / not over them, or a boolean column. Use it to scope to events, a segment or a value range, anywhere in the pipeline — after a window or an aggregate too. A constant is compared in the type of what it meets (a boolean column takes true / false, a numeric one a number); another type is refused here rather than by the warehouse, and a comparison with a missing value does not hold.',
+      description: 'Keep the rows where every condition holds — e.g. { fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }. A constant must be of the type of what it meets.',
       properties: {
         stage: { enum: ['where'] },
         conditions: conditionSlot('#/$defs/expr', 'The conditions a row is kept by: all of them hold.'),
@@ -98,10 +98,10 @@ export const STAGES = {
     defs: (catalog, { project = null, places = null } = {}) => exprDefs(catalog, { project, kinds: { expr: places } }),
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
-      description: 'Add a column computed by one expression (`expr`) over the columns, event properties and constants — arithmetic, text, dates, a CASE, a condition (a flag: true or false, never missing), a window function — nested, so a whole formula is one stage.',
+      description: 'Add a column computed by one expression; a condition is stored as a flag, never missing.',
       properties: {
         stage: { enum: ['compute'] },
-        name: { type: 'string', pattern: NAME, description: 'The name of the column it adds.' },
+        name: { type: 'string', pattern: NAME },
         expr: EXPR,
       },
     }),
@@ -126,12 +126,12 @@ export const STAGES = {
     // src/pipeline/earlier.js.)
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'expr', 'name'],
-      description: 'Explode an array into one row per element (CHANGES GRAIN; rows without the array drop out): an array event property ({ property }), an array column here ({ column }), or an expression that yields one (json_parse_array of a JSON text). For per-element analysis (items collected, rewards granted). The element has the type it is stored as: a native array\'s items (the catalog\'s `items`), a JSON array\'s text; cast converts it where it is read. For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
+      description: 'One row per element of an array; rows without one drop out. A JSON array\'s element is text (cast it).',
       properties: {
         stage: { enum: ['unnest'] },
-        expr: { ...EXPR, description: 'The array: { property } of an array event property (semantic_index lists them), { column } of an array column, or an expression that yields an array.' },
-        name: { type: 'string', pattern: NAME, description: 'The name the element column gets.' },
-        field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
+        expr: { ...EXPR, description: 'The array.' },
+        name: { type: 'string', pattern: NAME },
+        field: { type: 'string', description: 'For an array of structs: one field; omitted, the whole element.' },
       },
     }),
     build: ({ d, catalog, cols, source, place }, p) => {
@@ -219,12 +219,12 @@ export const STAGES = {
             on: contractOnSchema(model, contract),
             attrs: {
               type: 'array', minItems: 1, uniqueItems: true,
-              description: 'The columns of the joined model that arrive — exactly these; one whose name the rows already carry takes a `name` of its own.',
+              description: 'Exactly the columns that arrive; one whose name the rows already carry needs a `name`.',
               items: {
                 type: 'object', additionalProperties: false, required: ['column'],
                 properties: {
                   column: strEnum(attributes, `An attribute of ${model}.`),
-                  name: { type: 'string', pattern: NAME, description: 'The name it gets in the pipeline (defaults to `column`) — for a column both sides name identically.' },
+                  name: { type: 'string', pattern: NAME, description: 'Default `column`.' },
                 },
               },
             },
@@ -234,7 +234,7 @@ export const STAGES = {
       }
       return {
         type: 'object',
-        description: 'Bring in attributes of a model its schema makes joinable — on its join contract, { source, on: { <part>: <a column of the rows | a value> } }: every part it declares named, each key part and the time a column of these rows, a select part its value. The contract is unique on the joined side, so a row meets at most one row there and nothing is repeated; a slowly-changing model is matched at the version valid at the time named. `attrs` lists exactly the columns that arrive — attributes, not amounts (an amount is a measure of the semantic layer). Joins stack.',
+        description: 'Join a model on its join contract: name every part — a key part and the time a column of these rows, a select part a value. A row meets at most one row; a slowly-changing model at the version valid at that time. attrs are attributes, not amounts.',
         anyOf: forms,
       };
     },
@@ -329,13 +329,13 @@ export const STAGES = {
       // query execution", with analytic windows as the whole of the accounted memory, and it
       // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
       // global window. This stage is the cheap form of the same question.
-      description: 'Group rows and compute measures — the grain collapses to the group keys. A measure is { name, expr }, its expr an aggregate — { fn: "sum", args: [{ column: "price" }] }, a count of rows { fn: "count" }, a conditional one over a case (the rows where it holds) — or a formula over aggregates (revenue per payer: div of a sum and a count_distinct). A table-wide number (a threshold, a mean) is this stage with no group_by — one row, then applied per row later as a { value }; a window with no partition_by keeps every row and runs out of memory on a large table ("Resources exceeded"). '
+      description: 'Group rows; each measure is an aggregate or a formula over aggregates. A table-wide number is this stage with no group_by — not a window with no partition_by, which runs out of memory on a large table. '
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
         group_by: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Grouping columns (empty = grand total).${refNames ? REF_NAMES_NOTE : ''}` },
         measures: {
-          type: 'array', minItems: 1, description: 'What each group folds to. For distinct counts prefer the HLL sketch: approx_count_distinct (one shot), or hll_init per group → hll_merge (mergeable across buckets and segments); exact count_distinct does not re-aggregate across groups.',
+          type: 'array', minItems: 1,
           items: measureForm({ ref: '#/$defs/expr', pattern: NAME, exprDescription: 'An aggregate of the rows, or a formula over aggregates; a column outside every aggregate is one of group_by.' }),
         },
       },
@@ -360,20 +360,20 @@ export const STAGES = {
     // warehouse.
     schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'on', 'measure', 'values'],
-      description: 'Turn listed values of `on` into columns: one row per group_by group, and for each value a column holding `measure` over that group\'s rows where `on` equals it (count the rows, sum an amount, a ratio of two aggregates…). The values are listed explicitly, each with the name of its column. For dashboard-ready matrices (revenue as one column per country, retention day as columns).',
+      description: 'Turn listed values of `on` into columns, each holding `measure` over the group\'s rows with that value.',
       properties: {
         stage: { enum: ['pivot'] },
         group_by: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Row keys kept (empty = one row).${refNames ? REF_NAMES_NOTE : ''}` },
-        on: { ...columnSlot(refNames), description: 'The column whose values become columns.' },
-        measure: { ...EXPR, description: 'What each cell holds — an aggregate ({ fn: "count" }, { fn: "sum", args: [{ column: "revenue" }] }) or a formula over aggregates, over the group\'s rows where `on` equals the cell\'s value.' },
+        on: columnSlot(refNames),
+        measure: { ...EXPR, description: 'An aggregate, or a formula over aggregates.' },
         values: {
           type: 'array', minItems: 1, uniqueItems: true,
-          description: 'The values of `on` that become columns: [{ value: "US" }, { value: "GB", name: "uk" }].',
+          description: 'E.g. [{ value: "US" }, { value: "GB", name: "uk" }].',
           items: {
             type: 'object', additionalProperties: false, required: ['value'],
             properties: {
-              value: { ...SCALAR, description: 'A value of `on`, in its type (a number for a numeric column); null is the rows where it is missing.' },
-              name: { type: 'string', pattern: NAME, description: 'The name of the column it becomes (default: `on` and the value, as a column name — country_us).' },
+              value: { ...SCALAR, description: 'In the type of `on`; null: the rows where it is missing.' },
+              name: { type: 'string', pattern: NAME, description: 'Default `on`_value.' },
             },
           },
         },
@@ -408,13 +408,13 @@ export const STAGES = {
   unpivot: {
     schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'columns', 'keep', 'name_column', 'value_column'],
-      description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too) — so the folded columns are of one type (numbers alike; cast the others first). The result is exactly `keep` + those two columns: list in keep every column that should stay beside them (the group keys, a day) — keep: [] keeps none. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
+      description: 'Fold columns of one type into rows (name_column, value_column); the result is exactly `keep` and those two.',
       properties: {
         stage: { enum: ['unpivot'] },
-        columns: { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames), description: `Columns to fold into rows.${refNames ? REF_NAMES_NOTE : ''}` },
-        keep: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Columns carried as they are onto each folded row; every column not here and not folded is dropped ([]: none).${refNames ? REF_NAMES_NOTE : ''}` },
-        name_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds each folded column\'s name.' },
-        value_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds its value.' },
+        columns: { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames), ...(refNames ? { description: REF_NAMES_NOTE.trim() } : {}) },
+        keep: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Columns kept beside them ([]: none).${refNames ? REF_NAMES_NOTE : ''}` },
+        name_column: { type: 'string', pattern: NAME },
+        value_column: { type: 'string', pattern: NAME },
       },
     }),
     build: ({ cols }, p) => {
@@ -439,7 +439,7 @@ export const STAGES = {
     // (after a metrics step a key may name a group_by item or a metric as the query names it: the result's column it gave)
     schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
-      description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering. NULLs go last unless a key says first — the same on every warehouse.',
+      description: 'Sort rows; NULLs last unless a key says first.',
       properties: {
         stage: { enum: ['order_by'] },
         keys: { type: 'array', minItems: 1, items: refNames ? { ...SORT_KEY, properties: { ...SORT_KEY.properties, key: { ...columnSlot(true, SORT_KEY.properties.key), description: `The column to sort by.${REF_NAMES_NOTE}` } } } : SORT_KEY, description: 'The sort keys, in order.' },
@@ -450,7 +450,7 @@ export const STAGES = {
   },
 
   limit: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'limit'], description: 'Cap the number of rows. For top-N (after order_by) or previews.', properties: { stage: { enum: ['limit'] }, limit: { type: 'integer', minimum: 1, maximum: 1000000, description: 'The most rows kept.' } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'limit'], description: 'Cap the number of rows.', properties: { stage: { enum: ['limit'] }, limit: { type: 'integer', minimum: 1, maximum: 1000000, description: 'The most rows kept.' } } }),
     build: ({ cols }, p) => ({ op: { op: 'limit', limit: p.limit }, cols }),
   },
 
@@ -458,10 +458,10 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'share'],
-      description: 'Keep about `share` of the rows at random (0.1 = about a tenth) — a fast, approximate first look on large data. Put it early. The result is flagged approximate; rerun without it for any number you act on (sampling error is large near 0 / 1 rates, in small segments and for distinct counts).',
+      description: 'Keep about `share` of the rows at random — an approximate first look; rerun without it for a number you act on.',
       properties: {
         stage: { enum: ['sample'] },
-        share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: 'The approximate share of rows to keep, a fraction: 0 < share <= 1 (0.01 = about 1%).' },
+        share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: '0.01 = about 1%.' },
       },
     }),
     build: ({ cols }, p) => ({ op: { op: 'sample', share: p.share }, cols }),
@@ -472,10 +472,10 @@ export const STAGES = {
       const names = { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames) };
       return {
         type: 'object',
-        description: `Trim the columns before they are materialized: \`keep\` keeps exactly these (in this order), \`drop\` removes these and keeps the rest — { stage: "project", keep: ["a", "b"] }.${refNames ? REF_NAMES_NOTE : ''}`,
+        description: `Keep exactly these columns (in order), or drop these.${refNames ? REF_NAMES_NOTE : ''}`,
         anyOf: [
-          form({ title: 'keep these columns', required: ['stage', 'keep'], properties: { stage: { enum: ['project'] }, keep: { ...names, description: 'The columns to keep, in order.' } } }),
-          form({ title: 'drop these columns', required: ['stage', 'drop'], properties: { stage: { enum: ['project'] }, drop: { ...names, description: 'The columns to remove; every other column stays.' } } }),
+          form({ title: 'keep these columns', required: ['stage', 'keep'], properties: { stage: { enum: ['project'] }, keep: names } }),
+          form({ title: 'drop these columns', required: ['stage', 'drop'], properties: { stage: { enum: ['project'] }, drop: names } }),
         ],
       };
     },
@@ -620,7 +620,7 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
   if (!at) {
     const read = STAGE_PLACES.read;
     return {
-      description: `One step: a stage { stage: "where" | "compute" | "join" | …, … }, grouped by what it needs. Each place takes some of them, and a refusal says which: ${STAGE_PLACES.build.what} takes every one; ${read.what} takes ${read.stages.join(', ')} — a join, an unnest, a funnel or a python step ${read.elsewhere.replace(/: .*$/, '')}, built from the task (from_task).`,
+      description: `One step: a stage { stage, … }. ${read.what} takes ${read.stages.join(', ')}; a join, an unnest, a funnel or a python step is built from the task (from_task).`,
       anyOf,
     };
   }
@@ -632,8 +632,8 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
   const left = registry.map(([name]) => name).filter((name) => !names.includes(name));
   const elsewhere = at.find((p) => p.elsewhere && p.stages && left.some((name) => !p.stages.includes(name)))?.elsewhere;
   const text = [
-    `One step: a stage { stage: ${names.slice(0, 3).map((n) => `"${n}"`).join(' | ')}${names.length > 3 ? ' | …' : ''}, … }, grouped by what it needs.`,
-    ...(several ? [`Each place takes some of them, and a refusal says which: ${at.map((p) => `${p.what} takes ${p.stages ? p.stages.join(', ') : 'every one'}`).join('; ')}.`] : []),
+    'One step: a stage { stage, … }.',
+    ...(several ? ['Each place takes some of them; a refusal names which.'] : []),
     ...(left.length && elsewhere ? [`${/^[aeiou]/.test(left[0]) ? 'An' : 'A'} ${left.join(' / ')} step ${elsewhere}.`] : []),
   ].join(' ');
   return { description: text, anyOf };

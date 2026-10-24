@@ -582,7 +582,7 @@ export function displaySchema() {
   };
 }
 
-/** delete_context's form for an eventstream — the kind of build a path-analysis context holds, removed
+/** The context delete form for an eventstream — the kind of build a path-analysis context holds, removed
  *  as the core's are (src/features.js deletes): `what` pinned, its context and the eventstream named. */
 export function deleteSchema() {
   return form({

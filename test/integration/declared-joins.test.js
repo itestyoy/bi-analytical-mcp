@@ -1003,7 +1003,9 @@ test('52. a one-column `unique` key answers exactly as the two-column one', opts
 //     query is refused is each path asked on its own, so a refusal names the path it is about.
 test('53. every attribute the catalog advertises for an owned relationship answers, and a truthful `unique` never duplicates: 184 stays 184', opts, async (t) => {
   if (skip(t)) return;
-  const refs = (await trueEngine.semantic_index()).groupable_columns.filter((r) => r.source === 'crashlytics' && r.via === 'ad_funnel');
+  // (one relationship leads to the owner, so it is advertised without via — naming it would add nothing)
+  const refs = (await trueEngine.semantic_index()).groupable_columns.filter((r) => r.source === 'crashlytics');
+  assert.ok(refs.every((r) => !r.via), `a single relationship needs no via: ${JSON.stringify(refs)}`);
   // the owner's attributes: its dimensions and, an events source, its event name — the one set the schema and the engine read
   const own = trueCatalog.modelDimensionColumns('crashlytics');
   assert.ok(own.length >= 2, `the owning fact must declare attributes to reach: ${own}`);

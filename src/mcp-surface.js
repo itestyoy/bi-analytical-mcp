@@ -23,7 +23,7 @@ import { TaskRegistry } from './tasks.js';
 const RESULT_CARDS = `RESULT CARDS
 In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with query_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
 // the experiment's own card: drawn wherever the host renders MCP Apps, with or without the result cards
-const EXPERIMENT_CARD = 'An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words.';
+const EXPERIMENT_CARD = 'An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card for each action (the test, the split check, the plan).';
 
 /** Where the skills are served: the root every skill URI shares, so the core names it at one length however many there are. */
 function skillRoot(uris) {
@@ -148,14 +148,15 @@ export function requestOf(name, args) {
  *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
  *  both, and a host that uses the structured copy does not add it to the model's context). */
 export function toCallToolResult(result, name, args, engine = null) {
-  // STRUCTURED OUTPUT FOR A CARD THAT IS DRAWN, AND FOR AN ANSWER OF A DECLARED SHAPE: display_model_result's
-  // answer when the engine drew it (the task's one card), or experiment's when the call asked for its card
-  // (`card: true`) — and only when the same view model the card runs finds something to draw (a feature's
-  // drawing tool follows the same rule with its own view model); and every successful answer of a tool
-  // that declares its outputSchema (src/schema/outputs.js — tools with no view, so nothing is drawn).
+  // STRUCTURED OUTPUT FOR A CARD THAT IS DRAWN, AND FOR AN ANSWER OF A DECLARED SHAPE: a drawing tool's
+  // answer (appsOnly: display_model_result, a feature's) when the engine drew it (the task's one card), or
+  // experiment's on every answer — a host draws the view of a tool that has one on every call, so each of
+  // its actions has a card — and only when the same view model the card runs finds something to draw;
+  // and every successful answer of a tool that declares its outputSchema (src/schema/outputs.js — tools
+  // with no view, so nothing is drawn).
   // Anything else — every other tool, a refusal, a failure — is the text alone.
   const def = toolsOf(engine).get(name);
-  const asked = def?.cardField ? args?.[def.cardField] === true : isPlainObject(result) && result.drawn === true;
+  const asked = def?.appsOnly ? isPlainObject(result) && result.drawn === true : !!def?.view;
   // the view model the card runs: the result view's, or the feature view's own
   const viewModel = def?.view === 'result' ? (r, a) => buildViewModel(name, r, a) : def?.view?.viewModel;
   // a tool that declares the shape of its answer (outputSchema) carries it on every success
@@ -224,13 +225,6 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
     // (read with the query tool of the same part of the server: a feature's own, or the core's)
     const reader = [...toolsOf(engine).values()].find((t) => t.reads && (t.feature ?? null) === (def.feature ?? null))?.name || 'query_model';
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with ${reader} ({ task_ids }) and answer in words`, 'validate'), raw: null };
-  }
-  const cardField = def.cardField;
-  // (only a card ASKED for: `false` asks for none, which every client already gets)
-  if (!renders && cardField && input[cardField] !== undefined && input[cardField] !== false) {
-    logLine(name, `✗ ${cardField} from a client without the Apps extension`);
-    failed(name, `${cardField} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate', field: cardField });
-    return { result: errorResult(`${cardField} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${cardField} field`, 'validate', cardField), raw: null };
   }
   let beat;
   if (onProgress && progressEveryMs > 0) {

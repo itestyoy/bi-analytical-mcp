@@ -16,7 +16,7 @@
 // result — a semantic query or a pipeline — read the way the query tools read a task, each task at
 // most once: one question gets one card by construction, and starting, reading and showing a result
 // stay three separate calls. experiment is a process of its own — statistics over numbers the
-// caller brings, no task — and draws its own card when the call asks for it (card: true).
+// caller brings, no task — and draws its own card for each action (the test, the split check, the plan).
 //
 // THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT — nothing else. It gets the result the host hands
 // it; the ONE thing it may ask for is more of that same result, through drill_result: a

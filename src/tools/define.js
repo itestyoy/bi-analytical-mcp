@@ -1,7 +1,7 @@
 // ONE DEFINITION PER TOOL — everything the server says about a tool, and does with it, in one object:
 // what the client lists (name, title, description, annotations), what it
 // dispatches (run), which task side it starts and reads (side, reads), whether a read of it waits on a
-// task (waits, precheck) and whether it draws a card (view, appsOnly, appCallable, cardField). The core
+// task (waits, precheck) and whether it draws a card (view, appsOnly, appCallable). The core
 // tools are defined in src/tools/core.js and a feature's in its own module (src/features.js); the
 // engine holds them all in one registry (`engine.tools`), and the surface reads nothing else.
 //
@@ -14,14 +14,14 @@
 //   run          (engine, input) → its answer
 //   side         the task side it starts ('semantic', 'pipeline', a feature's); `reads` — the side it reads back
 //   waits        a read of it ({ task_id }) waits on a task; `precheck(engine, args)` refuses before the wait
-//   view         the card it draws: 'result' (the result view) or a feature's view; `cardField` — the
-//                argument that asks for it (a tool that draws only when asked)
+//   view         the card it draws: 'result' (the result view) or a feature's view — on every answer
+//                its view model finds something in, or, for an appsOnly tool, on the answer it drew
 //   appsOnly     offered to a client that renders MCP Apps only; `appCallable` — the card itself calls it
 //   output       the JSON Schema of its answer, where the answer has one shape (src/schema/outputs.js): listed
 //                as outputSchema, and every successful answer carries structuredContent — never on a tool with a view
 
 const NAME = /^[a-z][a-z0-9_]*$/;
-const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'cardField', 'appsOnly', 'appCallable', 'feature', 'resultCard']);
+const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'appsOnly', 'appCallable', 'feature', 'resultCard']);
 
 /** A tool definition, checked: a missing or mistyped field is a defect found at start, not in a call. */
 export function defineTool(def) {
@@ -37,7 +37,6 @@ export function defineTool(def) {
   if (a.readOnlyHint && a.destructiveHint) throw new Error(`${where}: a read-only tool removes nothing`);
   if (def.schema !== undefined && typeof def.schema !== 'function') throw new Error(`${where}: schema is (catalog) → a JSON Schema`);
   if (def.precheck !== undefined && !def.waits) throw new Error(`${where}: a precheck belongs to a tool whose read waits`);
-  if (def.cardField !== undefined && !def.view) throw new Error(`${where}: cardField asks for a card the tool must draw`);
   // a host draws a card for every answer that carries structuredContent: a tool with a view carries it only when it draws
   if (def.output !== undefined && (def.view || def.output?.type !== 'object')) throw new Error(`${where}: an output schema is an object schema, for a tool that draws nothing`);
   return Object.freeze({ ...def, annotations: Object.freeze({ ...a }) });

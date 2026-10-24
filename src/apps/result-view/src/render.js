@@ -12,10 +12,10 @@ import { renderKpi } from './kpi.js';
 import { renderPivot } from './pivot.js';
 import { closeDrillMenu, updateDrillNav } from './drill.js';
 import { renderChart } from './chart.js';
-import { renderExperiment } from './experiment.js';
+import { renderExperiment, renderExperimentSplit, renderExperimentPlan } from './experiment.js';
 import { renderFunnel } from './funnel.js';
 
-export const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), pivot: (m) => renderPivot(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m) };
+export const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), pivot: (m) => renderPivot(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m), experiment_split: (m) => renderExperimentSplit(m), experiment_plan: (m) => renderExperimentPlan(m) };
 
 export function render(result) {
   loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next

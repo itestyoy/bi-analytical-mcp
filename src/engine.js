@@ -597,8 +597,7 @@ export class Engine {
    */
   experiment(input) {
     this._validate('experiment', input);
-    // `card` asks the MCP server for the result's card (src/mcp-surface.js): not a statistic
-    const { action, card: _card, ...rest } = input;
+    const { action, ...rest } = input;
     switch (action) {
       case 'plan': return this._planExperiment(rest);
       case 'check_split': return this._checkSplit(rest);

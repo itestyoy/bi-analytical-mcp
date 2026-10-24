@@ -36,7 +36,7 @@ test('a definition that leaves something out, or says what cannot be, is refused
   assert.throws(() => defineTool({ ...ok, annotations: { readOnlyHint: false } }), /destructive and idempotent/);
   assert.throws(() => defineTool({ ...ok, annotations: { readOnlyHint: true, destructiveHint: true } }), /removes nothing/);
   assert.throws(() => defineTool({ ...ok, precheck: () => {} }), /waits/);
-  assert.throws(() => defineTool({ ...ok, cardField: 'card' }), /draw/);
+  assert.throws(() => defineTool({ ...ok, cardField: 'card' }), /unknown field 'cardField'/);
   assert.throws(() => defineTool({ ...ok, behaviour: {} }), /unknown field 'behaviour'/);
   assert.throws(() => toolRegistry([defineTool(ok), defineTool(ok)]), /defined twice/);
   assert.throws(() => defineTool({ ...ok, aliases: ['y_tool'] }), /unknown field 'aliases'/);

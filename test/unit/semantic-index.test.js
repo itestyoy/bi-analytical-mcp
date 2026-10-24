@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data test: semantic_index's OPERATIONAL views ({status}/{run}) report
 // registry state (sync-run log + job list) read from SQLite/in-memory stores — no
 // warehouse, no generated SQL asserted. Plus the strict view contract (input validation).
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'di-')) }) }));
+const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('di') }) }));
 
 test('semantic_index({ status }): idle state before any sync', async () => {
   const e = engine();
@@ -83,12 +83,78 @@ test('semantic_index: strict view contract (exactly one view, scoped params)', a
   await assert.rejects(() => e.semantic_index({ event: 'tutorial', property: 'ad_type_of_event_data' }), /must be exactly one of: .*\{ source, property \}/);
   await assert.rejects(() => e.semantic_index({ status: true, run: 1 }), /must be exactly one of: .*\{ status \}/);
   // a paging field on a view that does not page is simply not a field of that view
-  await assert.rejects(() => e.semantic_index({ model: 'events', limit: 5 }), /unexpected property 'limit'/);
+  await assert.rejects(() => e.semantic_index({ source: 'events', event: 'tutorial', limit: 5 }), /unexpected property 'limit'/);
   await assert.rejects(() => e.semantic_index({ search: 'x', offset: 2 }), /unexpected property 'offset'/);
   await assert.rejects(() => e.semantic_index({ event: 'tutorial', recent: 3 }), /unexpected property 'recent'/);
   // valid scoped params are accepted.
   assert.ok((await e.semantic_index({ status: true, recent: 5 })).value_index);
   assert.ok((await e.semantic_index({ search: 'tutorial', limit: 5 })).query);
+});
+
+// A column's values are ordered by a list of sort items — the first orders, a second orders what the
+// first ties — over the values the index holds, in both stores.
+test('semantic_index({ source, property }): order_by is a list of { key, direction? } read in turn', async () => {
+  for (const sqlite of [false, true]) {
+    const e = sqlite
+      ? settle(new Engine({ catalog: loadCatalog(CATALOG, {}), dbPath: join(tempDir('di-db'), 'x.sqlite'), contextManager: new ContextManager({ workspaceRoot: tempDir('di') }) }))
+      : engine();
+    e.valueIndex.upsertProperty('events', 'result_of_event_data', {
+      distinctCount: 4, totalCount: 20,
+      values: [{ value: 'win', freq: 8 }, { value: 'lose', freq: 5 }, { value: 'draw', freq: 5 }, { value: 'abort', freq: 2 }],
+    });
+    const order = async (order_by) => (await e.semantic_index({ source: 'events', property: 'result_of_event_data', ...(order_by ? { order_by } : {}) })).sample_values.map((v) => v.value);
+    const at = sqlite ? 'sqlite' : 'memory';
+    // the default: most frequent first, a tie by the value ascending
+    assert.deepEqual(await order(), ['win', 'draw', 'lose', 'abort'], at);
+    assert.deepEqual(await order([{ key: 'freq' }]), ['win', 'draw', 'lose', 'abort'], at);
+    // a second item orders the tie
+    assert.deepEqual(await order([{ key: 'freq' }, { key: 'value', direction: 'desc' }]), ['win', 'lose', 'draw', 'abort'], at);
+    assert.deepEqual(await order([{ key: 'freq', direction: 'asc' }, { key: 'value' }]), ['abort', 'draw', 'lose', 'win'], at);
+    assert.deepEqual(await order([{ key: 'value' }]), ['abort', 'draw', 'lose', 'win'], at);
+    assert.deepEqual(await order([{ key: 'value', direction: 'desc' }]), ['win', 'lose', 'draw', 'abort'], at);
+    const stats = (await e.semantic_index({ source: 'events', property: 'result_of_event_data', order_by: [{ key: 'freq' }, { key: 'value', direction: 'desc' }] })).value_stats;
+    assert.deepEqual(stats.order_by, [{ key: 'freq', direction: 'desc' }, { key: 'value', direction: 'desc' }], at);
+    // one key named twice orders nothing new: refused, not read once and ignored once
+    await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', order_by: [{ key: 'freq' }, { key: 'freq', direction: 'asc' }] }), /names 'freq' twice/);
+    // the values are distinct, so a second item after 'value' has no tie to order: refused, not ignored
+    await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', order_by: [{ key: 'value' }, { key: 'freq', direction: 'asc' }] }), /nothing after 'value' has a tie to order/);
+    // the earlier scalar order_by and its sibling direction are no spellings of it
+    await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', order_by: 'value' }), /invalid input/);
+    await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', direction: 'asc' }), /invalid input/);
+    e.close?.();
+  }
+});
+
+// include: ['coverage'] switches on the per-event and per-app split, which only an event property has:
+// a model's column is the { source, column } view, which takes no include.
+test('semantic_index: include coverage is offered on an event property alone', async () => {
+  const e = engine();
+  await assert.rejects(() => e.semantic_index({ source: 'users', column: 'country', include: ['coverage'] }), (err) => {
+    assert.match(err.message, /unexpected property 'include' — \{ source, column \} takes source, column, limit, offset, order_by, recent/);
+    assert.doesNotMatch(err.message, /`source` must be "events"/);
+    return true;
+  });
+  assert.equal((await e.semantic_index({ source: 'events', property: 'result_of_event_data', include: ['coverage'] })).property, 'result_of_event_data');
+  // what the list holds is the view's enum, each item once
+  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', include: ['yaml'] }), /invalid input/);
+  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', include: ['coverage', 'coverage'] }), /invalid input/);
+});
+
+// A model's column and an event property are two views, each named as the expression's leaves name
+// them: users.country is { source: 'users', column: 'country' }, an event's payload a { property }. The
+// events source's event column is a column too, answered with the events it declares.
+test('semantic_index({ source, column }): a model column is `column`, an event property `property`', async () => {
+  const e = engine();
+  const country = await e.semantic_index({ source: 'users', column: 'country' });
+  assert.equal(country.column, 'country');
+  assert.equal(country.source, 'users');
+  assert.equal(country.property, undefined, 'the answer speaks the view\'s spelling');
+  const events = await e.semantic_index({ source: 'events', column: 'event_name' });
+  assert.ok(events.values.includes('ad_finished'), JSON.stringify(events.values));
+  // the earlier { source, property } for a model's column is told the field's name here
+  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'country' }), /here that field is called 'column'/);
+  // and the overview lists the column view among the views
+  assert.ok((await e.semantic_index()).views.some((v) => v.view === 'column'));
 });
 
 // The SOURCE is ALWAYS a separate, named argument — in every catalog, however many sources it
@@ -123,7 +189,7 @@ const SECOND_SOURCE = `  - name: fct_crash
 `;
 
 function engineFor(yaml) {
-  const dir = mkdtempSync(join(tmpdir(), 'srcarg-'));
+  const dir = tempDir('srcarg');
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   return settle(new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) }));
@@ -148,6 +214,18 @@ test('semantic_index: an event or a column is never asked for without its source
   await assert.rejects(() => two.semantic_index({ source: 'events', event: 'boom' }), /`event` must be one of: login, purchase/);
 
   // A COLUMN is addressed the same way: a bare name has no spelling in either catalog.
-  await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
-  await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
+  await assert.rejects(() => one.semantic_index({ column: 'event_name' }), /\{ source, column \}.*missing required property 'source'/);
+  await assert.rejects(() => two.semantic_index({ column: 'event_name' }), /\{ source, column \}.*missing required property 'source'/);
+  assert.equal((await two.semantic_index({ source: 'crashlytics', column: 'event_name' })).column, 'event_name');
+});
+
+test('semantic_index({ views }): several drill-ins in one call, each as it answers alone', async () => {
+  const e = engine();
+  const alone = [await e.semantic_index({ source: 'events', event: 'ad_finished' }), await e.semantic_index({ source: 'users' })];
+  const both = await e.semantic_index({ views: [{ source: 'events', event: 'ad_finished' }, { source: 'users' }] });
+  assert.deepEqual(both.views, alone);
+  // only drill-ins, 2 to 5 of them, and a view of the batch is checked like one on its own
+  await assert.rejects(() => e.semantic_index({ views: [{ status: true }, { source: 'users' }] }), /invalid input/);
+  await assert.rejects(() => e.semantic_index({ views: [{ source: 'users' }] }), /invalid input/);
+  await assert.rejects(() => e.semantic_index({ views: [{ source: 'users' }, { source: 'events', event: 'no_such_event' }] }), /invalid input/);
 });

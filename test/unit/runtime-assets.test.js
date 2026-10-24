@@ -1,6 +1,6 @@
 // A BUILD check, and the reason it exists: the server shells out to two Python scripts that no
 // JavaScript imports — python/ast_gate.py (the static gate over a python stage) and
-// python/mf_group_bys.py (what MetricFlow says a metric can be grouped by). The image was built with `COPY src ./src`
+// python/mf_server.py (MetricFlow kept warm: every metric query). The image was built with `COPY src ./src`
 // alone, so both were missing in production and the first python stage died with
 //
 //   ast gate failed (python3 exit 2): can't open file '/app/python/ast_gate.py'
@@ -37,6 +37,17 @@ test('the Dockerfile copies every directory a runtime asset lives in', () => {
     const dir = a.repoPath.split('/')[0];
     assert.ok(copied.has(dir), `${name} lives in ${dir}/, which the Dockerfile never COPYs (it copies: ${[...copied].join(', ')})`);
   }
+});
+
+// A production failure of the same kind: Node ran as the container's PID 1, which the kernel hands every
+// orphaned process to — and Node reaps only the processes it started itself, so each dbt / Python run left
+// a zombie (1,687 in three days), and it ignored SIGTERM. PID 1 is an init that reaps and forwards signals.
+test('the image runs the server under an init that reaps orphaned processes (tini as PID 1)', () => {
+  const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+  const entry = dockerfile.match(/^ENTRYPOINT\s+(\[.*\])\s*$/m);
+  assert.ok(entry, 'the Dockerfile declares no ENTRYPOINT: Node would be PID 1');
+  assert.deepEqual(JSON.parse(entry[1]), ['/usr/bin/tini', '--']);
+  assert.match(dockerfile, /apt-get install[^\n]*\btini\b/, 'tini is not installed in the image');
 });
 
 // …and the same directory must not be excluded on the way in.

@@ -21,7 +21,7 @@ import { TaskRegistry } from './tasks.js';
 
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
 const RESULT_CARDS = `RESULT CARDS
-In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ request: { task_ids } }) or query_pipeline_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
+In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with query_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
 
 /** Where the skills are served: the root every skill URI shares, so the core names it at one length however many there are. */
 function skillRoot(uris) {
@@ -42,13 +42,13 @@ function skillRoot(uris) {
  */
 function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = {}) {
   return [
-    `Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_semantic_model / query_pipeline_model. Warehouse work returns a task_id at once; read it back with the same side\'s query tool. ${SELF_REFUSAL_BRIEF}.`,
+    `Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_model (a one-off table — funnels, sessions, pivots — or, as its last step, reusable named metrics) → query_model. Warehouse work returns a task_id at once; read it back with query_model. ${SELF_REFUSAL_BRIEF}.`,
     '',
     'Every tool takes its input as tool({ request: { … } }); a bare shape below is its content.',
     `semantic_index({ request: {} }) lists the catalog\'s sources and models; { guide: true } the workflow and which tool fits a question. A read ({ task_ids }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
     '',
     SELF_REFUSAL,
-    'Name the events source in every call (sources are never mixed); user attributes are on the users model ({ model: "users", attribute }), and joins follow the declared relationships: you never state join columns.',
+    'Name the events source in every call (sources are never mixed); user attributes are on the users model ({ source: "users", column }), and joins follow the declared relationships: you never state join columns.',
     `For ${RESEARCH_SCOPE}, first read ${RESEARCH_ROUTE}.`,
     'Answer as soon as a result answers the question; query again for numbers that look wrong or another cut, not to re-confirm a result you have.',
     ...featureLines,
@@ -63,13 +63,13 @@ function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = 
 const SERVER_DESCRIPTION = `Below: the data model and how its sources join.
 
 DATA MODEL (fixed roles)
-- events source: one row per event — a user id, a session id, an event timestamp (the time axis), an event_name and typed event-data properties. Only per-event columns live here. A catalog may declare several events sources (e.g. product analytics events and crash reports). They are independent and equal: each owns its event vocabulary, its payload properties and its own indexed values, none is a default, and they are never mixed. The semantic_index overview lists them under "facts" with each one's own event_names. Name the source you mean in every call — semantic_index({ request: { source, event } }) / ({ source, property }), build_pipeline_model({ request: { source } }), build_semantic_model({ request: { semantic_models: [{ from: <source> }] } }) — so a name always has one owner. Within a source, event and property names are used as-is. Choose the source that records what the question is about.
-- users dimension: one row per user — attributes (country, platform, media_source, acquisition_type, install_date, ...). It is reached by a join: group or filter by { model: 'users', attribute } in metric queries (declare use_base_models: ['users']), or add a join stage in pipelines. User attributes are not columns of the fact.
-- experiments: one row per user×experiment (experiment_name, variant_group, assigned_at, ended_at) — join to events by the user entity, window to the assignment period, aggregate per group, then experiment({ request: { action: check_split | analyze } }).
-- measures sources (optional): a non-events fact whose columns are amounts rather than events (e.g. acquisition spend at one row per player x day). It has no event_name; it declares its own time axis, and the catalog marks which of its fields are amounts — semantic_index({ request: { model } }) lists them under "aggregatable" with their unit and meaning. No aggregation is fixed: name the field in a measure's "field" and choose "agg" (sum / average / max / median / percentile / count_distinct) per question. It carries the user entity, so { model: 'users', attribute } segments it too. In a pipeline it joins an events source by the player key alone (via the declared relationship): one player has many events and several dated rows, so that pairing is many-to-many by design — use it to carry an attribute (channel, campaign) onto events, and aggregate the source itself to total an amount, since totals over the many-to-many join would be inflated.
+- events source: one row per event — a user id, a session id, an event timestamp (the time axis), an event_name and typed event-data properties. Only per-event columns live here. A catalog may declare several events sources (e.g. product analytics events and crash reports). They are independent and equal: each owns its event vocabulary, its payload properties and its own indexed values, none is a default, and they are never mixed. The semantic_index overview lists them under "facts" with each one's own event_names. Name the source you mean in every call — semantic_index({ request: { source, event } }) / ({ source, property }), build_model({ request: { source } }), a semantic_model measure's { source } — so a name always has one owner. Within a source, event and property names are used as-is. Choose the source that records what the question is about.
+- users dimension: one row per user — attributes (country, platform, media_source, acquisition_type, install_date, ...). It is reached by a join: group or filter by { source: 'users', column } in metric queries (the build's semantic_model step joins users on its contract), or add a join stage in pipelines — after which a joined attribute is a column of the rows, named by its plain name (country) or the name the join gives it. User attributes are not columns of the fact.
+- experiments: one row per user×experiment — the experiment's name, the user's variant group and when the user was assigned (and when it ended, where the catalog keeps that; semantic_index({ request: { source } }) names its columns) — join to events by the user entity, window to the assignment period, aggregate per group, then experiment({ request: { action: check_split | analyze } }).
+- measures sources (optional): a non-events fact whose columns are amounts rather than events (e.g. acquisition spend per player, or per player and day — its grain is the catalog's word: semantic_index({ request: { source } })). It has no event_name; it declares its own time axis, and the catalog marks which of its fields are amounts — semantic_index({ request: { source } }) lists them under "aggregatable" with their unit and meaning. No aggregation is fixed: a measure's expr chooses the function per question and names the column it folds — { fn: "sum" | "average" | "max" | "median" | "percentile" | "count_distinct", args: [{ column }] }. It carries the user entity, so { source: 'users', column } segments it too. In a pipeline it joins onto events by the join contract it declares (the player, or the player AND the day where it holds a row per day) — so each event meets one row; the join carries its attributes (channel, campaign), while its amounts are measures of the semantic layer, compared beside the events on metric_time.
 
 JOINS BETWEEN SOURCES
-Relationships are declared in the catalog: each has a name, and its key columns live in the schema. Group by { model: '<the model that carries the attribute>', attribute } in a metric query (with that model in use_base_models; add via when several relationships lead to it), or join with via: '<relationship>' in a pipeline. A key may span several columns and the two sides may name their columns differently — only the relationship name and the number of key parts have to agree. A relationship that no model owns has no governed path (MetricFlow joins only onto a unique key) and is a pipeline join; that is correct rather than a limitation. semantic_index({ request: { model } }) lists a model's relationships, their key columns and what each points at. Two events sources are joined the same way — in a pipeline, since a row-to-row match between two event streams is many-to-many. When a source carries several alternative key columns for one relationship (one tracking id per ad format), each is listed as its own relationship <name>_<variant>; pick the one the question is about. The users dimension may be slowly-changing (several versions per player, each with a validity window): joining it on the player key alone matches every version and inflates counts, so a pipeline join adds between: { value: <this source's time column>, from: <validity start>, to: <validity end> }. A metric query needs nothing — MetricFlow applies the window itself.
+Relationships are declared in the catalog: each has a name, and its key columns live in the schema. Group by { source: '<the model that carries the column>', column } in a metric query (the build's semantic_model step joins that model: join: [{ source, on }]; add via when several relationships lead to it). A key may span several columns and the two sides may name their columns differently — only the relationship name and the number of key parts have to agree. Onto a pipeline's rows a model is joined only by the join contract it declares: { stage: 'join', source, on: { <part>: <a column of the rows | a value> }, attrs } names every part, a key part and the time a column of the rows; a model that declares no contract is not joinable (an events source usually declares none: it has many rows per player). semantic_index({ request: { source } }) lists a model's relationships and its contract. When a source carries several alternative key columns for one relationship (one tracking id per ad format), each is listed as its own relationship <name>_<variant>; pick the one the question is about. The users dimension may be slowly-changing (several versions per player, each with a validity window): its contract's time part matches the version valid at the time you name, so counts do not inflate. A metric query needs nothing — MetricFlow applies the window itself, matching the version valid at the start of each row's day (it compares the day, the window's end exclusive); a pipeline join matches the row's own time, the end inclusive — so on a day a version changes the two can differ.
 Funnels and sequences are built from events (a step = an event + an event_data property value) and run over one source, since a row-pattern match scans one table. Metrics from different sources can still be compared side by side when grouped by metric_time.
 
 WHERE THE DETAIL IS
@@ -81,7 +81,7 @@ WHERE THE DETAIL IS
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
-const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (one or more events facts + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_semantic_model / query_pipeline_model.';
+const SERVER_SUMMARY = 'Semantic layer for product analytics over a fixed data catalog (events sources, a user-attributes dimension, experiment assignments, spend): declare reusable metrics, or build one-off tables — funnels, sessions, pivots — and query them by name; the server writes and runs the SQL. Start with semantic_index, then build_model, then query_model.';
 
 // WHAT A TOOL IS — its title, description, annotations, the task side it starts
 // and reads, whether it draws — is its definition (src/tools/define.js): the core's in
@@ -163,7 +163,7 @@ export function toCallToolResult(result, name, args, engine = null) {
   // say (a feature view's forModel — every record is the card's, not the conversation's)
   const forModel = structured && !declared && typeof def?.view?.forModel === 'function' ? def.view.forModel(result, args) : result;
   return {
-    content: [{ type: 'text', text: JSON.stringify(forModel, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(forModel) }],
     ...(structured ? { structuredContent: result } : {}),
     // a result the engine RETURNED as a failure ({ ok: false, error }) — a build that failed, a
     // query the warehouse refused — is a tool execution error like a thrown one (spec: isError)
@@ -188,7 +188,15 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   // (the arguments are kept as they came, so a failure is replayed by the same call)
   // (a call refused for not using the envelope still carried its ids — at the top)
   const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
-  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
+  // the task a refusal is about: the one id of the call, or among several the one its field names (task_ids.2)
+  const taskOf = (x, field) => {
+    if (typeof x.task_id === 'string') return x.task_id;
+    const ids = Array.isArray(x.task_ids) ? x.task_ids : [];
+    const at = /task_ids[.[](\d+)/.exec(String(field ?? ''))?.[1];
+    const id = at !== undefined ? ids[Number(at)] : ids.length === 1 ? ids[0] : null;
+    return typeof id === 'string' ? id : null;
+  };
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : null, task_id: taskOf(inner, field) });
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');
     failed(name, unknownToolMessage(name), { stage: 'validate' });
@@ -211,7 +219,9 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   if (!renders && def.appsOnly && !def.appCallable) {
     logLine(name, '✗ from a client without the Apps extension');
     failed(name, `${name} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate' });
-    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_ids })`, 'validate'), raw: null };
+    // (read with the query tool of the same part of the server: a feature's own, or the core's)
+    const reader = [...toolsOf(engine).values()].find((t) => t.reads && (t.feature ?? null) === (def.feature ?? null))?.name || 'query_model';
+    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with ${reader} ({ task_ids }) and answer in words`, 'validate'), raw: null };
   }
   const cardField = def.cardField;
   // (only a card ASKED for: `false` asks for none, which every client already gets)
@@ -327,7 +337,7 @@ function summarizeResult(result) {
 
 export function errorResult(message, stage, field, code) {
   const payload = { ok: false, error: { stage: stage || 'error', message, ...(field ? { field } : {}), ...(code ? { code } : {}) } };
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
+  return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: true };
 }
 
 /**

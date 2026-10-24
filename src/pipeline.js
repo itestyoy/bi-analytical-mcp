@@ -20,13 +20,12 @@
 // Modeled on BigQuery pipe syntax (FROM t |> WHERE … |> EXTEND … |> AGGREGATE …).
 // See: https://medium.com/google-cloud/bigquery-pipe-syntax-by-example-blasetta-0f3df50ba331
 //
-//   where      |> WHERE      filter rows by column conditions.
+//   where      |> WHERE      filter rows by conditions (expressions that are true or false).
 //                            Solves: scope to an event / segment / time window.
-//   derive     |> EXTEND     add ONE scalar column FROM an event_data JSON property
-//                            (extract a scalar; array_length / contains / struct_field
-//                            for complex props). Solves: surface a payload field as a column.
-//   compute    |> EXTEND     add ONE column FROM existing columns + literals:
-//                            const (literal number/string/bool), arithmetic (+ - * /),
+//   compute    |> EXTEND     add ONE column FROM existing columns, event properties + literals:
+//                            { property } (a scalar, or one field of a JSON object) /
+//                            array_length / array_contains — a payload field as a column;
+//                            a condition (a flag), arithmetic (+ - * /),
 //                            round/floor/ceil/abs, coalesce/least/greatest, cast,
 //                            STRING fns (concat/upper/lower/length/substring/trim/replace),
 //                            date_diff / date_trunc / date_part, elapsed_days (whole 24h days
@@ -42,27 +41,30 @@
 //                            Solves: per-element frequency (items collected, rewards).
 //   join       |> JOIN       1-hop join to another catalog model on a shared entity.
 //                            Solves: bring user attributes (country/platform/install_date).
-//   aggregate  |> AGGREGATE  group + measures: sum/average/min/max/count/count_distinct,
-//                            approx_count_distinct (HLL++), stddev/variance/median/
-//                            percentile(q). Solves: totals, rates, distributions,
-//                            DAU/MAU (count_distinct), fast approximate uniques, revenue, ARPU.
-//   pivot      |> PIVOT      turn listed values of a column into columns.
-//                            Solves: dashboard-ready matrices (revenue per country column).
+//   aggregate  |> AGGREGATE  group + measures { name, expr }: aggregates (sum/average/min/max/count/
+//                            count_distinct, approx_count_distinct (HLL++), stddev/variance/median/
+//                            percentile, a conditional one over a case) and formulas over them.
+//                            Solves: totals, rates, distributions, DAU/MAU (count_distinct), fast
+//                            approximate uniques, revenue, ARPU / ARPPU.
+//   pivot      |> AGGREGATE  turn listed values of a column into columns: the measure with each
+//                            value's condition folded into its aggregates' case. Solves: dashboard-ready
+//                            matrices (revenue per country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
-//   sample     |> TABLESAMPLE  keep ~N% of rows for a FAST approximate first estimate
-//                            on large data (BigQuery TABLESAMPLE SYSTEM; DuckDB random()).
+//   sample     |> WHERE RAND() keep a share of the rows for a FAST approximate first estimate
+//                            on large data (a row-level sample: BigQuery RAND(), DuckDB random()).
 //   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
 //   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
 //                            funnel; TERMINAL stage → one row per user/session match.
 //                            Solves: ordered multi-step funnels, conversion, time-between-steps.
 
 import { getDialect } from './dialects/index.js';
-import { partitionConditions } from './time-range.js';
-import { physicalColumnType } from './catalog/column-types.js';
+import { partitionConditions, localToUtc, resolveTimeRange } from './time-range.js';
+import { physicalColumnType, groundedType } from './catalog/column-types.js';
 import { currentSpelling } from './pipeline/earlier.js';
-import { STAGES, registerStage, stageDef, listSome, stageDefs, pipelineStageSchema } from './pipeline/stages.js';
-export { registerStage, stageDef, listSome, stageDefs, pipelineStageSchema };
+import { comparisonOf } from './pipeline/compute.js';
+import { STAGES, STAGE_PLACES, registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt, offeredStep } from './pipeline/stages.js';
+export { registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt, STAGE_PLACES };
 
 /**
  * WHAT A WAREHOUSE FAILURE MEANS FOR THE SHAPE OF A PIPELINE — the hint a failed SQL build is
@@ -97,12 +99,12 @@ function sourceColumns(catalog, key, physicalCols = null) {
   if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
   // …and, when the warehouse said what each is, the type it HAS — a declared type is only what the
   // schema says, and a constant written for the wrong one fails in the warehouse (STRING = BOOL)
+  // (by the catalog's one rule: a JSON payload, and an array the warehouse names no items of, keep theirs)
   if (physicalCols?.types) {
     for (const [name, c] of cols) {
       const dtype = physicalCols.types.get(name.toLowerCase());
-      if (!dtype || c.type === 'json' || c.type === 'array') continue;
-      const physical = physicalColumnType(dtype);
-      if (physical !== 'unknown') cols.set(name, { ...c, type: physical, physical: true });
+      const physical = dtype ? physicalColumnType(dtype) : 'unknown';
+      if (physical !== 'unknown' && groundedType(c.type, physical) === physical) cols.set(name, { ...c, type: physical, physical: true });
     }
   }
   return cols;
@@ -112,33 +114,51 @@ function sourceColumns(catalog, key, physicalCols = null) {
 // is the catalog model the pipeline reads FROM: stages that name an event or an
 // event_data property resolve it against THAT fact, so a multi-fact catalog cannot
 // silently mix one fact's payload into another fact's pipeline.
-function buildOps(catalog, d, baseColumns, stages, source) {
+function buildOps(catalog, d, baseColumns, stages, source, physical = null, spelled = null) {
   let cols = new Map(baseColumns);
   const ops = [];
-  for (const st of stages) {
-    const def = STAGES[st.stage];
+  for (const stored of stages) {
+    // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js) —
+    // its stage too, which an earlier version may have named otherwise — resolved against the columns
+    // before it, and reported (`spelled`) so a draft keeps it in that spelling from now on
+    const st = currentSpelling(stored, { cols, catalog, source });
+    spelled?.set(stored, st);
+    const def = st && Object.hasOwn(STAGES, st.stage) ? STAGES[st.stage] : null;
     if (!def) {
       // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never
       // arrived. Say that, because the usual cause is on the way in (a large payload cut short by
       // the client), and "unknown stage: undefined" sends the reader to the schema instead.
       if (st?.stage === undefined) {
-        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_step`);
+        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_steps`);
       }
+      // a step another place takes — no stage of the registry (a metric query's metrics step, kept in a
+      // draft or a recipe) — is refused as a build's place refuses it, naming the place and where it belongs
+      if (offeredStep(st.stage)) stageAt(STAGE_PLACES.build, st);
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
-    // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js)
-    const res = def.build({ d, catalog, cols, source }, currentSpelling(st));
-    ops.push(res.op);
+    // (a stage lowers to one op, or to several — an unnest of a computed array); its expressions stand
+    // over a source's rows (src/pipeline/compute.js PLACES)
+    const res = def.build({ d, catalog, cols, source, physical, place: 'source_rows' }, st);
+    ops.push(...(res.ops || [res.op]));
     cols = res.cols;
   }
   return { ops, cols };
 }
 
-/** A tracked column set from a stored column list ([{ name, type }]) or an existing Map. */
+/** A tracked column set from a stored column list ([{ name, type, physical? }]) or an existing Map. */
 export function columnMap(columns) {
   if (columns instanceof Map) return new Map(columns);
-  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown' }]));
+  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown', ...(c.physical ? { physical: true } : {}) }]));
+}
+
+/**
+ * A tracked column set as a list to store (a checkpoint's, a task's table) — what columnMap reads
+ * back. `physical` (the type is the warehouse's own) is kept, so a constant compared with a column of
+ * that table is written as it was against the source: a flag stored as text stays text.
+ */
+export function columnList(columns) {
+  return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown', ...(c?.physical ? { physical: true } : {}) }));
 }
 
 /**
@@ -149,27 +169,37 @@ export function columnMap(columns) {
  * axis stays the exact bound; the new condition only lets the warehouse skip the other days. The
  * rows are the source's while every stage before the `where` declares `keepsSourceRows` (its rows
  * are source rows — a subset, perhaps with columns added — not groups or reshaped ones).
+ * The days are the warehouse clock's (UTC), as a window's bound is read with no timezone
+ * (resolveTimeRange): a constant with a time and an offset of its own (Z, ±hh[:mm]) is the UTC instant it
+ * is, so '2024-01-05T02:00:00+05:00' touches 2024-01-04; a date, or a date-time without one, stands as
+ * written; what is no moment (localToUtc: null) is left as it is.
  */
-function boundPartitions(m, stages, cols) {
+function boundPartitions(m, stages, cols, ctx = {}) {
   const time = m.time?.column; const part = m.partition_column;
   if (!time || !part || part === time || !cols.has(part)) return stages;
   const out = [];
   let leading = true;
   for (const st of stages) {
-    if (leading && !STAGES[st.stage]?.keepsSourceRows) leading = false;
-    if (!leading || st.stage !== 'where' || (st.conditions || []).some((c) => (c.column ?? c.left?.column) === part)) { out.push(st); continue; }
+    // (read in this version's spelling — against the source, as the build reads it: a kept where bounds
+    // the window as a new one does)
+    const cur = currentSpelling(st, ctx);
+    if (leading && !stageDef(cur?.stage)?.keepsSourceRows) leading = false;
+    // a where of its own on the partition column prunes already; one naming it inside an or / a not does not
+    if (!leading || cur?.stage !== 'where' || (cur.conditions || []).some((c) => comparisonOf(c)?.subject.column === part)) { out.push(st); continue; }
     const extra = [];
-    for (const c of st.conditions || []) {
-      if (c.column !== time || c.value === undefined || c.value === null) continue;
-      const v = c.value;
-      const b = c.op === 'gte' || c.op === 'gt' ? { start: v }
-        : c.op === 'lt' ? { endExclusive: v }
-          : c.op === 'lte' ? { end: v }
-            : c.op === 'eq' ? { start: v, end: v }
-              : c.op === 'between' && Array.isArray(v) ? { start: v[0], end: v[1] } : null;
+    // a condition of the where's own list (an and of them all) comparing the time axis with constants
+    for (const c of cur.conditions || []) {
+      const cmp = comparisonOf(c);
+      if (cmp?.subject.column !== time || cmp.values.some((v) => v === null)) continue;
+      const [v, w] = cmp.values.map((x) => (localToUtc(x) == null ? x : resolveTimeRange({ start: x }).start));
+      const b = cmp.op === 'gte' || cmp.op === 'gt' ? { start: v }
+        : cmp.op === 'lt' ? { endExclusive: v }
+          : cmp.op === 'lte' ? { end: v }
+            : cmp.op === 'eq' ? { start: v, end: v }
+              : cmp.op === 'between' ? { start: v, end: w } : null;
       if (b) extra.push(...partitionConditions(m, b));
     }
-    out.push(extra.length ? { ...st, conditions: [...st.conditions, ...extra] } : st);
+    out.push(extra.length ? { ...cur, conditions: [...cur.conditions, ...extra] } : st);
   }
   return out;
 }
@@ -189,14 +219,17 @@ function boundPartitions(m, stages, cols) {
  * ones that still have to run — the prefix is the table. `source` is still the catalog source the
  * stages resolve their event/property semantics against; a stage that needs a column the built
  * relation no longer carries fails as a normal "unknown column".
- * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql }
+ * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql, current }
  *   `columns` = the final tracked column set (Map); `sql` = the LAST SQL model's text (the whole
- *   pipeline when there is no python stage).
+ *   pipeline when there is no python stage); `current` = each stage given (by identity) → the same
+ *   stage in this version's spelling, as it was built (src/pipeline/earlier.js).
  */
 export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe', from = null } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
-  if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols));
+  const given = stages;
+  if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols), { catalog, source });
+  const spelled = new Map();
   // Cut the stage list at every python stage.
   const segments = []; let cur = [];
   for (const st of stages) {
@@ -210,7 +243,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     seg.input = input;
     const baseRelation = `{{ ref('${input}') }}`;
     if (seg.kind === 'sql') {
-      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
+      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source, physicalCols, spelled);
       // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
       // CTEs on DuckDB — whether it reads the source or the model a python stage produced.
       seg.sql = d.renderPipeline(baseRelation, ops);
@@ -219,10 +252,50 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
       const def = STAGES[seg.stage.stage];
       if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : 'the python stage is not available on this warehouse');
       cols = def.build({ d, catalog, cols, source }, seg.stage).cols;
+      spelled.set(seg.stage, currentSpelling(seg.stage));
     }
     seg.columns = cols;
     input = seg.model;
   });
   const lastSql = [...segments].reverse().find((seg) => seg.kind === 'sql');
-  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null };
+  // each given stage in this version's spelling — a where the partition bound was added to as written
+  // (the bound is the render's, not the step's), respelled on its own: a where reads no columns to resolve
+  const current = new Map(given.map((st, i) => [st, stages[i] === st ? (spelled.get(st) ?? st) : currentSpelling(st, { catalog, source })]));
+  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null, current };
+}
+
+/**
+ * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_model and a card's
+ * drill run, and the steps after a metric query's metrics step: the stages a read takes (STAGE_PLACES.read
+ * — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project; checked first at
+ * STAGE_PLACES.metric_result after a metrics step, the same list), built by the stage builders over
+ * the relation's columns and rendered by the dialect into one statement over `relation`; nothing is
+ * materialized, its rows are the answer. Its expressions stand over stored rows (src/pipeline/compute.js
+ * PLACES.stored_rows): raw SQL and a { property } are a build's, and the relation has no source, so an
+ * { entity } partition is refused too; a stage that makes a new table (a join, an unnest, a funnel, a
+ * python model) is a build from the task instead. Each is refused as the step is built, before any SQL.
+ *   catalog   — whose dialect writes the SQL (`dialect` names another);
+ *   relation  — what is read, as SQL a FROM takes: a stored table (`{{ ref('…') }}`), or a query as a
+ *               parenthesized, aliased subquery (`(\n<sql>\n) AS _q`) whose columns carry the names the
+ *               steps use;
+ *   columns   — its columns: [{ name, type?, physical? }] or a tracked Map (a type a constant is
+ *               written in; 'unknown' when it is not known);
+ *   steps     — the read's steps, each a stage (an empty list reads the relation as it is).
+ * → { sql, columns (Map name → { type }), ordered (its last step that is not a limit is an order_by) }.
+ * A refusal is an Error whose message names the step (`steps[i]: …`).
+ */
+export function renderRead(catalog, relation, columns, steps = [], { dialect = catalog.dialect } = {}) {
+  const d = getDialect(dialect);
+  let cols = columnMap(columns);
+  const ops = [];
+  steps.forEach((st, i) => {
+    stageAt(STAGE_PLACES.read, st, `steps[${i}]`);
+    let res;
+    try { res = STAGES[st.stage].build({ d, catalog, cols, source: null, physical: null, place: 'stored_rows' }, st); }
+    catch (e) { throw new Error(`steps[${i}]: ${e.message}`); }
+    ops.push(...(res.ops || [res.op]));
+    cols = res.cols;
+  });
+  const last = [...steps].reverse().find((st) => st?.stage !== 'limit');
+  return { sql: d.renderPipeline(relation, ops), columns: cols, ordered: last?.stage === 'order_by' };
 }

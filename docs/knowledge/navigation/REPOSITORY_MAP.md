@@ -29,10 +29,10 @@ Fast entrypoint for the repository: one line per area.
 | Engine | `src/engine.js`, `src/engine/` | One file per tool family; services (`tasks`, `notes`, `advisor`, `probe`, `indexViews`) |
 | Task runtime | `src/task-runner.js`, `src/jobs.js`, `src/tasks.js` | Tasks, batches, reads, cancel |
 | Catalog | `src/catalog.js`, `src/catalog/` | Roles, entities, measures, grounding against the warehouse |
-| Semantic layer | `src/compile.js`, `src/yaml-render.js`, `src/semantic-latest.js`, `src/semantic-manifest.js`, `src/project-semantics.js`, `src/group-by-items.js`, `src/predicate.js` | Declarations → YAML → MetricFlow; the project's own layer |
-| Pipelines | `src/pipeline.js`, `src/pipeline/`, `src/match-recognize.js`, `src/projection.js`, `src/python-model.js` | Stages, expressions, conditions, funnels, reads of stored tables |
-| Conditions | `src/conditions.js` | The one comparison writer and condition-list rendering |
-| dbt | `src/dbt/` | dbt client (v1 / v2), environments and their pinned specs |
+| Semantic layer | `src/compile.js`, `src/yaml-render.js`, `src/semantic-latest.js`, `src/semantic-manifest.js`, `src/project-semantics.js`, `src/group-by-items.js`, `src/predicate.js` | Declarations → YAML → MetricFlow; the project's own layer; a metric query's where steps (`predicate.js`) |
+| Expression grammar | `src/pipeline/compute.js`, `src/conditions.js`, `src/schema-kit.js`, `src/earlier-spelling.js` | The one grammar of conditions, measures and computed values: the function table and its schema builder / SQL writer (`compute.js`), the comparison writer (`conditions.js`), slot and measure forms (`schema-kit.js`), every converter from an earlier spelling (`earlier-spelling.js`) |
+| Pipelines | `src/pipeline.js`, `src/pipeline/`, `src/match-recognize.js`, `src/python-model.js` | Stages, funnels, python stages, and reads of stored tables in the same stages (`renderRead`) |
+| dbt | `src/dbt/` | dbt client (v1 / v2), MetricFlow kept warm (`metricflow-server.js`), environments and their pinned specs |
 | Dialects | `src/dialects/` | DuckDB and BigQuery SQL |
 | Store | `src/store.js`, `src/error-log.js`, `src/memory.js`, `src/value-index*.js` | SQLite store: tasks, value index, memory, errors |
 | Guides | `src/guide.js`, `src/research-guides.js`, `src/python-guide.js`, `src/recipes.js`, `config/recipes.json` | What `semantic_index({ guide | recipe })` serves |
@@ -40,7 +40,7 @@ Fast entrypoint for the repository: one line per area.
 | Feature | `src/retentioneering/`, `python/retentioneering_*.py` | Path analysis feature |
 | Settings | `src/settings.js`, `src/config.js`, `.env.example` | Every environment variable, one row each |
 | Config | `config/` | Catalog, recipes, generated facts sheets |
-| Python | `python/` | MetricFlow group-bys, the python-stage AST gate, retentioneering models |
+| Python | `python/` | MetricFlow kept warm (`mf_server.py`: metric queries, group-bys), the python-stage AST gate, retentioneering models |
 | Scripts | `scripts/` | Facts generators, dbt environments, name lint, `.env.example` |
 | Tests | `test/unit/`, `test/integration/`, `test/helpers/` | Unit guards; integration on DuckDB + dbt + MetricFlow |
 | Evals | `evals/` | Golden questions through the tools; `eval:check` holds their truths |

@@ -48,7 +48,8 @@ export function detached(fn) {
 /**
  * Run `fn` as one of several tasks working on ONE context at the same time (a batch of queries):
  * every dbt process it starts writes its artifacts to a target directory of its own, so two of
- * them never write the same target/ files at once (src/dbt/v1.js reads this).
+ * them never write the same target/ files at once (src/dbt/v1.js reads this). dbt v2's client runs
+ * every show this way too (src/dbt/v2.js).
  */
 export function isolatedTarget(fn) {
   return storage.run({ ...(storage.getStore() || {}), isolated: true }, fn);

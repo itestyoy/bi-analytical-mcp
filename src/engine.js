@@ -18,21 +18,21 @@
 //                                 (context, delete_context, memory, time, experiment, explore_errors), the time spine
 //   engine/semantic-index.js      semantic_index and its catalog views, recipes
 //   engine/semantic-build.js      build / update / delete a semantic model, a pipeline model
-//   engine/semantic-query.js      query_semantic_model: references, the metric-query shell
-//   engine/semantic-preview.js    preview_semantic_model
-//   engine/pipeline-draft.js      build_pipeline_model's draft: steps, checkpoints, preview
+//   engine/semantic-query.js      query_model: references, the metric-query shell
+//   engine/semantic-preview.js    a context's semantic layer as parsed (context describe)
+//   engine/pipeline-draft.js      build_model's draft: steps, checkpoints, preview
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
-//   engine/task-results.js        reading a task back, query_pipeline_model, display_model_result
+//   engine/task-results.js        reading a task back, query_model, display_model_result
 
 import { buildSchemas, transportSchema, MAX_WAIT_SECONDS, METHOD_CONTRACTS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
-import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
+import { makeValidators, validateInput, ToolError, RESULT_GONE, UNKNOWN_TASK } from './validate.js';
 import { abTest, srmCheck, sampleSize } from './experiment.js';
 import { TaskRunner } from './task-runner.js';
 import { PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
 import { ContextManager } from './context-manager.js';
-import { renderPredicate } from './predicate.js';
+import { whereSql } from './predicate.js';
 import { PROJECT_STORE } from './project-semantics.js';
 import { dbtFailure } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
@@ -40,7 +40,7 @@ import './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, timeRangeConditions, isValidTimezone } from './time-range.js';
 import { lookbackDays, shiftDay } from './metric-graph.js';
 import { CatalogSearch } from './search.js';
-import { featureToolDefinitions } from './features.js';
+import { featureToolDefinitions, featureDeletes } from './features.js';
 import { toolRegistry } from './tools/define.js';
 import { CORE_TOOLS } from './tools/core.js';
 import { JobManager } from './jobs.js';
@@ -64,6 +64,27 @@ import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
 import { RESEARCH_GUIDES } from './research-guides.js';
 import { CONTEXT_PAGE } from './schema/fields.js';
+import { propertyTypes } from './pipeline/compute.js';
+import { catalogWith } from './catalog/built-model.js';
+
+/**
+ * THE KINDS OF TASK a tool starts on two sides — each with the side it belongs to and the tool it is said
+ * as. query_model starts a metric query (a metrics step: the semantic layer computes it) and a read of a
+ * stored table (steps over a pipeline's rows); build_model a semantic layer's parse (its semantic_model
+ * step) and a pipeline's build. A task records which it is, as it has since each was a tool of its own (a
+ * task kept from then reads back alike).
+ */
+export const TASK_KINDS = {
+  query_semantic_model: { side: 'semantic', tool: 'query_model' },
+  query_pipeline_model: { side: 'pipeline', tool: 'query_model' },
+  build_semantic_model: { side: 'semantic', tool: 'build_model' },
+  build_pipeline_model: { side: 'pipeline', tool: 'build_model' },
+  // a semantic layer checked on the warehouse: context({ action: 'describe', validate: true })
+  preview_semantic_model: { side: 'semantic', tool: 'context' },
+};
+
+/** How many of a context's tasks its describe lists by id — the latest. */
+const DESCRIBED_TASKS = 5;
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
@@ -80,10 +101,10 @@ export class Engine {
     // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
     // container restarts — then it lives in its own store, isolated from the value index.
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
-    this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder, catalog }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.notes = new MemoryTool({ catalog, store: this.memoryStore, validate: (tool, input) => this._validate(tool, input) }); // the `memory` tool (engine.memory → notes.run)
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ request: { search } })
-    this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs }); // what semantic_index shows of the value index
+    this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs, catalog, toolOf: (kind) => this.tasks.toolOf(kind) }); // what semantic_index shows of the value index
     this.advisor = new PipelineAdvisor({ catalog, valueIndex: this.valueIndex }); // what a step is told as it is added
     // HOW LONG A BEST-EFFORT WAREHOUSE READ MAY HOLD AN INTERACTIVE CALL (engine.probe.bestEffort): the extras
     // an answer is enriched with — a physical column set, a freshness mark. Past it the answer goes
@@ -116,14 +137,17 @@ export class Engine {
     // THE ERROR LOG (src/error-log.js): every failure, kept in the store for explore_errors — and what
     // this start could not serve is the first of them
     this.errors = new ErrorLog({ store: this.store });
-    this.errors.runtime = { node: process.version, dialect: catalog.dialect, ...(runner ? { dbt: { major: runner.major ?? null, environment: runner.environment?.name ?? null } } : {}), started_at: new Date().toISOString() };
+    this.errors.runtime = { dialect: catalog.dialect, ...(runner ? { dbt: { major: runner.major ?? null, environment: runner.environment?.name ?? null } } : {}), started_at: new Date().toISOString() };
     this.errors.contextOf = (id, message, opts) => this._errorContext(id, message, opts);
     if (this.projectError) this.errors.record({ source: 'startup', stage: 'project_semantic_layer', message: `the dbt project's own semantic models could not be read: ${this.projectError}` });
     for (const x of project?.skipped || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `the semantic model '${x.semantic_model}' is not served: ${x.reason}` });
     for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
     for (const st of featureStatus || []) if (st.available === false) this.errors.record({ source: 'startup', severity: 'warning', stage: 'feature', message: `the feature '${st.id}' is not offered: ${st.reason}` });
-    // one schema per tool, and apart from them the input contracts of the methods tools hand to (src/schema.js)
-    const built = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
+    // one schema per tool, and apart from them the input contracts of the methods tools hand to (src/schema.js);
+    // what the features this deployment runs hold in a context is removed by delete_context, in their forms
+    const deletes = featureDeletes(features, catalog);
+    this._featureDeletes = new Map(deletes.map((d) => [d.what, d]));
+    const built = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [], deletes });
     this.schemas = Object.fromEntries(Object.entries(built).filter(([name]) => !METHOD_CONTRACTS.has(name)));
     this.contracts = Object.fromEntries(Object.entries(built).filter(([name]) => METHOD_CONTRACTS.has(name)));
     // THE TOOLS — ONE REGISTRY (src/tools/define.js): the core's (src/tools/core.js) and those of the
@@ -136,26 +160,32 @@ export class Engine {
     for (const def of this.tools.values()) {
       if (def.feature) {
         if (Object.prototype.hasOwnProperty.call(this.schemas, def.name) || typeof this[def.name] === 'function') throw new Error(`feature tool '${def.name}' collides with a core tool`);
-        this.schemas[def.name] = transportSchema(def.schema(catalog));
+        this.schemas[def.name] = transportSchema(def.schema(catalog, { project: this.project?.layer || null }));
         this[def.name] = (input) => def.run(this, input || {});
       } else if (!Object.prototype.hasOwnProperty.call(this.schemas, def.name)) throw new Error(`tool '${def.name}' has no schema (src/schema.js builds one per core tool)`);
     }
     for (const name of Object.keys(this.schemas)) if (!this.tools.has(name)) throw new Error(`the schema '${name}' belongs to no tool definition`);
     // which side a task belongs to, and which tool reads that side back — both read off the definitions
-    this._sides = Object.fromEntries(this.tools.values().filter((d) => d.side).map((d) => [d.name, d.side]));
-    this._readers = Object.fromEntries(this.tools.values().filter((d) => d.reads).map((d) => [d.reads, d.name]));
+    // (a task records the KIND of work that started it: a tool's name, or one of TASK_KINDS — query_model
+    // starts a metric query or a read of a stored table, each on its own side)
+    this._sides = { ...Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.side])), ...Object.fromEntries(this.tools.values().filter((d) => d.side).map((d) => [d.name, d.side])) };
+    this._readers = Object.fromEntries(this.tools.values().filter((d) => d.reads).flatMap((d) => [].concat(d.reads).map((side) => [side, d.name])));
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
     // Constrain the recipe view to real ids when recipes are configured.
     // The recipe view offers the ids this server actually has — the schema says what exists.
+    // a form offered in two places (a drill-in view is also an item of { views }) was folded into
+    // $defs: patching that one copy patches both
+    const si = this.schemas.semantic_index;
+    const siForms = (si?.anyOf || []).map((b) => (b.$ref ? si.$defs?.[b.$ref.split('/').pop()] : b));
     if (recipes) {
       // one form takes a recipe id ({ recipe }); the ids are known only now, after the schemas were built
-      const branch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.recipe);
+      const branch = siForms.find((b) => b?.properties?.recipe);
       if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), ...(branch.properties.recipe.description ? { description: branch.properties.recipe.description } : {}) };
     }
     // The guide view takes true or a name this server answers — the recipe families, the reserved
     // guides (python, research, research/<domain>) and a feature's own — known only now, like the ids.
-    const guideBranch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.guide);
+    const guideBranch = siForms.find((b) => b?.properties?.guide);
     if (guideBranch) {
       const names = [...new Set(['python', ...Object.keys(RESEARCH_GUIDES), ...(recipes ? recipes.summary().map((r) => r.task_type) : []), ...features.map((f) => f.guide?.name).filter(Boolean)])];
       guideBranch.properties.guide = { description: guideBranch.properties.guide.description, anyOf: [{ type: 'boolean', const: true, description: 'The whole guide.' }, { type: 'string', enum: names, description: 'One guide or recipe family by name.' }] };
@@ -175,8 +205,9 @@ export class Engine {
     }
     this.validators = makeValidators({ ...this.schemas, ...this.contracts });
     this.ctxs = contextManager || new ContextManager({});
+    this._contextCatalogs = new Map(); // context id → the catalog its layer is read over (_catalogOf)
     // the task runtime (src/task-runner.js): the engine's tools and a feature's start and read tasks through it
-    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, onFailure: (...a) => this._recordTaskError(...a) });
+    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a) });
     // WHAT A FEATURE MAY USE OF THE ENGINE (src/features.js), besides its task runtime (engine.tasks),
     // the dbt project's contexts (engine.ctxs), the catalog and the job registry: the one surface it
     // is written against, so an engine method can change without reaching into a feature
@@ -184,7 +215,8 @@ export class Engine {
       validate: (tool, input) => this._validate(tool, input),
       context: (id) => this._ctx(id),
       timeRangeConditions: (source, tr) => this._timeRangeConditions(source, tr),
-      physicalColumns: (source) => this.probe.physicalColumns(source),
+      // what the warehouse says of a source's columns and of every model its join stages bring in (src/engine/warehouse-probe.js)
+      grounding: (source, stages) => this.probe.grounding(source, stages),
       modelConfigLine: (materialized) => this._modelConfigLine(materialized),
       expiryConfig: (kind) => this._expiryConfig(kind),
       taskBase: (input) => this._taskBase(input),
@@ -201,8 +233,32 @@ export class Engine {
   }
 
   _validate(tool, input) {
-    const res = validateInput(this.validators[tool], input || {});
+    const res = validateInput(this.validators[tool], input || {}, { propertyType: propertyTypes(this.catalog), valueNote: this._keyNote() });
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
+  }
+
+  /** What a refusal says of a value that is a relationship's key column: the entity it is named by
+   *  where a metric query groups by it (a key is no attribute of its model). */
+  _keyNote() {
+    if (!this._keyNotes) {
+      const of = new Map();
+      for (const k of this.catalog.modelKeys()) {
+        // (a key of one column: a key of several parts is no one column's)
+        for (const [entity, e] of Object.entries(this.catalog.entitiesOf(k))) {
+          const col = (e.key || []).length === 1 ? e.key[0]?.column : null;
+          if (col) of.set(col, [...new Set([...(of.get(col) || []), entity])]);
+        }
+      }
+      // …and an amount (a measure column): folded by a measure, never carried as an attribute
+      const amounts = new Map();
+      for (const k of this.catalog.modelKeys()) for (const a of this.catalog.aggregatableFields(k)) if (!amounts.has(a.name)) amounts.set(a.name, k);
+      this._keyNotes = (used) => (of.has(used)
+        ? `'${used}' is the key of ${of.get(used).map((n) => `'${n}'`).join(' / ')} — a metric query groups by and filters on it as { entity: "${of.get(used)[0]}" }`
+        : amounts.has(used)
+          ? `'${used}' is an amount of '${amounts.get(used)}', not an attribute: a join carries attributes, and an amount is folded by a measure of the semantic layer — a semantic_model step's measure with source: '${amounts.get(used)}' (e.g. { name, source: '${amounts.get(used)}', expr: { fn: "sum", args: [{ column: "${used}" }] } })`
+          : null);
+    }
+    return this._keyNotes;
   }
 
   /**
@@ -211,7 +267,7 @@ export class Engine {
    */
   _ctxToWrite(id, field = 'context_id') {
     const ctx = this._ctx(id);
-    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ request: { context_id: '${id}', metrics } }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
+    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_model({ request: { context_id: '${id}', steps: [{ stage: 'metrics', metrics }] } }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
     return ctx;
   }
 
@@ -224,10 +280,15 @@ export class Engine {
   _ctx(id) {
     let ctx;
     // the parsed copy the project's own contexts share is internal: its semantic models are the contexts
-    const hint = this.projectError ? ` (the dbt project's own semantic models could not be read, so none of them is a context: ${this.projectError})` : '';
-    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(`${e.message}${hint}`, { stage: 'validate', field: 'context_id' }); }
+    const hint = this.projectError
+      ? ` (the dbt project's own semantic models could not be read, so none of them is a context: ${this.projectError})`
+      : this.project ? ` — the dbt project's own semantic models are contexts named after them: ${this.project.contexts.join(', ')}` : '';
+    // the way out: a context that is gone (deleted, retired after idling) or was never made is not
+    // guessed at — the list names those that exist
+    const wayOut = ". No context has that id (deleted, retired after idling, or never created): context({ request: { action: 'list' } }) lists those that exist";
+    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(`${e.message}${wayOut}${hint}`, { stage: 'validate', field: 'context_id' }); }
     if (ctx.state?.internal) throw new ToolError(`unknown context_id: ${id}${this.project ? ` — the dbt project's own semantic models are contexts of their own, named after them: ${this.project.contexts.join(', ')}` : ''}`, { stage: 'validate', field: 'context_id' });
-    const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this.catalog.models[k]);
+    const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this._catalogOf(ctx).models[k]);
     if (gone.length) {
       throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index({ request: {} }) lists them).`, { stage: 'validate', field: 'context_id' });
     }
@@ -250,7 +311,7 @@ export class Engine {
   /** The sources whose MEASURES a semantic context reads (a model loaded only to be joined to is
    *  not one of them). */
   _measureSources(ctx) {
-    const c = this.catalog;
+    const c = this._catalogOf(ctx);
     const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
     const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
     return [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
@@ -266,16 +327,20 @@ export class Engine {
     if (!bounds || !(bounds.start || bounds.end || bounds.endExclusive)) return [];
     const sources = this._measureSources(ctx);
     if (sources.length !== 1) return [];
-    const m = this.catalog.getModel(sources[0]);
-    const pe = this.catalog.primaryEntityName(sources[0]);
+    const m = this._catalogOf(ctx).getModel(sources[0]);
+    const pe = this._catalogOf(ctx).primaryEntityName(sources[0]);
     if (!pe || (m.dimensions || {})[PARTITION_DIM]) return [];
     // a cumulative metric's value on the window's first day sums the days before it: MetricFlow widens
     // its own time constraint for that, and a filter here — applied to the rows before they accumulate
     // — must reach back as far, or the window is cut at the start of the range
     const back = lookbackDays(metrics, ctx.state.metrics || []);
     const start = back === Infinity ? null : bounds.start && back ? shiftDay(bounds.start, -back) : bounds.start;
-    return partitionConditions(m, { start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
-      .map((cnd) => renderPredicate({ field: { kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }, op: cnd.op, value: cnd.value }));
+    // the bounds compare the partition column; in a metric query's where it is the dimension that carries it
+    const onDimension = partitionConditions(m, { start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
+      .map((c) => ({ ...c, args: c.args.map((a) => (a.column !== undefined ? { source: sources[0], column: PARTITION_DIM } : a)) }));
+    // a source pruned by its time axis alone has no partition condition, and a where is never an empty list
+    if (!onDimension.length) return [];
+    return whereSql(this.catalog.dialect, onDimension, () => ({ kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }), 'partition');
   }
 
   /**
@@ -286,7 +351,17 @@ export class Engine {
    */
   _timeRangeConditions(source, tr) {
     if (tr?.timezone && !isValidTimezone(tr.timezone)) throw new ToolError(`unknown timezone '${tr.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    this._timeAxisFor(source, tr);
     return timeRangeConditions(this.catalog.getModel(source), tr);
+  }
+
+  /** A window is a source's time axis bounded: a source with none (assignments, a dimension) is refused
+   *  one — it would bound nothing — naming the time columns a where step can bound instead. */
+  _timeAxisFor(source, tr) {
+    const m = source && this.catalog.models[source];
+    if (!tr || !m || m.time?.column) return;
+    const times = Object.entries(m.dimensions || {}).filter(([, d]) => d?.type === 'time').map(([n]) => n);
+    throw new ToolError(`'${source}' has no time axis, so time_range bounds nothing there — leave it out${times.length ? ` and bound its own time columns in a where step (${times.join(', ')}): { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: '${times[0]}' }, { value: '<start>' }] }] }` : ''}`, { stage: 'validate', field: 'time_range' });
   }
 
   /** The conditions on a source's partition column for a window on its time axis. */
@@ -304,14 +379,16 @@ export class Engine {
    */
   _taskBase(input) {
     const job = this.jobs.get(input.from_task);
-    if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
-    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
+    if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: UNKNOWN_TASK });
+    // a task of another part of the server (a feature's) holds no table a pipeline reads: said as it is
+    if (!['semantic', 'pipeline'].includes(this.tasks.sideOf(job.tool))) throw new ToolError(`task ${job.id} was started by ${job.tool}, and a build starts only from a pipeline build or a metric query run with materialize: true — build the rows you need with build_model from the source instead`, { stage: 'validate', field: 'from_task' });
+    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start from it`, { stage: 'validate', field: 'from_task' });
     if (job.status !== 'ready' || !job.table) {
       // a query over a pipeline model reads that model's table and stores nothing: the table it read
-      // is the one to start from, its transform said again as steps
+      // is the one to start from, the query's steps given again as the draft's
       const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
       const why = job.status === 'error' ? 'it failed'
-        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") and say the query's where / group_by / aggregations again as steps (where, aggregate)` : ': start from the pipeline build\'s task, or continue that draft'}`
+        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") with the query's steps as the draft's (steps)` : ': start from the pipeline build\'s task, or continue that draft'}`
           : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
       throw new ToolError(`task ${job.id} holds no stored table to start from — ${why}`, { stage: 'validate', field: 'from_task' });
     }
@@ -326,7 +403,9 @@ export class Engine {
     const fact = (owner.usedModels || []).filter((k) => this.catalog.isFact(k));
     const source = input.source || (owner.draft?.source ?? owner.pipeline_origin?.source) || (fact.length === 1 ? fact[0] : null);
     if (!source) throw new ToolError(`name the source the steps resolve properties and relationships against (source: one of ${this.catalog.modelKeys().join(', ')}) — task ${job.id} read ${fact.length ? fact.join(' and ') : 'no events source'}`, { stage: 'validate', field: 'source' });
-    return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source };
+    // what the task read: a metric query's own sources (its provenance) — not every model its context holds
+    const read = kept?.provenance?.source ? [].concat(kept.provenance.source) : owner.usedModels || [];
+    return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source, read: [...new Set(read)] };
   }
 
   /** Make a task's table readable from this draft's context, and keep its owner from being dropped under it. */
@@ -364,7 +443,8 @@ export class Engine {
   _recordTaskError(id, tool, ctx, input, error = {}) {
     const { message, stage, field, code, detail, ...rest } = isPlainObject(error) ? error : { message: String(error) };
     this.errors.record({
-      source: 'task', tool, task_id: id, context_id: ctx?.id ?? null, stage: stage || 'task', field, code,
+      // a query's kind is recorded by the tool that started it, the one a caller filters by
+      source: 'task', tool: this.tasks.toolOf(tool), task_id: id, context_id: ctx?.id ?? null, stage: stage || 'task', field, code,
       message: message || `the ${tool} task failed`, args: input, detail: detail ?? (Object.keys(rest).length ? rest : null),
     });
   }
@@ -399,12 +479,25 @@ export class Engine {
    */
   async context(input = {}) {
     this._validate('context', input);
-    return input.action === 'list' ? this._listContexts(input) : this._describeContext({ context_id: input.context_id });
+    if (input.action === 'list') return this._listContexts(input);
+    const { action: _describe, ...describe } = input;
+    const out = await this._describeContext(describe);
+    // the tasks run on it, by id (its `tasks` are the builds' names): what a read, a from_task, a card take
+    const ran = this.jobs.list().filter((j) => j.context_id === describe.context_id).map((j) => ({ task_id: j.task_id, ...(j.tool ? { tool: this.tasks.toolOf(j.tool) } : {}), status: j.status }));
+    // (the latest ones: a long-lived context's whole history is counted, not listed)
+    const shown = ran.slice(-DESCRIBED_TASKS);
+    return out && !out.task_id && ran.length ? { ...out, task_ids: shown, ...(ran.length > shown.length ? { task_count: ran.length } : {}) } : out;
   }
 
-  /** Remove a context, its pipeline model, or one model's task additions. */
+  /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context
+   *  holds, handed to the feature in its own form (src/features.js deletes). */
   async delete_context(input = {}) {
     this._validate('delete_context', input);
+    const contributed = this._featureDeletes?.get(input.what);
+    if (contributed) {
+      const { what: _what, ...fields } = input;
+      return contributed.run(this, fields);
+    }
     switch (input.what || 'context') {
       case 'pipeline_model': return this._deletePipelineModel({ context_id: input.context_id });
       case 'semantic_model': return this._deleteSemanticModel({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
@@ -431,7 +524,23 @@ export class Engine {
       if (st.draft) st.draft.checkpoints = (st.draft.checkpoints || []).filter((cp) => cp.model !== c.model);
       this.ctxs.touch(c.consumer);
     }
-    return this.ctxs.drop(input.context_id);
+    // what it held, said with the removal: the tables its tasks stored go with it (a read of one says so),
+    // while a result a task holds in memory stays readable — marked as of a context that is gone
+    const held = this.ctxs.has(input.context_id) ? this.ctxs.get(input.context_id).state : null;
+    const own = held ? this.jobs.list().filter((j) => j.context_id === input.context_id) : [];
+    const tables = own.filter((j) => j.table).length;
+    const kept = own.length - tables;
+    const out = this.ctxs.drop(input.context_id);
+    // nothing removed is said, not left to read as success: the id names no context
+    if (out.removed) {
+      const what = [held?.draft || held?.pipeline_model ? 'its pipeline' : null, (held?.metrics || []).length || held?.draft?.semantic ? 'its semantic layer' : null].filter(Boolean);
+      return {
+        ...out, context_id: input.context_id, ...(what.length ? { held: what } : {}),
+        ...(tables ? { stored_results_removed: tables } : {}),
+        ...(kept ? { note: `${kept} task result(s) held in memory stay readable by task_ids (marked context_gone) until they age out; the tables its builds stored are removed.` } : {}),
+      };
+    }
+    return { ...out, context_id: input.context_id, reason: "no context has this id (deleted already, retired after idling, or never created) — context({ request: { action: 'list' } }) lists those that exist" };
   }
 
   /**
@@ -513,24 +622,24 @@ export class Engine {
     return sampleSize(input);
   }
 
-  /**
-   * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
-   * waiting for a task is its side's query tool ({ task_ids }), which returns the moment it is done.
-   *
-   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
-   * call, so a caller that asks for a minute gets a dropped connection rather than a minute. The
-   * cap is reported back (`cap_seconds`) so the pacing can be planned from the answer instead of
-   * from the description.
-   */
   /** The memory tool (src/engine/memory.js — engine.notes). */
   memory(input) {
     return this.notes.run(input);
   }
 
+  /**
+   * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
+   * waiting for a task is its side's query tool ({ task_ids }), which returns the moment it is done.
+   *
+   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
+   * call, so a caller that asks for a minute gets a dropped connection rather than a minute — the
+   * schema refuses more than the cap. The cap is reported back (`cap_seconds`) so the pacing can be
+   * planned from the answer instead of from the description.
+   */
   async time(input) {
     this._validate('time', input);
-    const requested = Number(input.seconds) || 0;
-    const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
+    // the schema bounds it to [0, MAX_WAIT_SECONDS]: a longer wait is refused, never cut short silently
+    const seconds = Number(input.seconds) || 0;
     const startedAt = new Date().toISOString();
     // a cancelled call (the client gave up, a task was cancelled) stops waiting at once
     const signal = currentSignal();
@@ -540,7 +649,7 @@ export class Engine {
       signal?.addEventListener?.('abort', () => { cancelled = true; clearTimeout(t); resolve(); }, { once: true });
     });
     const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
-    return { ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    return { ok: true, waited_seconds: waited, cap_seconds: MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   /**
@@ -557,6 +666,21 @@ export class Engine {
   async _describeContext(input) {
     this._validate('context.describe', input);
     const ctx = this._ctx(input.context_id);
+    // where the context holds a semantic layer, the layer as dbt parsed it is part of what it is
+    // (src/engine/semantic-preview.js); validate checks it on the warehouse, a task
+    const project = ctx.state.engine === 'project' && !!this.project;
+    const hasLayer = project || (ctx.state.metrics || []).length > 0;
+    const asked = ['metric', 'semantic_model', 'validate', 'time_range'].filter((k) => input[k] !== undefined && input[k] !== false);
+    if (asked.length && !hasLayer) throw new ToolError(`context ${ctx.id} holds no semantic layer — ${asked.join(', ')} describe${asked.length > 1 ? '' : 's'} one (a build's semantic_model step makes it); context({ request: { action: 'describe', context_id: '${ctx.id}' } }) shows what it holds`, { stage: 'validate', field: asked[0] });
+    if (input.validate) return this._describeLayer(ctx, input);
+    // one metric or one semantic model asked: that part of the layer, not the whole context again
+    if (input.metric !== undefined || input.semantic_model !== undefined) return this._describeLayer(ctx, input);
+    const base = await this._describeBase(ctx);
+    return hasLayer ? { ...base, ...(await this._describeLayer(ctx, input)) } : base;
+  }
+
+  /** What a context holds, without its semantic layer's parse: its steps, tasks, models and files. */
+  async _describeBase(ctx) {
     if (ctx.state.engine === 'project' && this.project) return { engine: 'project', ...this._projectOverview(ctx.id) };
     // a feature's context, as the feature describes it (its eventstreams and their steps …)
     const featured = this._featureContext(ctx);
@@ -596,7 +720,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_model({ request: { context_id: '${ctx.id}', steps } }) to filter or regroup them; build on them with build_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }
@@ -617,10 +741,9 @@ export class Engine {
           ...(openDraft.building ? { building: openDraft.building } : {}),
         },
       } : {}),
-      // Per task, what its author said it computes — a name namespaces the metrics, it does not
-      // explain them.
+      // Per task, what its author said it computes — a name does not explain the metrics.
       ...(Object.keys(ctx.state.task_notes || {}).length ? { task_notes: ctx.state.task_notes } : {}),
-      semantic_models: Object.keys(additions),
+      semantic_models: Object.keys(additions).length ? [...new Set([...Object.keys(additions), ...(ctx.state.usedModels || [])])] : [],
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
       metrics: (ctx.state.metrics || []).map((m) => m.name),
       groupable: this._groupableSplit(ctx).now,
@@ -629,7 +752,7 @@ export class Engine {
   }
 
   _listTasks() {
-    return { tasks: this.jobs.list() };
+    return { tasks: this.jobs.list().map((t) => (t.tool ? { ...t, tool: this.tasks.toolOf(t.tool) } : t)) };
   }
 
   /** Reclaim idle, lease-free contexts (bounds workspace growth). */
@@ -686,10 +809,24 @@ export class Engine {
     return { ok: true, manifest: r.manifest };
   }
 
+  /**
+   * THE CATALOG A CONTEXT READS — the server's, and, in a context whose semantic layer stands on a table
+   * its build made, that table as a model beside the others (src/catalog/built-model.js), so the layer is
+   * compiled, rendered and queried over it as over any model. Made once per layer the context holds.
+   */
+  _catalogOf(ctx) {
+    const layer = ctx?.state?.layer_model;
+    if (!layer) return this.catalog;
+    const held = this._contextCatalogs.get(ctx.id);
+    if (held?.layer === layer && held.base === this.catalog) return held.catalog;
+    const catalog = catalogWith(this.catalog, layer.key, layer.model);
+    this._contextCatalogs.set(ctx.id, { layer, base: this.catalog, catalog });
+    return catalog;
+  }
+
   _assumptions(ctx) {
     const a = [`one semantic model per table in context ${ctx.id}`];
     if (this.catalog.facts.some((f) => ctx.state.additions[f])) a.push('the event scope is applied inside each measure');
-    a.push('metric_time / cumulative / conversion metrics require a configured time dimension');
     return a;
   }
 }

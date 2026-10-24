@@ -1,20 +1,33 @@
 // A STEP STORED BY AN EARLIER VERSION, CARRIED OVER ON READ. A draft outlives a deploy, and its steps
 // are rendered again on every edit; what an earlier version spelled another way is translated to this
-// version's spelling here, once, before a stage is built — the renames from the ONE table that also
-// tells a caller this server's spelling (src/validate.js CROSS_PATH_SPELLING: fn → agg, q → percentile,
-// avg → average, as → name), and a computed column written as { op, …fields } to its expression.
-// A step in the current spelling passes through unchanged.
+// version's spelling here, once, before a stage is built. The grammar of what a stage holds — a
+// condition, a measure, an expression, an unnest's array, a pivot's measure — is converted by the ONE
+// table of those converters (src/earlier-spelling.js); a funnel step's condition on `property` reads a
+// column of the rows when there is one, else the event property, as the earlier build resolved it.
+// The stage words are this module's own: a computed column written as { op, …fields } is its
+// expression, a derive stage the compute stage reading the same event property, a join's top-level
+// `on` is via: { on } and its attrs' `as` their `name`, a join window's between.value is between.column;
+// a pivot's agg + value_column + its values as names is one measure and { value, name } per value;
+// unpivot's name_as / value_as are name_column / value_column, and one with no keep keeps none (keep: []); a funnel's `mode` is folded into
+// between_steps (strict → none); unnest's `as` is `name` and its `source` the array it names; a
+// sample's percent is a share; project's `columns` is keep; limit's `n` is limit; and a python function
+// body written as nested arrays of lines (a nested array the block under the line before it) is its
+// text. A funnel's `filter` and `metrics` have no spelling here: such a kept draft builds as it did
+// (src/match-recognize.js). A typed read is resolved against the source's catalog (the type a property
+// is read as now), and an aggregate's where is the case it folds now; a kept unnest naming its element's
+// `type` builds as it did — split into an unnest and a cast, as a new call is shown, it would shift the
+// indexes and checkpoints the draft counts its steps by. A step in the current spelling passes through
+// unchanged.
 
 import { CROSS_PATH_SPELLING as SPELLING } from '../validate.js';
+import { currentConditions, currentExpression, currentMeasure, isEarlierMeasure, currentUnnest } from '../earlier-spelling.js';
+import { propertyTypes } from './compute.js';
 
-/** The object with each key the table renames given its current name, and an aggregation's old value its current one. */
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+/** The object with each of `keys` the table renames given its current name (`as` → `name`). */
 function respelled(obj, keys) {
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    const key = keys.includes(k) && SPELLING[k] ? SPELLING[k] : k;
-    out[key] = key === 'agg' && typeof v === 'string' && SPELLING[v] ? SPELLING[v] : v;
-  }
-  return out;
+  return Object.fromEntries(Object.entries(obj).map(([k, v]) => [keys.includes(k) && SPELLING[k] ? SPELLING[k] : k, v]));
 }
 
 const ONE = new Set(['floor', 'ceil', 'abs', 'upper', 'lower', 'length', 'trim', 'unix_date', 'hll_extract', 'json_parse_array']);
@@ -55,16 +68,157 @@ function computeExpr(st) {
   return null; // an op this version never had: left for the stage's own refusal
 }
 
-/** The stage in this version's spelling (the same object when it already is). */
-export function currentSpelling(st) {
+/** A python body of the earlier form — a line is a string, a nested array the block indented under
+ *  the line before it — as the text it stood for, four spaces a level. */
+function bodyText(items, depth = 0) {
+  return items.flatMap((x) => (Array.isArray(x) ? bodyText(x, depth + 1) : [`${'    '.repeat(depth)}${x}`]));
+}
+
+/** A derive stage (one column read from an event property) as the compute stage that reads it now. */
+function deriveExpr(st) {
+  const type = st.type !== undefined ? { type: st.type } : {};
+  if (st.op === 'extract') return { property: st.source, ...type };
+  if (st.op === 'struct_field') return { property: st.source, field: st.field, ...type };
+  if (st.op === 'array_length') return { fn: 'array_length', args: [{ property: st.source }] };
+  if (st.op === 'contains') return { fn: 'array_contains', args: [{ property: st.source }, { value: st.value === undefined ? null : st.value }] };
+  return null;
+}
+
+/** A pivot of the earlier { agg, value_column, values: [string] } form as the measure it computed and
+ *  the columns it named: each value its own name — a value that is no SQL name (it starts with a digit)
+ *  prefixed with '_', as BigQuery's PIVOT names it. */
+function currentPivot(st) {
+  const { agg, fn, value_column: column, values, ...rest } = st;
+  const a = agg ?? fn;
+  return {
+    ...rest,
+    measure: currentMeasure({ agg: a, ...(column !== undefined ? { column } : {}) }),
+    values: (values || []).map((v) => (v && typeof v === 'object' ? v : { value: v, name: /^[A-Za-z_]/.test(String(v)) ? String(v) : `_${v}` })),
+  };
+}
+
+/** The stage in this version's spelling (the same object when it already is). `ctx.cols` — the
+ *  columns before it — settles what an earlier spelling left to the build to resolve; `ctx.catalog`
+ *  and `ctx.source` what it resolved against the source (an unnest's property or column). */
+export function currentSpelling(st, ctx = {}) {
   if (!st || typeof st !== 'object') return st;
+  // one rename at a time, until the stage is in this version's spelling (a stage may carry several)
+  let cur = st;
+  for (let i = 0; i < 16; i++) {
+    const next = currentStage(cur, ctx);
+    if (next === cur || JSON.stringify(next) === JSON.stringify(cur)) return cur;
+    cur = next;
+  }
+  return cur;
+}
+
+function currentStage(st, ctx) {
+  if (st.stage === 'derive') {
+    const expr = deriveExpr(st);
+    return expr ? { stage: 'compute', name: st.name, expr } : st;
+  }
   if (st.stage === 'compute' && st.op !== undefined && st.expr === undefined) {
     const expr = computeExpr(st);
     return expr ? { stage: 'compute', name: st.name, expr } : st;
   }
-  if (st.stage === 'aggregate' && (st.measures || []).some((m) => m && (m.fn !== undefined || m.q !== undefined))) return { ...st, measures: st.measures.map((m) => respelled(m, ['fn', 'q'])) };
-  if (st.stage === 'pivot' && st.fn !== undefined) return respelled(st, ['fn']);
+  if (st.stage === 'pivot' && st.measure === undefined && (st.agg !== undefined || st.fn !== undefined || st.value_column !== undefined)) return currentPivot(st);
+  if (st.stage === 'unpivot' && (st.name_as !== undefined || st.value_as !== undefined || st.keep === undefined)) {
+    // (keep is said now — an earlier unpivot that left it out kept none)
+    const { name_as: nameColumn, value_as: valueColumn, ...rest } = st;
+    return { ...rest, keep: st.keep ?? [], ...(nameColumn !== undefined ? { name_column: nameColumn } : {}), ...(valueColumn !== undefined ? { value_column: valueColumn } : {}) };
+  }
+  if (st.stage === 'join' && st.on !== undefined && st.via === undefined && st.with !== undefined) {
+    const { on, ...rest } = st;
+    return { ...rest, via: { on } };
+  }
+  // a join written with the model and its relationship (`with`, `via`, a window's `between`) is the
+  // joined model's contract, { source, on }, where its parts can be read off what it named
+  if (st.stage === 'join' && st.with !== undefined && st.source === undefined) return storedJoin(st, ctx) ?? st;
   if (st.stage === 'join' && (st.attrs || []).some((a) => a && typeof a === 'object' && a.as !== undefined)) return { ...st, attrs: st.attrs.map((a) => (a && typeof a === 'object' ? respelled(a, ['as']) : a)) };
+  if (st.stage === 'join' && st.between && typeof st.between === 'object' && st.between.value !== undefined && st.between.column === undefined) {
+    const { value: column, ...rest } = st.between;
+    return { ...st, between: { column, ...rest } };
+  }
   if (st.stage === 'unnest' && st.as !== undefined) return respelled(st, ['as']);
+  if (st.stage === 'unnest' && st.source !== undefined && st.property === undefined && st.column === undefined && st.expr === undefined) {
+    const { source: from, ...rest } = st;
+    return { ...rest, ...(unnestsProperty(from, ctx) ? { property: from } : { column: from }) };
+  }
+  if (st.stage === 'match_recognize' && st.mode !== undefined) {
+    const { mode, between_steps: between, ...rest } = st;
+    const steps = mode === 'strict' ? 'none' : between;
+    return { ...rest, ...(steps !== undefined ? { between_steps: steps } : {}) };
+  }
+  if (st.stage === 'sample' && st.percent !== undefined && st.share === undefined) {
+    const { percent, ...rest } = st;
+    return { ...rest, share: Number(percent) / 100 };
+  }
+  if (st.stage === 'project' && st.columns !== undefined && st.keep === undefined) {
+    const { columns: keep, ...rest } = st;
+    return { ...rest, keep };
+  }
+  if (st.stage === 'limit' && st.n !== undefined && st.limit === undefined) {
+    const { n: limit, ...rest } = st;
+    return { ...rest, limit };
+  }
+  if (st.stage === 'python' && (st.functions || []).some((f) => Array.isArray(f?.body))) return { ...st, functions: st.functions.map((f) => (Array.isArray(f?.body) ? { ...f, body: bodyText(f.body).join('\n') } : f)) };
+  // what a stage holds, in the one grammar — the same value when it already is; a typed property read
+  // keeps its type only where the source's catalog reads the property as another
+  const opts = { propertyType: propertyTypes(ctx.catalog, ctx.source) };
+  if (st.stage === 'unnest') return currentUnnest(st);
+  if (st.stage === 'where' && Array.isArray(st.conditions)) return { ...st, conditions: currentConditions(st.conditions, opts) };
+  if (st.stage === 'aggregate' && Array.isArray(st.measures)) return { ...st, measures: st.measures.map((m) => currentMeasure(m, opts)) };
+  if (st.stage === 'compute' && st.expr !== undefined) return { ...st, expr: currentExpression(st.expr, opts) };
+  if (st.stage === 'pivot' && st.measure !== undefined) return { ...st, measure: isEarlierMeasure(st.measure) ? currentMeasure(st.measure, opts) : currentExpression(st.measure, opts) };
+  if (st.stage === 'match_recognize' && Array.isArray(st.steps)) {
+    // a step's condition on `property` reads a column of the rows when there is one — as it did
+    const subject = (name) => (ctx.cols?.has(name) ? 'column' : 'property');
+    return { ...st, steps: st.steps.map((x) => (isObj(x) && x.where !== undefined ? { ...x, where: currentConditions(x.where, { ...opts, subject }) } : x)) };
+  }
   return st;
+}
+
+/**
+ * A join kept in the form before join contracts — { with, via, between?, attrs, kind? } — as the joined
+ * model's contract { source, on }: each key part the column of the rows `via` paired with the contract's
+ * column (a part chosen by a word, the word whose column it paired), the time `between`'s column — or,
+ * where the kept join stated none, the source's time axis, the version valid then — and nothing else.
+ * Null where the contract has a part the kept join cannot say (a value it never named): the build then
+ * refuses the step, saying to write it as { source, on }.
+ */
+export function storedJoin(st, { catalog, source } = {}) {
+  const contract = catalog?.joinContract?.(st.with);
+  if (!contract || !source) return null;
+  const pairs = new Map(); // a column of the joined model → the column of the rows it was matched with
+  if (typeof st.via === 'string') {
+    const left = catalog.entityKey(source, st.via); const right = catalog.entityKey(st.with, st.via);
+    if (!left || !right || left.length !== right.length) return null;
+    right.forEach((p, i) => pairs.set(p.column, left[i].column));
+  } else for (const c of [].concat(st.via?.on ?? [])) pairs.set(c, c);
+  const on = {};
+  for (const k of contract.key) {
+    if (!k.by) { if (!pairs.has(k.column)) return null; on[k.part] = pairs.get(k.column); continue; }
+    const word = Object.keys(k.columns).find((w) => pairs.has(k.columns[w]));
+    if (!word) return null;
+    on[k.part] = pairs.get(k.columns[word]); on[k.by] = word;
+  }
+  if (contract.time) {
+    const moment = st.between?.column ?? st.between?.value ?? (contract.time.same_day ? pairs.get(contract.time.same_day) : undefined) ?? catalog.getModel(source)?.time?.column;
+    if (!moment) return null;
+    on.time = moment;
+  }
+  for (const s of contract.select) if (on[s.part] === undefined) return null;
+  const { with: model, via: _via, between: _between, ...rest } = st;
+  return { ...rest, source: model, on };
+}
+
+/** Whether a kept unnest's `source` named an event property, resolved as its build resolved it: a
+ *  property of the source first (another source's property too — the property form names the owner),
+ *  else a column at this step; with nothing to resolve against, a name that is no column here. */
+function unnestsProperty(name, { catalog, source, cols } = {}) {
+  if (catalog && source) {
+    try { if (catalog.propertyFor(source, name)?.spec) return true; } catch { return true; }
+    return !cols?.has(name);
+  }
+  return !cols?.has(name);
 }

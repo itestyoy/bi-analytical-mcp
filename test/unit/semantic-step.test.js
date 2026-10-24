@@ -1,0 +1,168 @@
+// THE SEMANTIC_MODEL STEP — a build's last step, the semantic layer over its source (src/pipeline/
+// semantic-stage.js). Input-validation and lifecycle checks with no warehouse: where the step may stand,
+// what its join's `on` must say (the key MetricFlow joins the model on, the main model's time axis), and
+// how edit_step and fork treat it. What a layer computes is proven against the
+// warehouse by the integration tests that declare one (test/helpers/declare.js).
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { loadCatalog } from '../../src/catalog.js';
+import { ContextManager } from '../../src/context-manager.js';
+import { Engine } from '../../src/engine.js';
+import { tempDir } from '../helpers/temp-dir.js';
+
+const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
+const engine = () => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('semstep') }) });
+
+const COUNT = { name: 'rows', expr: { fn: 'count' } };
+const N = [{ name: 'rows', type: 'simple', measure: 'rows' }];
+const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } };
+const step = (extra = {}) => ({ stage: 'semantic_model', measures: [COUNT], metrics: N, ...extra });
+const start = (e, steps, source = 'events') => e.build_model({ action: 'start', name: 'lay', source, ...(steps.length ? { steps } : {}) });
+
+test('the step is a build\'s last, and one: refused before another step and twice', async () => {
+  const e = engine();
+  await assert.rejects(() => start(e, [step(), { stage: 'limit', limit: 1 }]), /a semantic_model step is the build's last — put it after the others/);
+  await assert.rejects(() => start(e, [step(), step()]), /a build has one semantic_model step/);
+  // added after a start, it is the last step, and nothing is added after it
+  const s = await start(e, []);
+  const added = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step()] });
+  assert.deepEqual(added.step_effects.map((x) => [x.stage, x.metrics]), [['semantic_model', ['rows']]]);
+  await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 1 }] }), /ends in its semantic_model step \(step 1\): nothing comes after it/);
+});
+
+test('a join names its contract and MetricFlow\'s key: the main model\'s key column, the main model\'s time axis', async () => {
+  const e = engine();
+  const ok = await start(e, [step({ join: [USERS] })]);
+  assert.deepEqual(ok.step_effects[0].semantic_models.sort(), ['events', 'users']);
+  // the key part is the main model's column of the key MetricFlow joins on
+  await assert.rejects(() => start(e, [step({ join: [{ source: 'users', on: { user: 'session_number', time: 'device_time' } }] })]), /MetricFlow joins 'users' onto 'events' by the key 'user' — user: 'player_id_of_internal'/);
+  // the time part is the main model's time axis: MetricFlow matches the version valid at the metric's time
+  await assert.rejects(() => start(e, [step({ join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'install_date' } }] })]), /on\.time is 'device_time', the main model's time axis/);
+  // a model nothing points at a key of is no join: its measures are computed beside the main model's
+  await assert.rejects(() => start(e, [step({ join: [{ source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' } }] })]), /`steps\.0\.join\.0/);
+  const beside = await start(e, [step({ measures: [COUNT, { name: 'spend', source: 'acquisition', expr: { fn: 'sum', args: [{ column: 'cost' }] } }], metrics: [...N, { name: 'spend', type: 'simple', measure: 'spend' }] })]);
+  assert.deepEqual(beside.step_effects[0].metrics.sort(), ['rows', 'spend']);
+  // the main model is no source of a measure, nor joined to itself
+  await assert.rejects(() => start(e, [step({ measures: [{ ...COUNT, source: 'events' }] })]), /'events' is the main model — leave source out/);
+});
+
+test('a catalog source is read on its own time axis; a time the step names must be that one', async () => {
+  const e = engine();
+  assert.ok(await start(e, [step({ time: 'device_time' })]));
+  await assert.rejects(() => start(e, [step({ time: 'install_date' })]), /'events' is read on its own time axis, 'device_time'/);
+});
+
+test('preview shows the layer; edit_step replaces the step, a whole fork carries it and a fork before it does not', async () => {
+  const e = engine();
+  const s = await start(e, [step()]);
+  const shown = await e.build_model({ action: 'preview', context_id: s.context_id });
+  assert.deepEqual(shown.metrics, ['rows']);
+  assert.ok(shown.yaml.includes('rows'), 'the YAML it writes');
+  const { index } = shown.steps.find((x) => x.stage === 'semantic_model');
+  // an edit replaces it with another semantic_model step, never with a stage
+  await assert.rejects(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: { stage: 'limit', limit: 1 } }), /is the build's semantic_model step/);
+  const edited = await e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step({ metrics: [{ name: 'events', type: 'simple', measure: 'rows' }] }) });
+  assert.deepEqual(edited.step_effects[0].metrics, ['events']);
+  // an edit answers under its own word, and takes materialize as add_steps does
+  assert.equal(edited.action, 'edit_step');
+  assert.ok(edited.step_edited && !edited.steps_added, JSON.stringify(Object.keys(edited)));
+  await assert.doesNotReject(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step(), materialize: false }));
+  // a whole fork carries it, a fork of the steps before it does not
+  const whole = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_copy', include: ['steps'] });
+  assert.deepEqual(whole.steps.map((x) => x.stage), ['semantic_model']);
+  const none = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_none', after: 0, include: ['steps'] });
+  assert.deepEqual(none.steps, []);
+});
+
+// OVER A TABLE THE STEPS BEFORE IT BUILT: the table is a model of the context, read on the time axis the
+// step names, its foreign keys the ones its joins name — each part a column of the table, the time the
+// axis. The build's name is the model's, so it is named apart from the catalog's models and keys.
+test('over the table of the steps before it: its time axis named, its joins keyed by its columns', async () => {
+  const e = engine();
+  const sessions = [
+    { stage: 'aggregate', group_by: ['player_id_of_internal', 'session_number'], measures: [{ name: 'session_start', expr: { fn: 'min', args: [{ column: 'device_time' }] } }, { name: 'n_events', expr: { fn: 'count' } }] },
+  ];
+  const over = (st) => e.build_model({ action: 'start', name: 'sess', source: 'events', steps: [...sessions, st] });
+  await assert.rejects(() => over(step()), /time: name the column of the table the steps before this one built that is its time axis/);
+  await assert.rejects(() => over(step({ time: 'no_such' })), /time: 'no_such' is no column of the table/);
+  await assert.rejects(() => over(step({ time: 'n_events' })), /time: 'n_events' is int, not a moment/);
+  const join = (on) => ({ source: 'users', on: { user: 'player_id_of_internal', time: 'session_start', ...on } });
+  await assert.rejects(() => over(step({ time: 'session_start', join: [join({ time: 'n_events' })] })), /on\.time is 'session_start', the main model's time axis/);
+  await assert.rejects(() => over(step({ time: 'session_start', join: [join({ user: 'no_such' })] })), /on\.user names 'no_such', which is no column of the table/);
+  const ok = await over(step({ time: 'session_start', join: [join()], measures: [COUNT, { name: 'per_session', expr: { fn: 'average', args: [{ column: 'n_events' }] } }], metrics: [...N, { name: 'per_session', type: 'simple', measure: 'per_session' }] }));
+  const effect = ok.step_effects.find((x) => x.stage === 'semantic_model');
+  assert.deepEqual(effect.semantic_models.sort(), ['sess', 'users']);
+  assert.deepEqual(effect.metrics.sort(), ['per_session', 'rows']);
+  // a build named as a model or a key of the catalog would name its table so
+  await assert.rejects(() => e.build_model({ action: 'start', name: 'users', source: 'events', steps: [...sessions, step({ time: 'session_start' })] }), /the build's name 'users' is a model or a key of the catalog/);
+});
+
+// NAMES AS DECLARED: a metric, a measure and a computed dimension are stored under the name the step gives
+// them, so what MetricFlow refuses of a name is refused when the step is added, naming it as declared.
+test('names are stored as declared: a grain, a governed measure\'s name and another element\'s are refused', async () => {
+  const e = engine();
+  const named = (name) => step({ measures: [{ name, expr: { fn: 'count' } }], metrics: [{ name: 'rows', type: 'simple', measure: name }] });
+  // the schema holds MetricFlow's spelling: two characters at least, no `__`, no `_` at the end
+  for (const bad of ['n', 'a__b', 'rows_']) await assert.rejects(() => start(e, [named(bad)]), /must be a name the semantic layer takes: .* no "__" and no "_" at the end/, bad);
+  await assert.rejects(() => start(e, [named('week')]), /measure 'week': a time grain is no name/);
+  await assert.rejects(() => start(e, [step({ metrics: [{ name: 'metric_time', type: 'simple', measure: 'rows' }] })]), /MetricFlow reserves the name 'metric_time'/);
+  await assert.rejects(() => start(e, [named('total_spend')]), /the catalog governs a measure of that name on 'acquisition'/);
+  // a measure named as a dimension or an entity of the layer
+  await assert.rejects(() => start(e, [named('event_name')]), /measure 'event_name': 'event_name' is already a dimension of 'events'/);
+  await assert.rejects(() => start(e, [named('session')]), /measure 'session': 'session' is already an entity of 'events'/);
+  // the stored name is the declared one, and a governed measure is read by its own
+  const ok = await start(e, [step({ metrics: [...N, { name: 'spend', type: 'simple', measure: 'total_spend' }] })]);
+  assert.deepEqual(ok.step_effects[0].metrics.sort(), ['rows', 'spend']);
+});
+
+// A START WITH STAGES AND ITS LAYER answers every step it added, and a filter is not said to add a column it
+// only passes through (the source's payload column among them).
+test('a start with stages and a semantic_model step: every step listed as added, a where adds no column', async () => {
+  const e = engine();
+  const tutorial = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] };
+  const out = await start(e, [tutorial, step({ time: 'device_time' })]);
+  assert.deepEqual(out.steps_added.map((s) => s.index), [1, 2]);
+  assert.deepEqual(out.step_effects[0].columns_added, []);
+});
+
+// A MEASURE OF A PROPERTY SEVERAL EVENTS CARRY (a price on a completed and on a failed purchase) folds it on
+// all of them: said, with the events, unless the measure names its event.
+test('a measure over a property several events carry is said to fold it on all of them', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', { coverage: [
+    { event: 'ad_started', rowCount: 10, nonNull: 10 },
+    { event: 'ad_finished', rowCount: 10, nonNull: 10 },
+  ] });
+  const prop = { fn: 'count_distinct', args: [{ property: 'ad_type_of_event_data' }] };
+  const notes = async (expr) => (await start(e, [step({ measures: [{ name: 'types', expr }], metrics: [{ name: 'types', type: 'simple', measure: 'types' }] })])).step_effects[0].recommendations || [];
+  assert.ok((await notes(prop)).some((r) => /measure 'types' folds 'ad_type_of_event_data' on every event that carries it — ad_finished, ad_started/.test(r)));
+  const scoped = { fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'ad_started' }] }], then: { property: 'ad_type_of_event_data' } }] }] };
+  assert.ok(!(await notes(scoped)).some((r) => /folds 'ad_type_of_event_data'/.test(r)));
+});
+
+// A pivot's value may leave its column's name out: it is named for `on` and the value, as a column name.
+test('a pivot value without a name becomes the column <on>_<value>', async () => {
+  const e = engine();
+  const out = await start(e, [{ stage: 'pivot', on: 'event_name', values: [{ value: 'tutorial' }, { value: 'Level Started!' }, { value: 'shop_opened', name: 'shop' }], measure: { fn: 'count' } }]);
+  assert.deepEqual(out.step_effects[0].columns_added.map((c) => c.name), ['event_name_tutorial', 'event_name_level_started', 'shop']);
+});
+
+// a layer not built yet is its step: delete_context removes a model from the step as from a built layer —
+// its measures (`source`) and its join, and with cascade the metrics that read them
+test('delete_context semantic_model on a layer not built yet edits its step', async () => {
+  const e = engine();
+  const SPEND = { name: 'spend', source: 'acquisition', expr: { fn: 'sum', args: [{ column: 'cost' }] } };
+  // (and a metric on the governed measure the catalog fixes on acquisition: it goes with the model too)
+  const metrics = [...N, { name: 'spend', type: 'simple', measure: 'spend' }, { name: 'per_row', type: 'derived', expr: { fn: 'div', args: [{ metric: 'spend' }, { metric: 'rows' }] } }, { name: 'gov', type: 'simple', measure: 'total_spend' }];
+  const s = await start(e, [step({ measures: [COUNT, SPEND], metrics, join: [USERS] })]);
+  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'acquisition' }), /metrics depend on this model's measures: spend, per_row, gov — add cascade: true/);
+  const out = await e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'acquisition', cascade: true });
+  assert.deepEqual([out.removed, out.metrics_remaining, out.metrics_removed], [true, ['rows'], ['spend', 'per_row', 'gov']]);
+  const joined = await e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'users' });
+  assert.deepEqual([joined.removed, joined.metrics_remaining], [true, ['rows']]);
+  const st = e.ctxs.get(s.context_id).state.draft.semantic;
+  assert.deepEqual([st.measures.map((m) => m.name), st.join], [['rows'], undefined]);
+  assert.equal((await e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'crashlytics' })).removed, false);
+});

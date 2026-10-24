@@ -50,9 +50,9 @@
 | 3 | `funnel_from_event_property_steps` | Step / funnel share | simple per step, ratio between steps | `count_distinct`, `count` |
 | 4 | `conversion_metric_window` | N-day / rolling retention | pipeline (match_recognize + conditional counts); cumulative (rolling) | `count` per horizon |
 | 5 | `cohort_grid_two_time_axes` | Acquisition cohort × age grid | ratio + derived | `count_distinct(user_id)`, `sum(revenue)` |
-| 6 | `boolean_condition_as_measure` | Did/didn't do event X | simple + metric-in-filter, ratio | `count_distinct`, `sum_boolean` |
+| 6 | `boolean_condition_as_measure` | Did/didn't do event X | simple + metric-in-filter, ratio | `count_distinct`, `count` of a `case` |
 | 7 | `conversion_metric_window` | Visit→purchase conversion | pipeline (match_recognize) | `count` of completed matches |
-| 8 | `agg_chosen_per_question` | Win rate / attempts / churn per level | ratio, simple, derived | `count`, `count_distinct`, `average`, `sum_boolean` |
+| 8 | `agg_chosen_per_question` | Win rate / attempts / churn per level | ratio, simple, derived | `count` (of a `case`), `count_distinct`, `average` |
 | 9 | `ratio_metric` | ARPU/ARPPU/payer share/LTV/revenue mix | simple, ratio, derived, cumulative | `sum(revenue)`, `count_distinct`, `average` |
 | 10 | `same_measure_two_grains` | DAU/MAU stickiness & lifecycle states | derived (ratio of metrics), simple, conversion | `count_distinct(user_id)` |
 
@@ -148,7 +148,7 @@
 - **Required user attributes:** `install_date` (time @ day) as the cohort anchor.
 - **How it is computed — a pipeline:** `match_recognize` over [the cohort event, a later
   activity event] per user, `avg_seconds_between` from one to the other, then an aggregate
-  with one conditional count per horizon (`where secs <= N`) and a `div` for the rate. The
+  with one count of a case per horizon (`when secs <= N then 1`) and a `div` for the rate. The
   horizon is measured in seconds from the event; every filter holds for both steps; the scan
   is the pipeline's `time_range` — [start, end + the horizon], the cohort kept to [start, end]
   by a `where` on `first_seen_at`. Rolling retained-active counts stay a `cumulative` metric.
@@ -195,14 +195,14 @@
   spend-based cohorts.
 - **Required user attributes:** none required (combine with §2 segments freely).
 - **Semantic Layer constructs:**
-  - Measures: behavior flag `did_event = sum_boolean(case when event_name='purchase' then true else false end)` or a
-    per-user `purchases = count_distinct(user_id) filter purchase`; the outcome measure
+  - Measures: behavior flag `did_event = count where event_name='purchase'` (a count measure over
+    a case of the condition) or a per-user `purchases = count_distinct(user_id) filter purchase`; the outcome measure
     (e.g. `revenue_usd`, `events_count`).
   - Dimensions: optional time/segments; the cohort split is expressed as a **filter**.
   - Metric types: `simple` outcome metrics; `ratio` to compare cohort sizes;
     **`Metric(...)` wrapper in `--where`** to slice by event history.
-- **MetricFlow mapping (honest):** "Did event X" is encoded either as a boolean
-  categorical/measure (`sum_boolean`) or, more powerfully, by filtering with
+- **MetricFlow mapping (honest):** "Did event X" is encoded either as a count measure over
+  a case of the condition or, more powerfully, by filtering with
   `{{ Metric('purchases', group_by=['user']) }} > 0` in `--where` — note the documented
   constraint that `Metric(...)` filters allow **exactly one entity** in `group_by`
   (`['user']` is valid) and must aggregate without fan-out. There is no native "user
@@ -238,7 +238,7 @@
 - **Required user attributes:** none (optional segmentation).
 - **Semantic Layer constructs:**
   - Measures: `starts = count filter level_start`, `completes = count filter level_complete`,
-    `fails = count filter level_fail`, `wins = sum_boolean((event_properties->>'result')='win')`,
+    `fails = count filter level_fail`, `wins = count where result='win'`,
     `avg_attempts = average((event_properties->>'attempt')::int)`,
     `avg_moves = average((event_properties->>'moves')::int)`,
     `p50_score = median((event_properties->>'score')::int)` or `percentile`.

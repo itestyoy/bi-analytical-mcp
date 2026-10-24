@@ -1,23 +1,34 @@
-// Structured predicates -> MetricFlow `--where` Jinja expressions.
-// The AI never sends raw SQL; the server renders the typed predicate tree into
-// safe Dimension()/TimeDimension()/Entity() wrappers.
+// A METRIC QUERY'S WHERE STEPS (before its metrics step) → MetricFlow `--where` clauses. Their conditions
+// are the one expression (src/pipeline/compute.js) at its place — PLACES.metric_where: what the metrics
+// step's group_by names, as it names it (the refs of src/schema/refs.js: { source, column, via? },
+// { source, property }, { semantic_model, dimension, grain? }, { entity }, { time: 'metric_time', grain })
+// and constants, with the conditions, the logic and
+// the scalar functions of a dimension's value. The query resolves each reference to the MetricFlow item it
+// names; this module writes that item as the Jinja wrapper MetricFlow's where takes (Dimension /
+// TimeDimension / Entity), every name in it checked to be an identifier path, and everything around it —
+// the comparisons, and / or / not, a scalar function of a reference — by the dialect, through the one
+// writer. The caller never sends SQL: a constant is a literal the dialect writes.
 
-import { comparison } from './conditions.js';
+import { getDialect } from './dialects/index.js';
+import { conditionListSql, eachNode, CONDITION_FNS } from './pipeline/compute.js';
+import { REF_PLACES, refKind } from './schema/refs.js';
 
-/**
- * A query's `where`, as the caller writes it — the one condition grammar (src/schema-kit.js
- * conditionList: a list that all hold, { or } / { and } groups), each condition's `field` named the
- * way group_by names it ({ model, attribute }, { time: 'metric_time', grain }, { semantic_model,
- * dimension }, { entity }) — as the predicate tree the query resolves and renders: { op, conditions }
- * groups, each field with its `kind`.
- */
-export function wherePredicates(list) {
-  const kindOf = (f) => (f?.time ? { kind: 'metric_time', ...(f.grain ? { grain: f.grain } : {}) } : f?.entity ? { kind: 'entity', entity: f.entity } : { kind: 'dimension', ...f });
-  const one = (c) => (c.or ? { op: 'or', conditions: c.or.map(one) } : c.and ? { op: 'and', conditions: c.and.map(one) } : { ...c, field: kindOf(c.field) });
-  return { op: 'and', conditions: (list || []).map(one) };
-}
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
-/** Render a fieldRef into its Jinja wrapper (left-hand side of a predicate). */
+/** Whether a leaf is a reference a metric query names — one its group_by takes (REF_PLACES.group_by). */
+const isQueryRef = (e) => REF_PLACES.group_by.takes.includes(refKind(e));
+
+/** How a reference is called in a refusal. */
+const refLabel = (e) => {
+  const kind = refKind(e);
+  if (kind === 'time') return 'metric_time';
+  if (kind === 'source_column' || kind === 'source_property') return `${e.source}.${e.column ?? e.property}`;
+  if (kind === 'dimension') return `${[].concat(e.semantic_model).join(' → ')}.${e.dimension}`;
+  return String(e.entity);
+};
+
+/** Render a resolved field into its Jinja wrapper: { kind: 'dimension', path } | { kind: 'time_dimension',
+ *  path, grain } | { kind: 'metric_time', grain } | { kind: 'entity', name }. */
 export function renderField(field) {
   if (!field || typeof field !== 'object') throw new Error('predicate.field required');
   switch (field.kind) {
@@ -50,34 +61,38 @@ function assertName(n) {
   }
 }
 
-/** Render one predicate {field, op, value} into a SQL boolean fragment. */
-export function renderPredicate(pred) {
-  return comparison(renderField(pred.field), pred.op, pred.value);
-}
-
-/** Render a predicateGroup (recursive and/or) into a single boolean expression. */
-export function renderGroup(group) {
-  if (!group) return null;
-  if (!group.op || !Array.isArray(group.conditions) || group.conditions.length === 0) {
-    throw new Error('predicateGroup requires op and non-empty conditions');
-  }
-  const joiner = group.op === 'or' ? ' or ' : ' and ';
-  const parts = group.conditions.map((c) => {
-    if (c.conditions) return `(${renderGroup(c)})`;
-    return renderPredicate(c);
-  });
-  return parts.join(joiner);
+/**
+ * A where's `--where` clauses, one per item of the list (all of them hold). `resolve(ref, at, kind)` turns
+ * a reference into the field it names (renderField's shapes) or throws with why it names none; a time
+ * axis or a time dimension is compared as a moment. What the place does not take — a column of the rows,
+ * a metric, an aggregate, a window — the one writer refuses, naming what a where before the metrics step
+ * takes.
+ * `dialect` is the warehouse's dialect name.
+ */
+export function whereSql(dialect, list, resolve, at = 'where') {
+  const leaf = (e, where) => {
+    const kind = refKind(e);
+    if (!kind) return undefined; // a constant: the writer's own
+    const field = resolve(e, where, kind);
+    // a column's type where the resolver knows it (the warehouse's, so a text holding a flag or a number
+    // is compared as the text it is); a time axis a moment
+    return { sql: renderField(field), type: field.kind === 'metric_time' || field.kind === 'time_dimension' ? 'time' : field.type ?? null, ...(field.type ? { physical: true } : {}), name: refLabel(e) };
+  };
+  return conditionListSql(getDialect(dialect), null, list, at, { place: 'metric_where', leaf });
 }
 
 /**
- * Top-level: returns an array of `--where` clause strings. A top-level AND is
- * split into one clause per condition (clean, equivalent); anything else is a
- * single combined clause.
+ * Each condition of a where that compares a reference with constants — its first argument the reference,
+ * every other a { value } — wherever it stands (inside and / or / not too): { ref, op, values }. What the
+ * filter value guard checks against the values the index holds.
  */
-export function renderWhereClauses(group) {
-  if (!group) return [];
-  if (group.op === 'and') {
-    return group.conditions.map((c) => (c.conditions ? `(${renderGroup(c)})` : renderPredicate(c)));
-  }
-  return [renderGroup(group)];
+export function referenceComparisons(list) {
+  const out = [];
+  eachNode(list, (n) => {
+    if (!CONDITION_FNS.includes(n.fn) || !Array.isArray(n.args) || !n.args.length) return;
+    const [ref, ...rest] = n.args;
+    if (!isQueryRef(ref) || !rest.every((x) => isObj(x) && x.fn === undefined && Object.hasOwn(x, 'value'))) return;
+    out.push({ ref, op: n.fn, values: rest.map((x) => x.value) });
+  });
+  return out;
 }

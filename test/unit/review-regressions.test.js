@@ -4,21 +4,22 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
-import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
+import { settle, isStartedTask, taskResult, stepEffect } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
-  contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
+  contextManager: new ContextManager({ workspaceRoot: tempDir('rev') }),
   ...over,
 }));
 
@@ -47,11 +48,11 @@ test('_deletePipelineModel removes EVERY file of the pipeline, not just the .sql
 // ── the { source, property } view threw TypeError instead of refusing ───────────────────────
 // The schema's enum normally makes an unknown name unwritable, but a source that declares no
 // columns projects no enum and the field degrades to an open string. The view then read `.type`
-// off a column that was not there.
-test('an unknown column name is refused by the property view, not read off undefined', async () => {
+// off a column that was not there. (A model's column is the { source, column } view now.)
+test('an unknown column name is refused by the column view, not read off undefined', async () => {
   const e = engine();
-  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'no_such_column' }),
-    /not a property or attribute of 'users'|`property` must be one of/);
+  await assert.rejects(() => e.semantic_index({ source: 'users', column: 'no_such_column' }),
+    /not a column of 'users'|`column` must be one of/);
 });
 
 // ── meta.mcp.dimension: false was ignored on a non-fact's time axis ─────────────────────────
@@ -81,7 +82,7 @@ models:
       - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `;
   const load = (yaml) => {
-    const f = join(mkdtempSync(join(tmpdir(), 'rev-')), 'catalog.yml');
+    const f = join(tempDir('rev'), 'catalog.yml');
     writeFileSync(f, yaml);
     return loadCatalog(f, {});
   };
@@ -114,12 +115,12 @@ test('a pipeline build never holds its call: even a lone python model returns a 
   };
   const e = settle(new Engine({
     catalog: loadCatalog(CATALOG, {}),
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
+    contextManager: new ContextManager({ workspaceRoot: tempDir('rev') }),
     runner, pythonBin: PY,
   }));
   const py = {
     stage: 'python',
-    functions: [{ name: 'tag', params: ['df'], body: ['df["tag"] = 1', 'return df'] }],
+    functions: [{ name: 'tag', params: ['df'], body: "df[\"tag\"] = 1\nreturn df" }],
     steps: [{ call: 'tag', args: {} }],
     output: { columns: ['tag'] },
   };
@@ -166,7 +167,7 @@ models:
       - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
-  const dir = mkdtempSync(join(tmpdir(), 'blob-'));
+  const dir = tempDir('blob');
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   const e = settle(new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) }));
@@ -174,84 +175,12 @@ models:
     stage: 'match_recognize',
     partition_by: [{ entity: 'user' }],
     steps: [
-      { name: 's1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
-      { name: 's2', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_2' }] },
+      { name: 's1', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ property: 'step_id' }, { value: 'step_1' }] }] },
+      { name: 's2', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ property: 'step_id' }, { value: 'step_2' }] }] },
     ],
-    metrics: [{ name: 'reached_s2', type: 'reached', step: 's2' }],
   };
   const out = await e._buildPipeline({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
-});
-
-// ── a shipped recipe joined a slowly-changing dimension with no point-in-time window ───────
-// The recipe text mentioned the window as something the caller should add; the payload did not
-// carry it, so `dn_retention_exact` run as shipped fanned out to every historical version of each
-// player and inflated Day-N retention. Whether the window is NEEDED is a property of the catalog,
-// so the payload is fitted to it when the recipe is handed over.
-test('a recipe payload is fitted to this catalog: an SCD join gets its validity window', async () => {
-  const { loadRecipes } = await import('../../src/recipes.js');
-  const e = settle(new Engine({
-    catalog: loadCatalog(CATALOG, {}),
-    recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
-  }));
-  const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
-  const joinStage = out.pipeline_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
-  const u = e.catalog.getModel('users');
-  assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
-  const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
-  const to = Object.entries(u.dimensions).find(([, d]) => d.validity === 'end')[0];
-  assert.deepEqual(joinStage.between, { value: e.catalog.getModel('events').time.column, from, to });
-  assert.ok(out.fitted_to_catalog?.some((f) => f.includes("join with 'users'")), JSON.stringify(out.fitted_to_catalog));
-});
-
-// ── a pipeline submitted all at once got none of the stage warnings ─────────────────────────
-// The incremental builder warns about an SCD join with no window; _buildPipeline ran the
-// very same stages silently. Both paths now make the same judgements.
-test('_buildPipeline warns about an incomplete SCD join, like the step builder does', async () => {
-  const e = engine();
-  const out = await e._buildPipeline({
-    name: 'scd_fanout', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] },
-  });
-  assert.ok((out.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(out.warnings));
-  // with the window stated, there is nothing to warn about
-  const ok = await e._buildPipeline({
-    name: 'scd_pit', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
-  });
-  assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
-});
-
-// ── remove_dimensions matched a name nobody is ever shown ───────────────────────────────────
-// What is stored is the task-namespaced copy ('ret_country'); what the tools publish is the
-// attribute ('country'). Matching on the stored name made every removal a silent no-op that
-// still reported success.
-test('remove_dimensions takes the attribute it was offered, and refuses an unknown one', async () => {
-  const e = engine();
-  const first = await e.build_semantic_model({
-    name: 'ret',
-    semantic_models: [
-      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
-      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
-    ],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
-  });
-  const ctx = e.ctxs.get(first.context_id);
-  assert.deepEqual(ctx.state.additions.users.dimensions.map((d) => d.name), ['ret_country'], 'stored namespaced');
-  assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
-
-  await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
-    /cannot remove dimension 'nope'.*It has: country/s,
-  );
-  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
-  assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
-  // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
-  // own surface), but the task no longer declares its own copy of it
-  const { yaml } = renderContext(e.catalog, e.ctxs.get(first.context_id).state);
-  assert.ok(!/ret_country/.test(yaml), 'the task-namespaced dimension is out of the manifest');
-  assert.ok(out.metrics.length >= 1, 'the rest of the task is intact');
 });
 
 // ── the suggested group_by example named a model the context had not loaded ─────────────────
@@ -260,20 +189,20 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
 // which is not loaded in this context".
 test('groupable and the example only name models this context loaded', async () => {
   const e = engine();
-  const out = await e.build_semantic_model({
+  const out = await declare(e, {
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   const loaded = new Set(out.joined_models);
   assert.ok(!loaded.has('users'), 'this context loaded no users model');
-  assert.ok((out.groupable || []).every((g) => loaded.has(g.model)), JSON.stringify(out.groupable));
-  assert.ok((out.groupable_after_loading || []).some((g) => g.model === 'users'), 'and the rest is offered separately');
-  assert.match(out.groupable_after_loading_note || '', /use_base_models/);
-  // whatever is published as groupable is accepted by the query path
+  assert.ok((out.groupable || []).length > 0 && out.groupable.every((g) => loaded.has(g.source)), JSON.stringify(out.groupable));
+  assert.ok((out.groupable_after_loading || []).some((g) => g.source === 'users'), 'and the rest is offered separately');
+  assert.match(out.groupable_after_loading_note || '', /join it in the build's semantic_model step — \{ source: '\w+', on: \{ … \} \}/);
+  // whatever is published as groupable is accepted by the query path, as it is written there (the one ref)
   const ctx = e.ctxs.get(out.context_id);
-  for (const g of out.groupable || []) {
-    assert.equal(typeof e._normalizeRef(ctx, { model: g.model, attribute: g.attribute, ...(g.via ? { via: g.via } : {}) }, 'group_by'), 'string');
+  for (const [i, g] of (out.groupable || []).entries()) {
+    assert.equal(typeof e._taskRef(ctx, g, `group_by[${i}]`).path, 'string', JSON.stringify(g));
   }
 });
 
@@ -286,7 +215,7 @@ test('groupable and the example only name models this context loaded', async () 
 test('the resolved submission method is written into the model, not just reported', async () => {
   const { resolvePythonRuntime } = await import('../../src/catalog.js');
   const { frameProfile, compilePythonStage, importAllowlist } = await import('../../src/python-model.js');
-  const dir = mkdtempSync(join(tmpdir(), 'prof-'));
+  const dir = tempDir('prof');
   writeFileSync(join(dir, 'profiles.yml'), [
     'p:', '  target: prod', '  outputs:', '    prod:',
     '      type: bigquery', '      project: x', '      dataset: bi',
@@ -299,7 +228,7 @@ test('the resolved submission method is written into the model, not just reporte
   assert.equal(rt.method_declared, false, 'the profile never declared it — which is why it must be written down');
 
   const profile = frameProfile(rt, rt.config || {});
-  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] };
+  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] };
   const compiled = compilePythonStage(stage, {
     modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile),
     config: rt.config || {}, profile, submission: rt.method,
@@ -346,7 +275,7 @@ test('the resolved submission method is written into the model, not just reporte
 // the runtime disagree (a Colab notebook holding PySpark, or a 403 on dataproc.batches.create).
 test('the submission is read from dbt_project.yml first, and its source is reported', async () => {
   const { resolvePythonRuntime, submissionFromProject } = await import('../../src/catalog.js');
-  const dir = mkdtempSync(join(tmpdir(), 'proj-'));
+  const dir = tempDir('proj');
   // a profile whose settings IMPLY bigframes, and nothing declaring it
   writeFileSync(join(dir, 'profiles.yml'), [
     'p:', '  target: prod', '  outputs:', '    prod:',
@@ -376,7 +305,7 @@ test('the submission is read from dbt_project.yml first, and its source is repor
   const { frameProfile, compilePythonStage, importAllowlist } = await import('../../src/python-model.js');
   const profile = frameProfile(declared, {});
   const compiled = compilePythonStage(
-    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] },
+    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] },
     { modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile), config: {}, profile, submission: declared.method },
   );
   assert.equal(compiled.config.submission_method, 'serverless');
@@ -389,7 +318,7 @@ test('the submission is read from dbt_project.yml first, and its source is repor
 // defined as a dimension"), so `dbt parse` fails for EVERY context that merely loads the model.
 // Input-validation guard on what is rendered: the axis must be a dimension this model emits.
 const spendCatalog = (axisMeta) => {
-  const file = join(mkdtempSync(join(tmpdir(), 'aggtime-')), 'catalog.yml');
+  const file = join(tempDir('aggtime'), 'catalog.yml');
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
@@ -428,7 +357,7 @@ test('a time axis opted out of grouping is not named as agg_time_dimension', () 
 // The role IS the source's identity. A duplicate used to overwrite, so every tool enum, the value
 // index and every join path then described a table nobody meant — with no warning anywhere.
 test('two models declaring the same role are refused, naming both', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'dup-')), 'catalog.yml');
+  const file = join(tempDir('dup'), 'catalog.yml');
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
@@ -460,28 +389,23 @@ models:
 // It was guarded by `joinTargetFor(own) === model`, which is a tautology: `own` IS that model's
 // primary entity, so it always resolves back to it. Every unreachable attribute was therefore
 // accepted as `<own>__<attribute>` and died later inside MetricFlow, as an unknown entity.
-test('an attribute of a LOADED model no source can reach is refused here, not by MetricFlow', async () => {
+test('an attribute of a model no source of the context reaches is refused here, not by MetricFlow', async () => {
   const e = engine();
-  // measures on one events source; the OTHER events source is loaded, but nothing declares a
-  // relationship to it (two facts do not point at each other).
-  const out = await e.build_semantic_model({
+  // measures on one events source; the OTHER events source is no join of the step — nothing of the
+  // events points at a key it owns (two facts do not point at each other) — so the layer does not load it
+  const out = await declare(e, {
     name: 'evonly',
-    use_base_models: ['crashlytics', 'users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
-    (err) => {
-      assert.match(err.message, /no source in this context declares a relationship to 'crashlytics'/);
-      assert.match(err.message, /relationships/, 'and says where to look');
-      return true;
-    },
+    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['rows'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
+    /needs model 'crashlytics', which this context does not read/,
   );
   // …while the REACHABLE model of the same context still resolves under its relationship (the fix
   // closed no path; the warehouse-backed group-bys prove the rest).
   const ctx = e.ctxs.get(out.context_id);
-  assert.equal(e._normalizeRef(ctx, { model: 'users', attribute: 'country' }), 'user__country');
+  assert.equal(e._taskRef(ctx, { source: 'users', column: 'country' }).path, 'user__country');
 });
 
 // ── one name, two meanings: the value index silently overwrote one with the other ────────────
@@ -490,7 +414,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
 // literal is verified. A name carried by BOTH produced two index targets with one key: the later
 // scan overwrote the earlier, so the view rendered one field's spec over the other's numbers.
 test('a name that is both a payload property and a groupable column is refused', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'clash-')), 'catalog.yml');
+  const file = join(tempDir('clash'), 'catalog.yml');
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
@@ -514,20 +438,20 @@ models:
 });
 
 // ── unnest read a payload column without checking it is still there ─────────────────────────
-// `derive` gained that check; `unnest` did not, so after a stage that changed the grain it emitted
+// an event-property read gained that check; `unnest` did not, so after a stage that changed the grain it emitted
 // a lateral join over a column the relation no longer has — a raw warehouse error at materialize
-// instead of a stage-time refusal at add_step.
+// instead of a stage-time refusal at add_steps.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
-  const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
+  const s = await e.build_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } });
-  assert.equal(ok.step_index, 1);
+  const ok = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] });
+  assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
-  const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] } });
+  const agg = await e.build_model({ action: 'start', name: 'items2', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } }),
+    () => e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

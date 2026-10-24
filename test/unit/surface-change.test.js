@@ -5,15 +5,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../../src/store.js';
 import { surfaceChange, SurfaceChangeBus, LIST_TTL_MS, CHANGE_WINDOW_MS } from '../../src/surface-change.js';
 import { startServer, V } from '../helpers/mcp-http.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 test('the fingerprint is kept across starts: a change is a change, the same surface is not', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'surface-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('surface'), 'mcp.sqlite');
   const open = () => openStore({ dbPath });
   let s = open();
   assert.equal(surfaceChange(s, 'aaa').changed, true, 'a first start: nothing is known to be cached');

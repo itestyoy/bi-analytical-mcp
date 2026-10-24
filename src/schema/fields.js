@@ -1,356 +1,202 @@
 // THE PIECES THE TOOL SCHEMAS SHARE — the name patterns, the reused descriptions, the items a
-// declaration and a query are written in (a measure, a dimension, a where item, a metric, a reference
-// into the project's own layer), the predicate grammar, and the limits every tool quotes (how long a
-// read waits, how many queries a batch holds). The tools are put together in src/schema.js.
+// declaration is written in (a measure, a dimension, a metric), the semantic declaration's `$defs` (the
+// one expression of src/pipeline/compute.js), what the checks of the semantic side say (dry_run,
+// validate), and the limits every tool quotes (how long a read waits, how many queries a batch holds).
+// The tools are put together in src/schema.js; a metric query's one step of its own (the metrics step,
+// no pipeline stage) is written here, and the place that takes it offers it (src/pipeline/stages.js
+// STAGE_PLACES.metric_scope).
 
-import { MEASURE_AGGS, GRAINS } from '../catalog.js';
+import { GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
-import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
-import { OPS } from '../conditions.js';
+import { form, pick, timeRange, measureForm } from '../schema-kit.js';
+import { exprDefs, EXPR_REF, EXPR_KINDS, PLACES } from '../pipeline/compute.js';
 import { CONTEXT_ID } from '../context-manager.js';
+import { contractOnSchema } from '../catalog/joins.js';
+import { SEMANTIC_NAME, NAME, TASK } from './names.js';
 
-export const NAME = '^[a-z][a-z0-9_]{0,40}$';
-
-export const TASK = '^[a-z][a-z0-9_]{2,40}$';
+export { SEMANTIC_NAME, NAME, TASK } from './names.js';
 
 export const CTX = CONTEXT_ID;
 
 export const TASK_ID = TASK_ID_PATTERN;
 
-export const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
+// a trailing window MetricFlow reads: a count and a unit of the grains metric_time is offered at
+export const WINDOW = '^[0-9]+ (day|week|month|quarter|year)s?$';
 
 // Reusable property-description strings (kept consistent across tools).
 export const D = {
-  context_id: 'ID of the isolated execution context to operate in. Omit on create to start a NEW, isolated context; pass an existing id to extend or query that same context. Each context is fully isolated, so parallel tasks never collide.',
-  measure_name: 'Unique measure name within the task (lowercase snake_case). Referenced by metrics; the final queryable name is prefixed with the task, e.g. task_<name>.',
-  agg: 'Aggregation applied to `field` to form the measure: count (rows), count_distinct (unique values of an entity key — required for conversion/funnel user counts), sum, average, median, min, max, percentile (needs `percentile`), sum_boolean (counts rows where a boolean/condition holds).',
-  percentile: 'Percentile in (0,1), e.g. 0.95 for p95. Required when agg=percentile.',
+  context_id: 'ID of the isolated execution context to operate in. Omit on create to start a new, isolated context; pass an existing id to extend or query that same context. Each context is fully isolated, so parallel tasks never collide.',
   label: 'Human-readable label shown in BI tools / metadata. Defaults to the name when omitted.',
-  event_name: 'Event scope for THIS measure: only rows whose event_name is in this list are aggregated. This is how a funnel/conversion step is pinned to a specific event. Overrides the semantic model\'s event_scope.',
-  where_measure: 'Per-measure conditions on event_data JSON properties, ANDed with the event scope. Used to define a funnel step as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
 };
 
-export function whereItemSchema(catalog, modelKey) {
-  return {
-    type: 'object', additionalProperties: false, required: ['property', 'op'],
-    description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
-    properties: {
-      property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ request: { source: '${modelKey}', event } })); scope the measure to those event_name(s) or it reads NULL.`),
-      op: { enum: OPS, description: 'Comparison operator.' },
-      value: { ...CONSTANT, description: 'Literal value(s) to compare against: a scalar; an array for in/not_in, [low, high] for between; a string for the text operators; none for is_null/is_not_null.' },
-    },
-  };
-}
-
-/** A measure's conditions, in the one condition grammar: all hold, an item may be { or: [...] }. */
-export const measureWhere = (leaf) => conditionList(leaf, D.where_measure);
-
-export function measureFieldSchema(catalog, modelKey) {
-  const opts = [{ enum: ['*'], title: 'rows' }];
-  const keys = catalog.entityKeyColumns(modelKey);
-  if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  if (catalog.isFact(modelKey)) {
-    const props = catalog.scalarEventProps(modelKey);
-    if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  }
-  // Amounts the schema marks aggregatable on this model. They carry NO aggregation of their
-  // own — pick the function that answers the question in `agg`.
-  const amounts = catalog.aggregatableFields(modelKey).map((a) => a.name);
-  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
-  // the kinds may share a name (a key column that is also an amount): any of them it is, the field is the same
-  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), an event_data property, or an AMOUNT the schema marks aggregatable on this source. An amount fixes no function — choose the one the question needs in `agg` (sum / average / max / median / percentile / …). A STRING field that holds numbers needs "cast":"numeric" to sum/average it.', anyOf: opts };
-}
-
-export function dimensionItemSchema(catalog, modelKey) {
-  const branches = [];
-  const cols = catalog.modelDimensionColumns(modelKey);
-  if (cols.length) {
-    branches.push({
-      title: 'model_column',
-      type: 'object',
-      additionalProperties: false,
-      required: ['source', 'column'],
-      description: 'A dimension taken directly from a physical column of the model.',
-      properties: {
-        source: { enum: ['model_column'], description: 'Use a physical table column as the dimension.' },
-        column: { type: 'string', enum: cols, description: 'Physical column name to expose as a dimension.' },
-        as_type: { enum: ['categorical', 'time'], default: 'categorical', description: 'Whether to treat the column as a categorical attribute or a time dimension (enables time grains).' },
-        grain: { enum: catalog.timeGranularities(), description: 'Time granularity when as_type=time (day/week/month/quarter/year).' },
-        label: { type: 'string', description: D.label },
-      },
-    });
-  }
-  if (catalog.isFact(modelKey)) {
-    branches.push({
-      title: 'event_property',
-      type: 'object',
-      additionalProperties: false,
-      required: ['source', 'property'],
-      description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
-      properties: {
-        source: { enum: ['event_property'], description: 'Take the dimension from an event_data property.' },
-        property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ request: { source: '${modelKey}', event } })); NULL on others.`),
-        as_type: { enum: ['categorical'], default: 'categorical', description: 'event_data dimensions are always categorical.' },
-        label: { type: 'string', description: D.label },
-      },
-    });
-  }
-  // A model with no groupable column and no payload has NO dimension to add: the field is left
-  // out of its branch rather than offered as a choice with no options.
-  return anyOfOr(branches, { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.' });
-}
-
-// Generic (model-agnostic) item schemas for `update`, where the target model is
-// already fixed by `semantic_model`. Field names are still catalog-constrained;
-// exact model/field coupling is re-checked in compile.
-export function genericMeasureField(catalog) {
-  const opts = [{ enum: ['*'], title: 'rows' }];
-  const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
-  if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  const props = catalog.scalarEventPropEnum();
-  if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  const amounts = catalog.aggregatableFieldNames();
-  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
-  return { description: 'What to aggregate: "*", an entity-key column, a numeric event_data property, or an AMOUNT the schema marks aggregatable — all of the target semantic model\'s own source. An amount fixes no function; choose it in `agg`.', anyOf: opts };
-}
-
-export function genericWhereItem(catalog) {
-  const item = whereItemSchema(catalog, catalog.facts[0]); // shape only — the enum is replaced below
-  item.properties.property = strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: each property is only populated on specific events; scope the measure to those event_name(s) or it reads NULL.');
-  return item;
-}
-
-export function genericMeasureItem(catalog) {
-  return byAgg('A measure to add to the target semantic model.', {
-    name: { type: 'string', pattern: NAME, description: D.measure_name },
-    field: genericMeasureField(catalog),
-    percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
-    cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
-    label: { type: 'string', description: D.label },
-    event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: D.event_name },
-    where: measureWhere(genericWhereItem(catalog)),
-  });
+/**
+ * The `$defs` of a semantic declaration: the expression in the KINDS a declaration writes it in
+ * (src/pipeline/compute.js EXPR_KINDS), each built by the one builder every tool's is and checked again as
+ * it is compiled (src/compile.js): the row expression (`expr`) of a semantic model's where, computed
+ * dimensions and a measure's arguments, and a measure itself (`aggregate`: ONE aggregate over row
+ * expressions) — both at PLACES.semantic_model: its columns, checked against the model it is written on
+ * with "did you mean", its event properties on an events source, constants, the current time, no window,
+ * no raw — and a derived metric's value (`metric_expr`, PLACES.derived_metric: { metric } leaves and
+ * numbers, in arithmetic). `kinds`: each kind's places (src/schema.js TOOL_PLACES). `project`: the dbt
+ * project's own layer, whose names the expression's refs offer too.
+ */
+export function semanticDefs(catalog, { project = null, kinds = {} } = {}) {
+  return exprDefs(catalog, { project, kinds });
 }
 
 /**
- * A measure, in two forms told apart by its `agg`: a percentile, which takes the quantile it reads
- * (`percentile`, required), and every other aggregation, which takes none.
+ * WHAT THE CHECKS SAY — two words, by what they need, one rule for every tool that takes one: `dry_run`
+ * compiles and shows, in the call's task, reading nothing and building nothing (a declaration; a query,
+ * after the context's build); `validate` checks on the warehouse, a task of its own (a pipeline preview:
+ * dbt run --empty, reading no data; a context's describe: MetricFlow, and over a time_range the
+ * warehouse). `what` is what dry_run shows, `validateAt` where the check on the warehouse is; `how` what
+ * validate runs, `readWith` the tool its task is read with.
  */
-function byAgg(description, fields) {
-  const { percentile, ...rest } = fields;
-  const others = [...MEASURE_AGGS].filter((a) => a !== 'percentile');
-  return {
-    type: 'object',
-    description,
-    anyOf: [
-      form({ title: 'an aggregation', tag: ['agg', others], tagDescription: D.agg, required: ['name'], properties: rest }),
-      form({ title: 'a percentile', tag: ['agg', 'percentile'], tagDescription: 'percentile: the value at the quantile `percentile` of `field`.', required: ['name', 'percentile'], properties: { ...rest, percentile } }),
-    ],
-  };
-}
+export const DRY_RUN = (what, validateAt = null) => `Compile and show ${what}, reading nothing and building nothing${validateAt ? ` — the check that runs on the warehouse is ${validateAt}` : ''}.`;
+export const VALIDATE = (how, readWith) => `Check on the warehouse: ${how} — a task, read with ${readWith}.`;
 
-export function genericDimensionItem(catalog) {
-  const cols = [...new Set(catalog.modelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
-  return {
-    type: 'object',
-    description: 'A dimension to add to the target semantic model (a column or an event_data property).',
-    anyOf: [
-      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { enum: ['model_column'], description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { enum: ['event_property'], description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: only populated on specific events (see semantic_index({ request: { source, event } })); NULL on others.'), as_type: { enum: ['categorical'], description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
-    ],
-  };
-}
-
-export function measureItemSchema(catalog, modelKey) {
-  return byAgg('A measure: an aggregation over the model, optionally scoped to specific events / property values (the building block of funnel steps and metrics).', {
-    name: { type: 'string', pattern: NAME, description: D.measure_name },
-    field: measureFieldSchema(catalog, modelKey),
-    percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
-    cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
-    label: { type: 'string', description: D.label },
-    ...(catalog.isFact(modelKey)
-      ? {
-          event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNames(modelKey)), description: D.event_name },
-          where: measureWhere(whereItemSchema(catalog, modelKey)),
-        }
-      : {}),
-  });
-}
-
-export function semanticModelBranch(catalog, modelKey) {
-  const dimItem = dimensionItemSchema(catalog, modelKey);
-  const props = withoutEmpty({
-    from: { enum: [modelKey], description: `Source model this semantic model is built from ("${modelKey}").` },
-    dimensions: dimItem && { type: 'array', items: dimItem, description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
-    measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
-  });
-  if (catalog.isFact(modelKey)) {
-    props.event_scope = {
-      type: 'object',
-      additionalProperties: false,
-      description: 'Default event filter applied to ALL measures in this semantic model (each measure can still narrow further via its own event_name). Use when the whole task concerns one event type.',
-      properties: {
-        event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNames(modelKey)), description: 'Events that scope every measure here.' },
-      },
-    };
-  }
-  return { type: 'object', additionalProperties: false, required: ['from'], description: `Semantic model built on the "${modelKey}" model.`, properties: props };
-}
+/** A computed dimension's name — what it is grouped and filtered by. */
+const DIMENSION_NAME = { type: 'string', pattern: SEMANTIC_NAME, description: 'The dimension\'s name — grouped and filtered as { semantic_model: [<its source>], dimension: <this name> }.' };
 
 export function metricSchema(catalog) {
-  const measureRef = {
-    type: 'object',
-    additionalProperties: false,
-    required: ['name'],
-    description: 'Reference to a measure by name.',
-    properties: { name: { type: 'string', description: 'Name of a measure defined in this task.' } },
-  };
+  // what a metric reads is named as a string — a measure of this step, or a governed measure of the
+  // catalog, by its name
+  const ref = (description) => ({ type: 'string', minLength: 1, description });
   const fields = {
-    name: { type: 'string', pattern: NAME, description: 'Unique metric name (lowercase snake_case). Queried as task_<name>.' },
+    name: { type: 'string', pattern: SEMANTIC_NAME, description: 'The metric\'s name (lowercase snake_case), unique in the context — queried by this name.' },
     label: { type: 'string', description: D.label },
-    measure: { ...measureRef, description: 'The single measure this metric exposes.' },
-    fill_nulls_with: { type: 'number', description: 'Value to substitute for NULL results (e.g. 0) so gaps in a time series render as zeros.' },
-    numerator: { ...measureRef, description: 'The measure on top of the division.' },
-    denominator: { ...measureRef, description: 'The measure on the bottom of the division.' },
+    measure: ref('The measure it reads, by name: one of this step\'s measures, or a governed measure of the catalog.'),
+    fill_nulls_with: { type: 'number', description: 'Value (e.g. 0) for this metric where a result row has none — beside another metric of the query, or as an input of a derived metric. It adds no rows: a time bucket with no rows at all is absent from the result.' },
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
-    period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
-    expr: { type: 'string', description: 'Arithmetic expression over the input metrics, e.g. "coins_in - coins_out". Restricted to a safe arithmetic grammar (the referenced metric aliases + basic math functions).' },
-    metrics: { type: 'array', minItems: 1, description: 'The input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['metric'], properties: { metric: { type: 'string', pattern: NAME, description: 'An input metric of this task, by its name.' }, name: { type: 'string', pattern: NAME, description: 'The name `expr` uses for it (default: the metric\'s own name).' } } } },
+    period_agg: { enum: ['first', 'last', 'average'], description: 'What a week or a month of this metric shows (it has a value per day): last — the running total as of the period\'s last day, usually what is meant; first — as of its first day (what is shown when this is left out); average — the mean of its days.' },
+    window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days"); omit it for all history.' },
+    expr: { $ref: EXPR_KINDS.metric_expr.ref, description: `The metric's value over the metrics it is built from — each a { metric } leaf naming another metric of this step, which is how its inputs are named — and numbers ({ value: 2 }), combined by ${PLACES.derived_metric.fns.join(', ')}, nested to any depth; div is NULL where the divisor is 0. A ratio of two metrics: { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }.` },
   };
   // one form per kind of metric, each with exactly the fields that kind reads (src/compile.js)
-  const kind = (type, title, required, optional, own = {}) => form({ title, tag: ['type', type], required: ['name', ...required], properties: { ...pick(fields, ['name', 'label', ...required, ...optional]), ...own } });
+  const kind = (type, title, required, optional) => form({ title, tag: ['type', type], required: ['name', ...required], properties: pick(fields, ['name', 'label', ...required, ...optional]) });
   return {
     type: 'object',
-    description: 'A metric: the queryable quantity. simple wraps one measure; ratio = numerator/denominator; cumulative accumulates a measure over time; derived computes an expression over other metrics. A conversion — the share of a base population that did B within a window of A — is not a metric here: it is a pipeline (semantic_index({ request: { recipe: "conversion_metric_window" } })), which scans one bounded window, filters both sides and measures the window in seconds.',
+    description: 'A metric: simple wraps one measure; cumulative accumulates a measure over time — over all history or a trailing window, or to date within a grain (with a window or grain_to_date each value is the one ending at a metric_time bucket, so a query of it groups by metric_time); derived computes an expression over other metrics (a ratio of two is a derived metric dividing one by the other). A conversion (B within a window of A) is a pipeline, not a metric: semantic_index({ request: { recipe: "conversion_metric_window" } }).',
     anyOf: [
       kind('simple', 'simple: one measure', ['measure'], ['fill_nulls_with']),
-      kind('ratio', 'ratio: numerator / denominator', ['numerator', 'denominator'], []),
-      kind('cumulative', 'cumulative: a measure accumulated over time', ['measure'], ['grain_to_date', 'period_agg'], { window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days") instead of all history.' } }),
-      kind('derived', 'derived: an expression over other metrics', ['expr', 'metrics'], []),
+      kind('cumulative', 'cumulative: over all history or a trailing window', ['measure'], ['window', 'period_agg']),
+      kind('cumulative', 'cumulative: to date within a grain', ['measure', 'grain_to_date'], ['period_agg']),
+      kind('derived', 'derived: an expression over other metrics', ['expr'], ['fill_nulls_with']),
     ],
   };
 }
 
-/** A dimension of the dbt project's OWN semantic layer (src/project-semantics.js), addressed by the
- *  semantic model that carries it — what a query of a context of the project's own semantic models names. */
-export function projectRef(project, catalog) {
-  const names = project.semantic_models.map((m) => m.name);
-  return {
-    type: 'object', additionalProperties: false, required: ['semantic_model', 'dimension'],
-    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named by what it is and where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context's own>"] for a dimension of the context's own model, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. In group_by its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension; in where the condition compares its values. preview_semantic_model({ request: { context_id, metric } }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
-    properties: {
-      semantic_model: { type: 'array', minItems: 1, items: { enum: names }, description: 'Where the dimension lives: the chain of semantic models it is reached through, in order, ending with the one that carries it — one model for its own dimensions or a direct join, several for a chain of joins.' },
-      dimension: { type: 'string', description: 'The dimension\'s name, as the project declares it.' },
-      grain: { enum: catalog.timeGranularities(), description: 'Only for a time dimension: the bucket rows are grouped into (default: the dimension\'s own granularity).' },
-    },
-  };
-}
+/** A metric_time window, as a metric query takes it (src/schema-kit.js timeRange: the one window shape). */
+export const METRIC_TIME_RANGE = timeRange('Restrict to a metric_time range (ISO dates) — a query with a metrics step only; a read of a built table is bounded by a where step. Unbounded queries scan the whole history — always bound when exploring. metric_time buckets are UTC days/weeks/months: a timezone moves only the bounds, not where a day starts — for local days group by a computed dimension with in_timezone.');
 
-/** An entity of the dbt project's own semantic layer, grouped or filtered by name — the key a project
- *  may declare only as an entity (an app, a country), which MetricFlow groups by as it is. → [] when
- *  the layer declares none, [ref] otherwise. */
-export function projectEntityRef(project) {
-  const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
-  if (!entities.length) return [];
-  return [{
-    type: 'object', additionalProperties: false, required: ['entity'],
-    description: `An entity of one of the dbt project's own semantic models, by name, used in that model's context: a key the project declares as an entity — often a column with no dimension of its own, such as a foreign key. Grouping by it gives one row per key value, its result column the entity's name; in where the condition compares the key's values. Every requested metric has to carry it; preview_semantic_model({ request: { context_id, metric } }) lists a metric's entities under its group_by.entities.`,
-    properties: {
-      entity: { enum: entities, description: 'The entity\'s name, as the project declares it.' },
-    },
-  }];
-}
+/** The fields a metric query takes beside its context — the one list query_model's start form
+ *  and a batch's item are built from (src/schema.js), and what tells an earlier metric query apart from
+ *  a bare list of metric names (src/earlier-spelling.js). */
+export const METRIC_QUERY_FIELDS = ['steps', 'time_range', 'limit', 'materialize', 'dry_run', 'include'];
 
 /**
- * What a metric query can name on `model` as an attribute — the set the engine resolves
- * (semantic-query.js): its groupable dimensions and dimension columns and, on an events source, the
- * scalar payload properties a task declares as dimensions.
+ * WHAT A METRIC QUERY COMPUTES — its metrics step: the metrics by the names the context offers, and what
+ * they are broken down by, each a ref of those a group_by takes (`$defs.ref`, built for REF_PLACES.group_by).
+ * It is no pipeline stage: MetricFlow writes its SQL (src/engine/semantic-query.js runs it), so the stage
+ * registry does not hold it and no build reaches it. ONE DEFINITION, read where it is offered and where it
+ * is refused: its form (`schema`; `project` — the dbt project's own layer, whose contexts name their
+ * dimensions its way), the group of `$defs.stage` it is listed under (STAGE_GROUPS, src/pipeline/stages.js),
+ * the place that takes it and offers it — the steps of a metric query up to it (STAGE_PLACES.metric_scope),
+ * which puts it in query_model's `$defs.stage` — and what any other place says of it (`elsewhere`).
  */
-export function modelAttributes(catalog, model) {
-  const m = catalog.models[model];
-  return [...new Set([
-    ...Object.keys(m.dimensions || {}),
-    ...catalog.modelDimensionColumns(model),
-    ...(catalog.isFact(model) ? catalog.scalarEventProps(model) : []),
-  ])];
-}
-
-/** The relationships that lead to `model`: each entity a model declares whose owner is `model`. */
-export function relationshipsTo(catalog, model) {
-  return [...new Set(catalog.modelKeys().flatMap((k) => Object.keys(catalog.entitiesOf(k))).filter((e) => catalog.joinTargetFor(e) === model))];
-}
+export const METRICS_STEP = {
+  stage: 'metrics',
+  group: 'semantic',
+  elsewhere: 'a metrics step is what the semantic layer computes, one per metric query (query_model)',
+  schema: (_catalog, { project = null } = {}) => ({
+    type: 'object', additionalProperties: false, required: ['stage', 'metrics'],
+    description: 'What the semantic layer computes: the metrics, one column each, broken down by group_by — one row per combination of its items. MetricFlow writes the SQL and makes every join. A query has one; the where steps before it filter the rows its metrics fold, the steps after it work on its result.',
+    properties: {
+      stage: { enum: [METRICS_STEP.stage] },
+      metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a build's context, the names its semantic_model step declared${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (context({ request: { action: "describe", context_id } }) lists them)' : ''}.` },
+      group_by: {
+        type: 'array', uniqueItems: true, items: { $ref: '#/$defs/ref' },
+        description: `How to break the metrics down, one result column per item, in order — each a ref, of those a group_by takes. { time: "metric_time", grain } works in every context (column metric_time_<grain>). In a task's context: a column of a model, { source, column } — the join comes from the schema, and the build's semantic_model step has to join the model (join: [{ source, on }]; column <source>_<column>); an event property the task declared a dimension, { source, property } (column <source>_<property>); a dimension it computed, { semantic_model: [<its source>], dimension } (column <source>_<dimension>); an entity, { entity } (column: its name).${project ? ' In a context of one of the dbt project\'s own semantic models: { semantic_model: [...], dimension, grain? } — semantic_model is the chain of models the dimension is reached through (the context\'s own model alone for its own; column <semantic_model>_<dimension>) — and { entity }; context({ request: { action: "describe", context_id, metric } }) lists exactly the items a metric takes.' : ''}`,
+      },
+    },
+  }),
+};
 
 /**
- * `{ model, attribute, via? }` — ONE CLOSED FORM PER MODEL, each with that model's own attributes as
- * an enum, so an attribute is written exactly as the model carries it; `via` is there only on a model
- * several relationships lead to (one is chosen for the caller otherwise). `lead` adds fixed fields in
- * front (a where's `kind`).
+ * THE LAST STEP OF A BUILD — the semantic layer over the build's rows (src/pipeline/semantic-stage.js):
+ * its dimensions, the models it joins for their attributes, its measures and its metrics. No stage of the
+ * registry (MetricFlow computes what it declares); offered by the place of a build
+ * (src/pipeline/stages.js STAGE_PLACES.build), and said where it is taken by every other place.
  */
-export function attributeRefForms(catalog, { lead = {}, required = [] } = {}) {
-  return catalog.modelKeys().map((model) => {
-    const attrs = modelAttributes(catalog, model);
-    if (!attrs.length) return null;
-    const vias = relationshipsTo(catalog, model);
+export const SEMANTIC_MODEL_STEP = {
+  stage: 'semantic_model',
+  group: 'semantic',
+  elsewhere: 'a semantic_model step is a build\'s last step, the semantic layer over its rows (build_model)',
+  schema: (catalog) => {
+    const label = { type: 'string', description: D.label };
+    const loadable = catalog.semanticModelKeys();
+    // a model whose attributes a metric is grouped by: one that declares a join contract, that the
+    // semantic layer loads and that owns a key another model carries — what MetricFlow joins onto —
+    // joined on its contract's parts (checked against that key when the step is built)
+    const owns = (k) => Object.keys(catalog.entitiesOf(k)).some((r) => catalog.joinTargetFor(r) === k && catalog.modelKeys().some((m) => m !== k && catalog.entityKey(m, r)?.length));
+    const joinable = catalog.joinableModels().filter((k) => loadable.includes(k) && owns(k));
+    const dimension = {
+      type: 'object', title: 'a dimension of the main model',
+      anyOf: [
+        form({ title: 'a column', required: ['column'], properties: { column: { type: 'string', pattern: NAME, description: 'A groupable column of the main model.' }, grain: { enum: catalog.timeGranularities(), description: 'A time column\'s bucket (default: its own granularity).' }, label } }),
+        form({ title: 'an event property', required: ['property'], properties: { property: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: 'A scalar event property of an events source — queried as { source, property }.' }, label } }),
+        form({ title: 'a computed dimension', required: ['name', 'expr'], properties: { name: DIMENSION_NAME, expr: { $ref: EXPR_REF, description: 'Its value from the row: a row expression, no aggregate.' }, label } }),
+      ],
+    };
     return {
-      type: 'object', additionalProperties: false, title: `an attribute of ${model}`, required: [...required, 'model', 'attribute'],
+      type: 'object', additionalProperties: false, required: ['stage', 'metrics'],
+      description: 'The semantic layer over this build: reusable named metrics, queried many ways with query_model (group_by, grain, filters). It is the build\'s last step; its main model is the build\'s source (the only step) or the table the steps before it built — whose rows are named by the build\'s name, so a measure or a metric takes another one. MetricFlow writes the SQL and makes every join.',
       properties: {
-        ...lead,
-        model: { const: model, description: 'The model that carries the attribute.' },
-        attribute: strEnum(attrs, `An attribute of ${model}, as semantic_index({ request: { model: "${model}" } }) lists it.`),
-        ...(vias.length > 1 ? { via: { enum: vias, description: `The relationship to reach ${model} through — several lead to it.` } } : {}),
+        stage: { enum: ['semantic_model'] },
+        time: { type: 'string', pattern: NAME, description: 'The main model\'s time axis (metric_time) — for a table the steps before this one built; a catalog source is read on its own.' },
+        dimensions: { type: 'array', items: dimension, description: 'The main model\'s own dimensions beyond its catalog columns — a time column at a grain, an event property, one computed from the row.' },
+        ...(joinable.length ? {
+          join: {
+            type: 'array', uniqueItems: true,
+            description: 'Models whose attributes the metrics are grouped and filtered by ({ source, column } in a query), each on the join contract it declares: { source, on: { <part>: <a column of the main model | a value> } }. A slowly-changing model is matched at the metric\'s time: its time part is the main model\'s time axis.',
+            items: { anyOf: joinable.map((k) => form({ title: `join ${k}`, required: ['source', 'on'], properties: { source: { const: k }, on: contractOnSchema(k, catalog.joinContract(k)) } })) },
+          },
+        } : {}),
+        measures: {
+          type: 'array',
+          items: measureForm({
+            ref: EXPR_KINDS.aggregate.ref, pattern: SEMANTIC_NAME,
+            nameDescription: 'The measure\'s name; metrics read it by this name.',
+            exprDescription: 'ONE aggregate of the rows — sum, average, min, max, median, percentile (with `percentile`), count_distinct, or count (with no args it counts the rows) — over a row expression; the rows a condition holds for are folded by an aggregate over a case: { fn: "count", args: [{ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }], then: { value: 1 } }] }] }. A formula over several aggregates is several measures and a derived metric.',
+            extra: { label, source: { enum: loadable, description: `${loadable.some((k) => catalog.models[k]?.scd) ? `A slowly-changing model (${loadable.filter((k) => catalog.models[k]?.scd).join(', ')}) holds a row per version, so a measure on it is dropped with a warning (a step whose every metric would be dropped so is refused) — count on an events source instead. ` : ''}Fold the rows of this model of the semantic layer instead of the main model\'s — computed on its own rows and compared beside the main model\'s on metric_time and the group_by (its spend beside the events\' revenue). Omitted: the main model.` } },
+          }),
+        },
+        metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to query (each reads a measure above, or other metrics).' },
       },
     };
-  }).filter(Boolean);
-}
-
-/** A metric_time window, as a metric query and a preview's validation take it. */
-export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
-
-/** The metric time axis at a grain — as group_by, order_by and where name it. */
-export const timeRef = (catalog) => ({ type: 'object', additionalProperties: false, required: ['time'], title: 'the metric time axis', description: 'The metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } });
-
-/**
- * A query's conditions: `predicate` is one condition — a field named exactly as group_by names it,
- * an operator, a value — and a where is a list of them (src/schema-kit.js conditionList).
- */
-export function predicateDefs(catalog, project = null) {
-  return {
-    predicate: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['field', 'op'],
-      description: 'A single filter condition (field OP value).',
-      properties: {
-        field: {
-          description: 'What is compared, named as group_by names it: { model, attribute } for a dimension (the join path is resolved from the schema), { time: "metric_time", grain } for the metric time axis' + (project ? '; in a context of one of the dbt project\'s own semantic models, { semantic_model, dimension } or { entity }' : '') + '.',
-          anyOf: [timeRef(catalog), ...attributeRefForms(catalog), ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])],
-        },
-        op: { enum: OPS, description: 'Comparison operator. between takes [low, high]; in/not_in take an array; the text operators a string; is_null/is_not_null take no value.' },
-        value: { ...CONSTANT, description: 'Value to compare against (scalar, array for in/not_in/between). Bound as an escaped literal.' },
-      },
-    },
-  };
-}
+  },
+};
 
 // The ceiling on the pacing timer (`time`). A wait happens INSIDE a tool call, so it is bounded by
 // the same thing a build's grace is bounded by: the client's own timeout, which this server neither
-// knows nor can raise. Asking for more than this returns after the cap, with `clamped: true`.
-// Declared here because both the schema text and the engine's clamp must say the same number.
+// knows nor can raise. Asking for more than this is refused by the schema (the timer's `seconds` and a
+// read's `wait_seconds` alike), so a wait is never cut short behind the caller's back.
 export const MAX_WAIT_SECONDS = 30;
-/** How many rows a read of a task ({ task_ids }) hands back unless it asks for another number: the task keeps them all, the rest is a next_offset away. */
+/** How many rows a read of a task ({ task_ids }) hands back unless it asks for another number: its offset and limit are row numbers of the task's result, the rest is a next_offset away. */
 export const READ_PAGE = 50;
+/** How many rows of its result a query task keeps unless its `limit` says otherwise — what a read pages through and a card draws (a stored result keeps every row in its table). */
+export const KEPT_ROWS = 1000;
 /** How many contexts one context({ action: list }) page holds, unless it asks for another number. */
 export const CONTEXT_PAGE = 20;
 
-/** A copy of a schema without its descriptions: the same checks, told once where it is described. */
-export function terse(schema) {
-  if (Array.isArray(schema)) return schema.map(terse);
-  if (!schema || typeof schema !== 'object') return schema;
-  const out = {};
-  for (const [k, v] of Object.entries(schema)) {
-    if (k === 'description') continue;
-    // under `properties` the keys are field names, not schema keywords
-    out[k] = k === 'properties' ? Object.fromEntries(Object.entries(v).map(([f, sub]) => [f, terse(sub)])) : terse(v);
-  }
-  return out;
-}
+
+/**
+ * THE READ HALF OF A QUERY TOOL — { task_ids } waits for tasks of the tool's side and returns each one;
+ * with cancel: true it stops them. One definition for every query tool, the core's and a feature's, so
+ * a read is written the same way whichever side it reads.
+ */
+export const TASK_READ = {
+  task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: 'Read tasks of this side back (instead of starting one) — one, or several read together: waits until all are done and returns each one\'s result under `results`, in this order.' },
+  wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment every task is done. 0 = just look.` },
+  cancel: { type: 'boolean', const: true, description: 'Stop these tasks instead of reading them: a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' },
+};

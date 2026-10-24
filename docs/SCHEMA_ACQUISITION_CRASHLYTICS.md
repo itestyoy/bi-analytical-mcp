@@ -32,8 +32,8 @@
 `known_events`, свои событийные свойства `*_of_event_data`, свой `primary_entity` и своё
 место в индексе значений по ключу `(source, property)`. Ни один не «главный». Поэтому
 источник всегда идёт **отдельным аргументом**:
-`semantic_index({ source, event })`, `build_pipeline_model({ source })`,
-`semantic_models[].from` — и никогда не приклеивается к имени.
+`semantic_index({ source, event })`, `build_model({ source })`,
+`semantic_models[].source` — и никогда не приклеивается к имени.
 
 ---
 
@@ -209,15 +209,15 @@
 
 | что нужно | стадия |
 |---|---|
-| массив, по элементам | `unnest { source, as }` — одна строка на элемент |
-| массив, по отчёту | `derive { op: array_length }` / `{ op: contains, value }` — зерно не меняется |
-| массив структур, одно поле | `unnest { source, as, field }` |
-| массив структур, несколько полей | `unnest { source, as }`, затем `compute { op: json_field, field }` на каждое поле |
-| массив, по позиции | `compute { op: json_parse_array }` → `element_at` / `array_last` |
-| JSON-объект | `derive { op: struct_field, field }` или `compute { op: json_field, field }` |
+| массив, по элементам | `unnest { expr: { property }, name }` — одна строка на элемент (массив-колонка этапа — `unnest { expr: { column }, name }`) |
+| массив, по отчёту | `compute { name, expr: { fn: array_length, args: [{ property }] } }` / `{ fn: array_contains, args: [{ property }, { value }] }` — зерно не меняется |
+| массив структур, одно поле | `unnest { expr: { property }, name, field }` |
+| массив структур, несколько полей | `unnest { expr: { property }, name }`, затем `compute { name, expr: { fn: json_field, args: [{ column }], field } }` на каждое поле |
+| массив, по позиции | `compute` с `{ fn: json_parse_array, args: [{ column }] }` → `element_at` / `array_last` |
+| JSON-объект | `compute` с листом `{ property, field }` или `{ fn: json_field, args: [{ column }], field }` |
 
 `unnest` **выбрасывает** отчёты, у которых массив NULL (у ANR нет стека исключения);
-`array_length` их сохраняет и читает NULL. Оба чтения верны — выбирается то зерно, о котором
+`array_length` их сохраняет и читает 0. Оба чтения верны — выбирается то зерно, о котором
 вопрос. Комплексная операция над не-комплексной колонкой отвергается с указанием, чем колонка
 объявлена на самом деле.
 
@@ -391,8 +391,8 @@
 join 'acquisition': `attrs` is required — list the columns you want from it; nothing is
 added implicitly. Columns of 'acquisition': acquisition_id, player_id_of_internal,
 spend_date, cost, impressions, clicks, media_source, campaign, campaign_id,
-ingest_batch_id. Use { column, as } to expose one under a different name.
-semantic_index({ model: 'acquisition' }) describes them.
+ingest_batch_id. Use { column, name } to expose one under a different name.
+semantic_index({ request: { source: 'acquisition' } }) describes them.
 ```
 
 ### Одно имя не может адресовать две колонки
@@ -403,7 +403,7 @@ semantic_index({ model: 'acquisition' }) describes them.
 |---|---|
 | имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', name: 'events_event_name' }` |
 | имя уже есть, и это **колонка ключа связи** | `'player_id_of_internal' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs` |
-| два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`as\`` |
+| два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`name\`` |
 
 Про ключ сказано отдельно намеренно: там переименовывать нечего — значение на обеих
 сторонах одинаковое, копию просто не надо просить.
@@ -413,11 +413,11 @@ semantic_index({ model: 'acquisition' }) describes them.
 
 ```json
 { "stage": "join", "with": "users", "via": "user",
-  "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-  "attrs": [{ "column": "app_version", "as": "users_app_version" }, { column: "country" }] }
+  "between": { "column": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
+  "attrs": [{ "column": "app_version", "name": "users_app_version" }, { "column": "country" }] }
 ```
 
-Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
+Так же ведёт себя и путь «конвейер целиком» — `build_model.pipeline` (`_buildPipeline`), в том числе
 `dry_run`: тот же отказ, а не тихо собранная модель без поля.
 
 ### Несколько соединений подряд
@@ -427,11 +427,11 @@ semantic_index({ model: 'acquisition' }) describes them.
 крутилась, когда приложение упало, у игрока из какой страны, купленного по какому каналу».
 
 ```json
-{ "source": "crashlytics", "stages": [
-  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ column: "event_id" }] },
-  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ column: "country" }],
-    "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
-  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ column: "media_source" }, { column: "cost" }] }
+{ "source": "crashlytics", "steps": [
+  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ "column": "event_id" }] },
+  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ "column": "country" }],
+    "between": { "column": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
+  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ "column": "media_source" }, { "column": "cost" }] }
 ] }
 ```
 
@@ -469,15 +469,16 @@ acquisition × events: строки расходов размножаются п
 — то на игрока приходится **несколько версий**, и соединение по одному ключу совпадёт с
 каждой исторической версией и раздует любой счёт.
 
-- **governed** — MetricFlow применяет окно сам: просто группируйте по `{ model: 'users', attribute: 'country' }`.
+- **governed** — MetricFlow применяет окно сам: просто группируйте по `{ source: 'users', column: 'country' }`.
 - **pipeline** — окно указывается явно, в стадии соединения. Намеренно явно: время, о
   котором спрашивают, видно прямо в месте вызова.
 
 ```json
 { "stage": "join", "with": "users", "via": "user",
-  "between": { "value": "spend_date",
+  "between": { "column": "spend_date",
                "from": "install_time_valid_from",
-               "to": "install_time_valid_until" } }
+               "to": "install_time_valid_until" },
+  "attrs": [{ "column": "country" }] }
 ```
 
 `value` — колонка **этой** стороны: для acquisition это `spend_date`, для событий —
@@ -521,21 +522,21 @@ entities:
   ad_funnel: { type: foreign, key: [tracking_id_of_event_data, internal_player_id] }
 ```
 
-Так появляется управляемый путь: мера на событиях группируется по **атрибутам** источника
-падений — `{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }`. Работает и составной ключ, и
+Так появляется управляемый путь: мера на событиях группируется по **колонкам** источника
+падений — `{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }`. Работает и составной ключ, и
 разные имена колонок на сторонах.
 
 > **`unique` — это утверждение о ДАННЫХ, и никто его не проверяет.** Если ключ на стороне
 > владельца в действительности не уникален, соединение размножит строки, и метрика вырастет
-> молча. В фикстуре это специально так: четыре отчёта u1 называют одну воронку, и тот же
-> запрос даёт **190** вместо честных **184** (сценарии 50-51). Прежде чем ставить `unique`,
+> молча. Фикстура держит своё утверждение: отчёт несёт воронку, только если он первый после
+> неё, поэтому запрос сценариев 50-51 даёт ровно **184**. Прежде чем ставить `unique`,
 > проверьте на складе:
 > ```sql
 > SELECT tracking_id, internal_player_id, count(*)
 > FROM fct_stability_events GROUP BY 1, 2 HAVING count(*) > 1;
 > ```
-> Пусто — `unique` правда. Не пусто — оставляйте `foreign` с обеих сторон и соединяйте в
-> pipeline.
+> Пусто — `unique` правда. Не пусто — ключ не уникален: не объявляйте ни владельца (`unique`
+> в entities), ни контракт соединения (`join`) на нём.
 
 ### Связь, которой никто не владеет, — это нормально
 
@@ -551,36 +552,53 @@ MetricFlow умеет соединять только по уникальном�
 Расход по стране установки на день расхода — управляемый путь, окно применяется само:
 
 ```json
-{ "metrics": ["ua_cost"], "group_by": [{ "model": "users", "attribute": "country" }] }
+{ "steps": [{ "stage": "metrics", "metrics": ["ua_cost"], "group_by": [{ "source": "users", "column": "country" }] }] }
 ```
 
 То же самое через pipeline, с явным окном:
 
 ```json
-{ "source": "acquisition", "stages": [
+{ "source": "acquisition", "steps": [
   { "stage": "join", "with": "users", "via": "user",
-    "between": { "value": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-    "kind": "inner", "attrs": [{ column: "country" }] },
+    "between": { "column": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
+    "kind": "inner", "attrs": [{ "column": "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
-    "measures": [{ "name": "total", "fn": "sum", "column": "cost" }] }
+    "measures": [{ "name": "total", "expr": { "fn": "sum", "args": [{ "column": "cost" }] } }] }
 ] }
 ```
 
 Какая рекламная воронка крутилась, когда приложение упало:
 
 ```json
-{ "source": "crashlytics", "stages": [
+{ "source": "crashlytics", "steps": [
   { "stage": "join", "with": "events", "via": "ad_funnel_rewarded",
-    "kind": "inner", "attrs": [{ column: "event_id" }, { column: "event_name" }] }
+    "kind": "inner", "attrs": [{ "column": "event_id" }, { "column": "event_name", "name": "ad_event_name" }] }
 ] }
 ```
 
-Медиана стоимости клика — функция выбрана на месте, в схеме её нет:
+У строки падения своя колонка `event_name`, поэтому имя события воронки приходит под своим
+именем (`name`) — иначе две колонки делили бы одно имя, и шаг отказал бы (таблица выше).
+
+Медиана стоимости клика — функция выбрана на месте, в схеме её нет. `cost_per_click` — выражение
+модели (`meta.mcp.measures`), и читает его мера семантической модели — листом `{ column }`:
 
 ```json
-{ "source": "acquisition", "stages": [
+{ "name": "ua_cpc",
+  "semantic_models": [{ "source": "acquisition",
+    "measures": [{ "name": "cpc_p50", "expr": { "fn": "median", "args": [{ "column": "cost_per_click" }] } }] }],
+  "metrics": [{ "name": "cpc_p50", "type": "simple", "measure": "cpc_p50" }] }
+```
+
+В pipeline такой колонки нет: его стадии видят только колонки модели. То же частное там
+пишет шаг `compute` (`div` делит через `NULLIF` на ноль, как и выражение), а агрегирует его
+следующий шаг:
+
+```json
+{ "source": "acquisition", "steps": [
+  { "stage": "compute", "name": "cost_per_click",
+    "expr": { "fn": "div", "args": [{ "column": "cost" }, { "column": "clicks" }] } },
   { "stage": "aggregate", "group_by": ["media_source"],
-    "measures": [{ "name": "cpc_p50", "fn": "median", "column": "cost_per_click" }] }
+    "measures": [{ "name": "cpc_p50", "expr": { "fn": "median", "args": [{ "column": "cost_per_click" }] } }] }
 ] }
 ```
 

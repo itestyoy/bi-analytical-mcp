@@ -3,13 +3,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../../src/store.js';
 import { ValueIndex } from '../../src/value-index.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
-const dbFile = () => join(mkdtempSync(join(tmpdir(), 'vi-key-')), 'value-index.sqlite');
+const dbFile = () => join(tempDir('vi-key'), 'value-index.sqlite');
 
 // Two sources may carry the SAME property name; each keeps its own row.
 test('the index keys values by (source, property) — same name on two sources never collides', () => {
@@ -32,13 +31,15 @@ test('the index keys values by (source, property) — same name on two sources n
 
 test('a correctly keyed database is opened as-is: its rows survive a restart', () => {
   const path = dbFile();
-  let index = new ValueIndex({ store: openStore({ dbPath: path }) });
+  let store = openStore({ dbPath: path });
+  let index = new ValueIndex({ store });
   index.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 4, nullCount: 0, values: [{ value: 'US', freq: 4 }] });
-  index.close();
-  index = new ValueIndex({ store: openStore({ dbPath: path }) });
+  store.close();
+  store = openStore({ dbPath: path });
+  index = new ValueIndex({ store });
   assert.equal(index.stats('users', 'country').totalCount, 4);
   assert.deepEqual(index.sampleValues('users', 'country', 5), [{ value: 'US', freq: 4 }]);
-  index.close();
+  store.close();
 });
 
 // A run row is keyed by (run, SOURCE, property). SQLite allows NULL in a non-INTEGER primary key

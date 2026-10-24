@@ -5,7 +5,7 @@ Project index router for this repository. It keeps orientation short; the rules 
 
 ## Snapshot
 
-- Last reviewed: 2026-10-02
+- Last reviewed: 2026-10-12
 - Repository path: `bi-analytical-mcp/`
 - Role: an MCP server for product analytics over a fixed data catalog — governed metrics (dbt semantic layer + MetricFlow) and one-off pipeline tables, queried as tasks, drawn as cards in MCP Apps hosts.
 
@@ -40,8 +40,9 @@ Project index router for this repository. It keeps orientation short; the rules 
 ## Hotspots
 
 - Schemas and refusals: `src/schema.js`, `src/schema/`, `src/schema-kit.js`, `src/validate.js` — every change is held by `test/unit/schema-portability.test.js` and the size budget.
-- Pipelines: `src/pipeline/` (stages, expressions, conditions) and `src/pipeline/earlier.js` (steps stored by an earlier version).
-- The semantic side: `src/compile.js`, `src/engine/semantic-query.js`, `src/project-semantics.js`.
+- The one definition per concept every tool shares: `src/pipeline/compute.js` (the function table, `exprSchema` — `$defs.expr` and the closed kinds `EXPR_KINDS` (`$defs.aggregate`, `$defs.metric_expr`), the window `$defs.over` / `$defs.over_frame` (a window function's / an aggregate over a window's, with its frame), `exprSql`, the places an expression stands in: `PLACES`), `src/pipeline/stages.js` (`stageDefs` — `$defs.stage`, `STAGE_PLACES`, the `metrics` step a metric query is built around), `src/schema/refs.js` (`refSchema` — `$defs.ref`, `REF_PLACES`), `src/schema.js` (`TOOL_PLACES` — which places each tool's definitions are built for), `src/conditions.js` (`predicateSql`), `src/earlier-spelling.js` (the one converter table for earlier spellings, `include` flags among them).
+- Pipelines: `src/pipeline/` (stages, reads of stored tables — `renderRead`, which also runs the steps after a metric query's `metrics` step) and `src/pipeline/earlier.js` (steps stored by an earlier version).
+- The semantic side: `src/compile.js`, `src/engine/semantic-query.js` (a metric query as its `steps` — where steps, one `metrics` step, a read after it: `mf query`, or MetricFlow's compiled SQL under the read compiler), `src/project-semantics.js`.
 - The dbt client: `src/dbt/` — the only place dbt and `mf` are spawned.
 
 ## Domain Map

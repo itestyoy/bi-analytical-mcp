@@ -16,6 +16,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setting } from './settings.js';
 import { ToolError } from './validate.js';
+import { resolveTimeRange, momentMs, isValidTimezone } from './time-range.js';
 
 const MESSAGE_MAX = 20000;
 const ARGS_MAX = 20000;
@@ -92,33 +93,33 @@ export class ErrorLog {
   /**
    * What explore_errors answers (its input already validated against the tool's schema): one kept
    * failure in full by `id` — everything that reproduces it — or a page of them, newest first, each
-   * cut to its message, with a count per source.
+   * cut to its message (in full with include: ["details"]), with a count per source.
    */
   explore(input = {}) {
     const iso = (ms) => (ms == null ? null : new Date(Number(ms)).toISOString());
     const parsed = (text) => { if (text == null) return null; try { return JSON.parse(text); } catch { return text; } };
+    // a JavaScript stack in a detail is the server's own frames: what is shown is its message, not where in
+    // the server's code it was thrown (the store keeps it whole, for whoever runs the server)
+    const outward = (k, v) => (k === 'detail' && typeof v === 'string' && /\n\s+at /.test(v) ? v.split('\n')[0] : v);
     const shown = (r, full) => ({
       id: Number(r.id), at: iso(r.at), source: r.source, severity: r.severity,
       ...Object.fromEntries(['tool', 'stage', 'field', 'code', 'context_id', 'task_id'].filter((k) => r[k] != null).map((k) => [k, r[k]])),
       message: full || !r.message || r.message.length <= 600 ? r.message : `${r.message.slice(0, 600)}… (explore_errors({ request: { id: ${Number(r.id)} } }) for all of it)`,
-      ...(full ? Object.fromEntries(['args', 'detail', 'context', 'files', 'runtime'].filter((k) => r[k] != null).map((k) => [k, parsed(r[k])])) : {}),
+      ...(full ? Object.fromEntries(['args', 'detail', 'context', 'files', 'runtime'].filter((k) => r[k] != null).map((k) => [k, outward(k, parsed(r[k]))])) : {}),
     });
     if (input.id != null) {
       const row = this.get(input.id);
       if (!row) throw new ToolError(`no error with id ${input.id} is kept (they are kept ${this.retentionMs / 86400000} days, the newest ${this.maxRows})`, { stage: 'validate', field: 'id' });
       return { ok: true, error: shown(row, true) };
     }
-    const at = (v, field) => {
-      if (v == null) return null;
-      const t = Date.parse(v);
-      if (Number.isNaN(t)) throw new ToolError(`${field}: '${v}' is not a date or date-time (ISO 8601, e.g. 2026-09-29 or 2026-09-29T10:00:00Z)`, { stage: 'validate', field });
-      return t;
-    };
-    // a date-only until means the whole of that day
-    const untilAt = at(input.until, 'until');
+    // the window as every time_range is read (src/time-range.js): a date-only end is the whole of that
+    // day, and a timezone reads both bounds as wall-clock time there
+    if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`time_range.timezone: unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    const bounds = resolveTimeRange(input.time_range) || {};
     const filter = {
-      since: at(input.since, 'since'), until: untilAt != null && /^\d{4}-\d{2}-\d{2}$/.test(input.until) ? untilAt + 86399999 : untilAt,
-      ...Object.fromEntries(['source', 'severity', 'tool', 'stage', 'context_id', 'task_id', 'text'].filter((k) => input[k] != null).map((k) => [k, input[k]])),
+      since: bounds.start != null ? momentMs(bounds.start) : null,
+      until: bounds.endExclusive != null ? momentMs(bounds.endExclusive) - 1 : bounds.end != null ? momentMs(bounds.end) : null,
+      ...Object.fromEntries(['source', 'severity', 'tool', 'stage', 'context_id', 'task_id', 'search'].filter((k) => input[k] != null).map((k) => [k, input[k]])),
     };
     const limit = input.limit ?? 20;
     const offset = input.offset ?? 0;
@@ -128,7 +129,7 @@ export class ErrorLog {
       total,
       shown: rows.length,
       ...(offset + rows.length < total ? { next_offset: offset + rows.length } : {}),
-      errors: rows.map((r) => shown(r, input.detail === true)),
+      errors: rows.map((r) => shown(r, (input.include || []).includes('details'))),
       by_source: this.summary(filter).map((g) => ({ ...g, last_at: iso(g.last_at) })),
       note: `Newest first. explore_errors({ request: { id } }) gives one in full — what reproduces it: the call's arguments (a task's input), the state of the context it worked on, the code of each generated model the error names (as written and as dbt compiled it), the runtime, and everything the warehouse said. Kept ${this.retentionMs / 86400000} days, the newest ${this.maxRows}.`,
     };

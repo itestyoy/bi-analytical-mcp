@@ -18,24 +18,21 @@ const ajv = new Ajv({ allErrors: true, strict: false });
 
 /** Every mode of the tools that declare an answer's shape, as calls. */
 async function calls(engine) {
-  const draft = await engine.build_pipeline_model({ action: 'start', name: 'outputs', source: engine.catalog.facts[0] });
+  const draft = await engine.build_model({ action: 'start', name: 'outputs', source: engine.catalog.facts[0] });
   return [
     ['time', { seconds: 0, reason: 'a pause' }],
     ['context', { action: 'list' }],
-    ['context', { action: 'describe', context_id: draft.draft_id }],
-    ['memory', { action: 'record', note: 'a finding', targets: [{ term: 'ad format' }] }],
-    ['memory', { action: 'list' }],
-    ['memory', { action: 'search', query: 'finding' }],
+    ['context', { action: 'describe', context_id: draft.context_id }],
+    ['memory', { action: 'record', notes: [{ note: 'a finding', about: [{ term: 'ad format' }] }] }],
     ['explore_errors', {}],
-    ['build_semantic_model', { name: 'outputs_sem', semantic_models: [{ from: engine.catalog.facts[0], measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] }],
-    ['delete_context', { context_id: draft.draft_id }],
+    ['delete_context', { context_id: draft.context_id }],
   ];
 }
 
 test('every answer of a tool that declares its shape carries it as structuredContent, and conforms', async () => {
   const engine = s.engine;
   const declared = engine.tools.values().filter((d) => d.output);
-  assert.deepEqual(declared.map((d) => d.name).sort(), ['build_semantic_model', 'context', 'delete_context', 'explore_errors', 'memory', 'time']);
+  assert.deepEqual(declared.map((d) => d.name).sort(), ['context', 'delete_context', 'explore_errors', 'memory', 'time']);
   const seen = new Set();
   for (const [name, request] of await calls(engine)) {
     const { result } = await runTool(engine, name, { request });
@@ -46,7 +43,7 @@ test('every answer of a tool that declares its shape carries it as structuredCon
     seen.add(name);
   }
   // the forget of the note recorded above
-  const id = (await engine.memory({ action: 'list' })).notes[0].id;
+  const id = (await engine.semantic_index({ notes: true })).notes[0].id;
   const forgot = (await runTool(engine, 'memory', { request: { action: 'forget', id } })).result;
   assert.ok(ajv.compile(engine.tools.get('memory').output)(forgot.structuredContent));
   // one in full from the error log: a refused call is kept, then read by its id
@@ -68,7 +65,7 @@ test('the official client takes every declared answer — it checks structuredCo
     const c = await s.client({ era });
     const listed = (await c.listTools()).tools;
     const withOutput = listed.filter((t) => t.outputSchema).map((t) => t.name).sort();
-    assert.deepEqual(withOutput, ['build_semantic_model', 'context', 'delete_context', 'explore_errors', 'memory', 'time'], era);
+    assert.deepEqual(withOutput, ['context', 'delete_context', 'explore_errors', 'memory', 'time'], era);
     // a tool with a card declares none: a host draws a card for every answer that carries structuredContent
     for (const t of listed.filter((x) => x._meta?.ui?.resourceUri)) assert.equal(t.outputSchema, undefined, `${era}: ${t.name}`);
     for (const [name, request] of await calls(s.engine)) {

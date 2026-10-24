@@ -63,7 +63,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 - `PORT` — published port (default 3000). The container always binds `0.0.0.0`.
 - `WAREHOUSE_DIALECT` — `duckdb` | `bigquery`.
 - `DBT_PROJECT_DIR` — host path to your dbt project (mounted at `/dbt_project`; used as both `DBT_BASE_PROJECT` and `DBT_PROFILES_DIR`; the catalog is discovered from its model YAMLs).
-  Semantic models and metrics the project declares itself (in any property file under the project's `model-paths`, named anything, in either YAML spec) are read at start — a `dbt parse` of a copy, logged as `project semantic layer:` — and each semantic model is a context of its own, named after it: `query_semantic_model({ context_id: "<semantic model>", metrics, group_by: [{ dimension: "<dimension>" }, { entity: "<entity>" }] })` — every name as the project declares it, read from the manifest dbt writes; nothing is built. `preview_semantic_model({ context_id: "<semantic model>" })` shows it as parsed — each metric's definition and cuts — and with `validate: true, time_range` compiles and runs every metric and dimension, naming what fails (the same tool previews a context `build_semantic_model` built). Their dbt models must already exist in the warehouse (`dbt run` them as the project does). A project that does not parse is logged and said in `semantic_index()`; the rest of the server runs as without it.
+  Semantic models and metrics the project declares itself (in any property file under the project's `model-paths`, named anything, in either YAML spec) are read at start — a `dbt parse` of a copy, logged as `project semantic layer:` — and each semantic model is a context of its own, named after it: `query_model({ request: { context_id: "<semantic model>", steps: [{ stage: "metrics", metrics, group_by: [{ semantic_model: ["<semantic model>"], dimension: "<dimension>" }, { entity: "<entity>" }] }] } })` — a dimension is named with the chain of semantic models it is reached through (`["<semantic model>"]` for the context's own, `["<other>"]` for one joined to directly, `["<a>", "<other>"]` through a chain of joins), and every name is the project's, read from the manifest dbt writes; nothing is built. `context({ request: { action: "describe", context_id: "<semantic model>" } })` shows it as parsed — each metric's definition and cuts — and with `validate: true, time_range` compiles and runs every metric and dimension, naming what fails (the same tool previews a context `build_semantic_model` built). Their dbt models must already exist in the warehouse (`dbt run` them as the project does). A project that does not parse is logged and said in `semantic_index()`; the rest of the server runs as without it.
 - `CONFIG_DIR` — host path mounted read-only at `/config` for optional `recipes.json` (and a standalone `catalog.yml` if you set `CATALOG_PATH`).
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
 - `QUERY_TIMEOUT_SECONDS` — how long a WAREHOUSE READ that merely enriches an answer may hold the
@@ -129,9 +129,10 @@ step, an eventstream with its steps), for a failed task the code of each generat
 names — as written and as dbt ran it, which is where a warehouse error's `[line:column]` points — and
 the runtime: server version and surface, dbt, dialect.
 
-`explore_errors()` gives the newest 20 and a summary by source, tool and stage. `since` / `until`,
-`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `text` narrow them, and `{ id }`
-gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
+`explore_errors()` gives the newest 20 and a summary by source, tool and stage. `time_range`
+(`{ start, end, timezone }`, read as every other window: a date-only end is the whole day),
+`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `search` narrow them, `include: ["details"]`
+gives each of the page in full, and `{ id }` — alone — gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
 newest `MCP_ERROR_MAX_ROWS` (default **10000**). It is not cleared by `MCP_DB_RESET`, because a server
 that fails on every start is exactly what it is for.
 
@@ -153,33 +154,38 @@ not per task. DuckDB has no table expiry, so nothing is set there.
 path analysis with [retentioneering](https://github.com/retentioneering/retentioneering-tools) 5.x
 (Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
 
-- **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads (events source,
-  time window, events kept / dropped / merged into groups (optionally the most frequent N names with
-  the rest as `other`), user attributes carried as segments through the declared relationship, optional
-  sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
-  A `where` or a segment may also name the source's own columns (any real column, e.g. an
-  environment) and its scalar event properties; `events.split` makes events out of an event's
-  parameters (by a value, or by conditions), and a group may merge those too. The window bounds the
-  partition column as well when the catalog declares one next to the time axis (the days the window
-  touches, and `partition_late_days` more for events filed under the day they arrived), and a source whose catalog sets `require_time_range` refuses a build without a window —
-  as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users
-  with their whole paths; `events` keeps a share of the rows of the named events (for one that drowns
-  the rest), whose counts and surrounding transitions are then approximate.
-  A path is one user's events by default; `path` makes it one value of a column or event property of
-  the source (a bidfloor id, a tracking id, a level) or of several (a composite key: the user and a
-  bidfloor id). For event logic these rules cannot say — events defined by a window (a lag, the n-th
-  fail in a row), a match_recognize, several sources joined, a cohort — the table is built with
-  `build_pipeline_model` and the eventstream starts from its task (`from_task` + `columns: { path,
-  event, time }`), reading that table's columns; its cards are the same transition graph, step
-  matrix and sankey.
+- **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads. Its rows are an
+  events source's own, in a time window, or the table a `build_model` pipeline made (`from_task` +
+  `path: [<column>]` + `columns: { event, time }`): the rows are prepared there — `where` (the events
+  kept or dropped, a slice of the source, a condition on an event property), `compute` (events renamed,
+  merged or split by a parameter, an event property read into a column), `join` (a related model's
+  columns on its join contract), a funnel, several sources, a cohort chosen by an aggregate, a python
+  step. A start takes no steps of its own. Then it names its columns: `columns: { event, time }` when
+  not the source's own, `path` — the column(s) one path is (the user by default; a bidfloor id, a
+  tracking id, a level, or several as a composite key) — and `segments`, columns carried as segments.
+  `top` keeps the N most frequent event names and merges the rest into `other`; `sessions` splits paths
+  at a gap. The window bounds the partition column as well when the catalog declares one next to the
+  time axis (the days the window touches, and `partition_late_days` more for events filed under the day
+  they arrived), and a source whose catalog sets `require_time_range` refuses a build without a window —
+  as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users with
+  their whole paths; `events` keeps a share of the rows of the named events (for one that drowns the
+  rest), whose counts and surrounding transitions are then approximate. Its cards are the same
+  transition graph, step matrix and sankey whichever rows it reads. A start kept in an earlier spelling
+  (its steps, `events.include` / `split`, segment objects) is read as it was built, and a new call in one
+  is refused.
   It is built in SQL where the data lives and materialized; the call returns a task.
-  Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_step"` (and
-  `add_steps`, `edit_step`, `insert_step`, `delete_step`, `truncate`, `fork`, `preview`) takes one of
-  the library's own steps (`{ type, ...params }`: filter_paths, truncate_paths, collapse_events,
-  split_sessions, add_segment, add_clusters, …). The library itself checks each one, in a warm local
+  Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_steps"` with
+  `steps: [...]` takes one or several of the library's own steps, in order (each
+  `{ type, ...params }`: filter_paths, truncate_paths, collapse_events, split_sessions, add_segment,
+  add_clusters, …); `edit_step` / `insert_step` (one `step` at an `index`), `delete_step`,
+  `truncate`, `fork` and `preview` — the eventstream builder's own actions (build_model keeps
+  `edit_step` and `fork` of them). The library itself checks each one, in a warm local
   process on the feature's environment, over stand-in eventstreams of what the eventstream holds at
-  that step — a step it refuses is refused at once with its message; one it takes comes back with what
-  it changed (events, path columns, segments and their levels). `action: "materialize"` runs the steps
+  that step — a step it refuses is refused at once with its message; each one it takes comes back with what
+  it changed (events, path columns, segments added or removed) and the answer with `steps_count`, as a
+  pipeline draft answers: `include: ["columns"]` adds the eventstream's shape after them (its events,
+  path columns, segments and their levels), `include: ["steps"]` every step. `fork` takes a `name` of
+  its own. `action: "materialize"` runs the steps
   on the warehouse (one dbt Python model, a task) and stores the eventstream after them.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, eventstream, analyses: [...] }`
   runs every listed analysis over the eventstream as materialized — each a library method with its own
@@ -188,17 +194,24 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   between two segment levels — checked by the library first on what the eventstream holds.
   It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
   BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
-  start. `{ task_ids }` reads it back, summarized for the model (`detail: "full"`: every record). The
+  start. `{ task_ids, offset?, limit? }` reads it back as the other query tools do: a page of each
+  analysis's tables by their row numbers (50 rows unless `limit` says), the rows in the order the
+  analysis ranks them (the biggest transitions first), with what it computes beyond rows (a group's
+  profile) whole; every row is in the pages, and a card draws every row. The
   feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
   for the runtime — is not offered.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
-  (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
+  (`ui://betti/retentioneering-view.html`), once per analysis — `{ task_id, display: { analysis,
+  title?, edge_weight? } }`, as `display_model_result` takes `{ task_id, display }`. The graph opens on each event's
   strongest exits (retentioneering's own default) and switches weights and how many exits it shows
   on the page itself — no recomputation; every card gives its scope (users, period, sample) and
   counts next to shares, has a table view of its numbers, and opens to the whole screen where the
   host offers it (the graph grows into the frame). A distribution is drawn as its
   histogram and a diff as heatmaps (the difference shaded above and below zero); describe, a
   conversion rate and per-path metrics have no card — their numbers come back for the answer.
+- **`delete_context`** takes one more form while the feature is on — `{ what: "eventstream",
+  context_id, eventstream }` removes one eventstream from its context (its tables stay until the
+  context is dropped); off, the form does not exist.
 
 Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
 table comes back. Configuration:
@@ -257,7 +270,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
   finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a call
-  that waits on an engine task (a query tool with `{ task_id }`, `display_model_result`) is followed to its end, so the
+  that waits on an engine task (a query tool with `{ task_ids }`, `display_model_result`) is followed to its end, so the
   protocol task's result is the rows, not "still running". A call that starts work still answers
   with its `task_id` at once.
   `tasks/cancel` stops the call's dbt process. (The TypeScript SDK does not implement this extension
@@ -297,7 +310,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   words. What a result with rows IS is
   declared by the caller: `display` on `display_model_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
-  fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several
+  fields, bounds, enums), so nothing about a form lives in prose: `line` (a trend; several
   `y`, or one `y` with a `series_column`, is a multi-line), `area` (a total split into parts over time,
   stacked), `bar` (a comparison: grouped by several `y` or a `series_column`, `stacked`, `horizontal` —
   the default past 8 categories), `pie` (shares of one total as a donut; past 6 slices the smallest
@@ -309,9 +322,13 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   table over a STORED result (a query run with `materialize: true`, or a pipeline build), `levels: [{ column, label }]`: the card gets the top level —
   the header names only that one, and an opened row names the level under it ("US · by Platform") —
   and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
-  a level; each level re-aggregates
-  with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
-  `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], agg }` over a
+  a level; `values: [{ column, fn, label, format }]`, each written as a KPI tile is — a number or a
+  percent, or `format: currency` with its `currency` — and re-aggregated per level with its `fn`, any
+  aggregate function a read's measure takes but the percentile and the sketch producers, so sums,
+  counts, min, max and `hll_merge` of a stored sketch add up while distinct counts, averages, medians
+  and ratios do not). Each view is a read in the pipeline's own stages (a where to the path, an
+  aggregate by the level, an order_by).
+  `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], fn }` over a
   stored result grouped by those columns too: the chart is drawn folded over them, a click on
   a bar, slice or point opens a menu of the dimensions left ("by Platform"; a point also "by Platform
   over time"), and the chart redraws in the same card filtered to what was clicked — a breadcrumb
@@ -322,16 +339,17 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   result arrives. A result that is gone — its table or context deleted, a result held in memory
   expired or lost to a restart, a task_id the server does not know — is `error.code: result_gone`
   (a card of it reads "This result is no longer available", not "Error").
-  BUILD, QUERY, SHOW: two sides with one naming — `build_semantic_model` / `query_semantic_model`
-  and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
-  query) returns only `{ task_id }` and never waits; the query tool of the same side, given
-  `{ task_ids }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
+  BUILD, QUERY, SHOW: one builder, `build_model` — its last step may be a `semantic_model` step,
+  the semantic layer — and one query tool, `query_model`. A call that starts warehouse work (a build, a
+  query) returns only `{ task_id }` and never waits; `query_model`, given
+  `{ task_ids }`, waits for it (up to 30 s per call) and returns a page of the rows (`offset` /
+  `limit`) — and never draws;
   `display_model_result` is the only tool that draws a model result, for either side: it reads the
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is
   carried only by a `display_model_result` that drew, or an `experiment` called with `card: true`. The
   tools whose answer has one shape and no card (`time`, `context`, `delete_context`, `memory`,
-  `explore_errors`, `build_semantic_model`) declare an `outputSchema` and carry every successful
+  `explore_errors`) declare an `outputSchema` and carry every successful
   answer as `structuredContent` too; every other answer is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may

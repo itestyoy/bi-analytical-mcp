@@ -25,39 +25,79 @@ Design docs:
 | Tool | Purpose |
 |---|---|
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
-| `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
-| `build_pipeline_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
-| `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
-| `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
+| `build_model` | compose a build incrementally (start → add_steps* → edit_step / fork → materialize) whose rows are the result — funnels (`match_recognize`), sessions, joins on a model's join contract, pivots, and a `python` stage (a dbt **Python model** of its own, run on the warehouse's Python runtime: BigFrames / Snowpark / PySpark); its LAST step may be a `semantic_model` step — reusable named metrics over the build's source or over the table its steps built, queried many ways with `query_model` |
+| `query_model` | a query as `steps`, reading every task back (`{ task_ids }`): with one `metrics` step (metrics + group_by) a metric query run by `mf query` against a context, `where` steps before it for the rows its metrics fold, and the pipeline's own read stages after it over its result (a where step on a metric is a having); without one, a read of the context's stored pipeline table in the same read stages (where, compute, aggregate, pivot, …) |
+| `context` | read contexts: `{ action: list \| describe }` — describe adds a context's semantic layer as dbt parsed it (each metric's definition and group_by; `validate: true` runs it); `delete_context` removes one |
 
 Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.
 The shapes above are that field's content. A tool's schema is a closed root with this one field,
 and its modes are an `anyOf` of closed forms under it. That shape is accepted as-is by the Anthropic
 and OpenAI APIs, so a client is shown the whole schema the server checks.
 
+Conditions, measures and computed values are written in ONE expression grammar in every tool —
+`{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property }`, `{ value }`, …):
+
+```js
+{ stage: "where", conditions: [
+  { fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] },
+  { fn: "or", args: [
+    { fn: "in", args: [{ column: "country" }, { value: "US" }, { value: "DE" }] },
+    { fn: "gt", args: [{ column: "revenue" }, { value: 10 }] } ] } ] }
+{ stage: "aggregate", group_by: ["country"], measures: [
+  { name: "revenue", expr: { fn: "sum", args: [{ column: "price" }] } },
+  { name: "p90_load", expr: { fn: "percentile", args: [{ column: "load_ms" }], percentile: 0.9 } },
+  { name: "failed_loads", expr: { fn: "count", args: [{ fn: "case", cases: [
+    { when: [{ fn: "eq", args: [{ column: "status" }, { value: "error" }] }], then: { value: 1 } }] }] } } ] }
+{ stage: "compute", name: "level", expr: { fn: "cast", args: [{ property: "level_id_of_event_data" }], type: "int" } }
+```
+
+A `where` is a list of conditions that all hold; `and` / `or` / `not` nest inside it. A conditional
+aggregate folds a `case` (missing on the rows it leaves out; an `else` folds them as its value —
+`average` of `then: 1, else: 0` is a share of the rows — except under `count` / `count_distinct`
+(and their approximations), where it is refused: `count` would count those rows, `count_distinct` their
+else value as one more), and a value has the type of what it is read from (a property the catalog's),
+converted by `cast`.
+
+A metric query is steps too — where steps before its `metrics` step filter the rows its metrics fold,
+the read steps after it work on its result:
+
+```js
+{ context_id, steps: [
+  { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] },
+  { stage: "metrics", metrics: ["revenue"], group_by: [{ time: "metric_time", grain: "day" }] },
+  { stage: "order_by", keys: [{ key: "revenue", direction: "desc" }] } ] }
+```
+
 ## Architecture
 
 ```
-AI ──► build_semantic_model (enum-constrained)
+AI ──► build_model + semantic_model step (enum-constrained)
           └─ compile → render YAML → .mcp/ctx/<id>/models/generated/context.yml → dbt parse
-AI ──► query_semantic_model (enum-constrained)
-          └─ mf query (dbt Core) in the context overlay → rows
+AI ──► query_model (enum-constrained)
+          └─ mf query (dbt Core, MetricFlow kept warm) in the context overlay → rows
 ```
 
 - **Catalog → enums** (`src/catalog.js`, `src/schema.js`): every column/property/
   event name is a JSON-Schema enum projected from the catalog; ajv rejects unknown
   names at the boundary (`src/validate.js`).
 - **Compile** (`src/compile.js`): declaration → dbt measures/dimensions/metrics.
-  Event scope is baked into each measure `expr` (`CASE WHEN …`); `ratio` operands
-  are auto-wrapped in `simple` metrics (dbt requires metric refs). Namespacing
-  uses a single underscore (dbt 1.11 forbids `__` in names).
+  A measure is `{ name, expr }`, its expression ONE aggregate in the expression grammar every
+  tool shares (`{ fn: "sum", args: [{ column }] }`, the rows where a condition holds by a `case` it
+  folds) — the case is baked into its `expr` (`CASE WHEN …`). A derived metric's `expr` is arithmetic over
+  `{ metric }` leaves — a ratio is `div` of two metrics. Metrics, measures and computed dimensions
+  are stored under the names they are declared by (a context holds one semantic layer); a name
+  MetricFlow refuses is refused when the step is added.
 - **Render** (`src/yaml-render.js`): exactly one semantic model per dbt model per
   context (base template + task additions).
 - **Contexts** (`src/context-manager.js`): per-context overlay dbt project +
   persistent, disk-reconciled registry, leases, teardown.
-- **Runner** (the dbt client, `src/dbt/`): shells `dbt parse` and `mf query` (NOT
+- **Runner** (the dbt client, `src/dbt/`): shells `dbt parse` and runs `mf query` (NOT
   `dbt sl query`, which is dbt-platform/remote and incompatible with local
-  per-context isolation). The integration tests run the same client, so the numbers
+  per-context isolation). `mf query` runs in MetricFlow KEPT WARM (`src/dbt/metricflow-server.js`
+  → `python/mf_server.py`): a long-lived process on the MetricFlow environment runs the CLI's own
+  `query` command with the CLI's arguments, so its CSV, SQL, plan and errors are `mf query`'s, without
+  the 3–4 s start of a fresh `mf` per query (imports, `dbt debug`, the manifest) — a query answers in
+  about a tenth of a second. The integration tests run the same client, so the numbers
   they prove are the ones production returns.
 - **Time spine** is a predefined model **always present** in every context:
   `ContextManager.ensureTimeSpine` writes a dialect-aware `metricflow_time_spine`
@@ -68,7 +108,8 @@ AI ──► query_semantic_model (enum-constrained)
   `error: { stage: 'validate'|'compile'|'parse'|'query', message, field }`,
   with dbt/MetricFlow output cleaned (ANSI + log timestamps stripped, the
   meaningful Error/Database Error/Parsing Error portion surfaced). Path/metric
-  validation errors are actionable (e.g. "add use_base_models including 'users'").
+  validation errors are actionable (e.g. a group_by on a model the context does not read names
+  the update that loads it: `semantic_models: [{ source: 'users' }]`).
 
 ## Recipes
 
@@ -77,9 +118,9 @@ returns one in full — ready-to-run, warehouse-proven payloads.
 
 The recipes shipped with the server are per TECHNIQUE, not per business task: a
 business shape differs per product, the technique does not. Five technical
-families — `metric_types` (ratio, derived, cumulative, conversion window,
+families — `metric_types` (a ratio and other derived formulas, cumulative, conversion window,
 boolean measure, the aggregation chosen per question, a governed measure),
-`joins` (an attribute of another model, a cohort grid on two time axes, two
+`joins` (a column of another model, a cohort grid on two time axes, two
 independent sources, a pipeline join by relationship name, a point-in-time
 join), `pipeline` (window lag, episodes by gap, an age axis, an ordered
 sequence, unnest, reshape, a volume/coverage check), `experiment` (A/B: proportion,
@@ -154,7 +195,7 @@ Snowflake, Databricks, DuckDB); on any other adapter it is absent and `semantic_
 
 The integration suite runs on **DuckDB**: each test file gets a database file of its own
 (`DUCKDB_PATH`, read by the fixture profiles), builds the base project, then runs
-`build_semantic_model` → `dbt parse` → `mf query` (and the pipelines, the python stage — dbt-duckdb
+`build_model` (a semantic_model step) → `dbt parse` → `mf query` (and the pipelines, the python stage — dbt-duckdb
 runs dbt Python models locally) and checks the returned rows. One process at a time can hold a DuckDB
 file, so the dbt client queues its processes on it (`src/dbt/process.js`).
 

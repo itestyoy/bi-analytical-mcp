@@ -56,6 +56,10 @@ models:
       meta:
         mcp:
           role: users
+          join:
+            unique: true
+            key: { user: internal_player_id }
+            time: { within: [install_time_valid_from, install_time_valid_until] }
     columns:
       - name: internal_player_id
         data_type: string

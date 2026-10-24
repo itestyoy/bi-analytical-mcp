@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { buildSchemas } from '../../src/schema.js';
+import { makeValidators, validateInput } from '../../src/validate.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data test: the property page's RECOMMENDATION (a UX affordance), not query
 // correctness. An attribute of a model that a source reaches through SEVERAL relationships is
@@ -33,6 +35,9 @@ models:
       - name: event_data
         data_type: jsonb
         config: { meta: { mcp: { is_event_data: true } } }
+      - name: environment
+        data_type: string
+        config: { meta: { mcp: { dimension: {} } } }
   - name: dim_users
     config: { meta: { mcp: { role: users } } }
     columns:
@@ -47,21 +52,49 @@ models:
 `;
 
 function engine() {
-  const dir = mkdtempSync(join(tmpdir(), 'viahint-'));
+  const dir = tempDir('viahint');
   writeFileSync(join(dir, 'catalog.yml'), CATALOG);
-  return settle(new Engine({ catalog: loadCatalog(join(dir, 'catalog.yml'), {}), recipes: loadRecipes(null), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'viahint-ws-')) }) }));
+  return settle(new Engine({ catalog: loadCatalog(join(dir, 'catalog.yml'), {}), recipes: loadRecipes(null), contextManager: new ContextManager({ workspaceRoot: tempDir('viahint-ws') }) }));
 }
 
-test('an attribute reached through several relationships: its page names via and every choice', async () => {
+test('a column reached through several relationships: its page names via and every choice', async () => {
   const e = engine();
-  const page = await e.semantic_index({ source: 'users', property: 'country' });
-  const rec = page.recommendations.find((r) => r.includes("model: 'users'"));
+  const page = await e.semantic_index({ source: 'users', column: 'country' });
+  const rec = page.recommendations.find((r) => r.includes("{ source: 'users', column: 'country' }"));
   assert.ok(rec, JSON.stringify(page.recommendations));
   assert.match(rec, /from 'events' add via: one of 'user', 'referrer'|from 'events' add via: one of 'referrer', 'user'/);
+  // a model's column is `column` — the earlier `property` is told its name, not served
+  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'country' }), /unexpected property 'property' — here that field is called 'column'/);
+});
+
+// Allowed non-data test: the same recommendation for an events source's OWN column — read in a build
+// over that source, never by joining the source onto itself.
+test('an events source\'s own column: its page reads it in a build over the source, with no join', async () => {
+  const e = engine();
+  const page = await e.semantic_index({ source: 'events', column: 'environment' });
+  assert.ok(page.recommendations.some((r) => r.includes("source: 'events'") && r.includes("{ column: 'environment' }")), JSON.stringify(page.recommendations));
+  assert.ok(!page.recommendations.some((r) => r.includes("join: [{ source: 'events'") || r.includes("stage: 'join', source: 'events'")), JSON.stringify(page.recommendations));
+});
+
+// Allowed non-data test: an input-validation guard. The `via` a metric query's group_by takes is not a
+// view's: semantic_index reads a column where it is (REF_PLACES.index_view), so its schema offers no
+// `via` even where several relationships lead to the model — while the group_by still does.
+test('a column reached through several relationships: via is a group_by\'s, not a semantic_index view\'s', () => {
+  const dir = tempDir('viahint');
+  writeFileSync(join(dir, 'catalog.yml'), CATALOG);
+  const validators = makeValidators(buildSchemas(loadCatalog(join(dir, 'catalog.yml'), {})));
+  const view = validateInput(validators.semantic_index, { source: 'users', column: 'country', via: 'user' });
+  assert.equal(view.ok, false, 'a view takes no via');
+  assert.ok(view.errors.some((m) => m.includes("unexpected property 'via'")), view.errors.join(' | '));
+  assert.equal(validateInput(validators.semantic_index, { source: 'users', column: 'country' }).ok, true);
+  const groupBy = (via) => validateInput(validators.query_model, { context_id: 'ctx_abcdef123456', steps: [{ stage: 'metrics', metrics: ['m'], group_by: [{ source: 'users', column: 'country', via }] }] });
+  assert.equal(groupBy('user').ok, true, groupBy('user').errors?.join(' | '));
+  assert.equal(groupBy('referrer').ok, true, groupBy('referrer').errors?.join(' | '));
+  assert.equal(groupBy('nope').ok, false, 'via names a relationship that leads to the model');
 });
 
 test('recipe files are split on commas only: a path with a colon is one path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vol:ro-'));
+  const dir = tempDir('vol:ro');
   const file = join(dir, 'recipes.json');
   writeFileSync(file, JSON.stringify({ recipes: [{ id: 'deploy_only', title: 'x', task_type: 'pipeline' }] }));
   const r = loadRecipes(null, file);

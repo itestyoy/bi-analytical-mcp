@@ -7,8 +7,8 @@
 //
 // METRICFLOW IS AN ENVIRONMENT OF ITS OWN — `metricflow`, unless MF_ENV names another. dbt's docs,
 // for a setup without the dbt platform: "install MetricFlow separately and use the mf prefix". Its
-// `mf` reads the semantic_manifest.json that the chosen dbt environment's `dbt parse` wrote, and the
-// MetricFlow group-by script (python/mf_group_bys.py) runs on its Python. It cannot share a venv with a dbt v2 binary: dbt-metricflow
+// `mf` reads the semantic_manifest.json that the chosen dbt environment's `dbt parse` wrote, and
+// MetricFlow kept warm (python/mf_server.py — every metric query) runs on its Python. It cannot share a venv with a dbt v2 binary: dbt-metricflow
 // brings the Python dbt-core, whose own `dbt` command would replace it.
 //
 // ONLY OUR ENVIRONMENTS RUN. A name must be one src/dbt/environment-specs.js defines, and the

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { localToUtc, resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../../src/time-range.js';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Pure boundary math (no warehouse): wall-clock → UTC instants, incl. DST edges.
 test('localToUtc converts wall-clock boundaries to UTC instants (incl. DST)', () => {
@@ -23,6 +23,13 @@ test('localToUtc converts wall-clock boundaries to UTC instants (incl. DST)', ()
   assert.equal(localToUtc('nope', 'UTC'), null);
   assert.ok(isValidTimezone('Europe/Berlin'));
   assert.ok(!isValidTimezone('Mars/Olympus'));
+});
+
+test('resolveTimeRange: a window that ends before it starts is refused; a date-only end is its whole day', () => {
+  assert.throws(() => resolveTimeRange({ start: '2026-01-31', end: '2026-01-01' }), /time_range ends before it starts \(start '2026-01-31', end '2026-01-01'\) — swap them/);
+  assert.throws(() => resolveTimeRange({ start: '2026-01-02 10:00', end: '2026-01-02 09:00', timezone: 'UTC' }), /ends before it starts/);
+  assert.equal(resolveTimeRange({ start: '2026-01-02 10:00', end: '2026-01-02' }).endExclusive, '2026-01-03');
+  assert.equal(resolveTimeRange({ start: '2026-01-01', end: '2026-01-01' }).endExclusive, '2026-01-02');
 });
 
 test('resolveTimeRange: date-only end = WHOLE local day (exclusive next midnight)', () => {
@@ -53,22 +60,35 @@ test('require_time_range rejects an unbounded pipeline; a bounded one passes val
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const catalog = loadCatalog(CATALOG, { requireTimeRange: true });
   assert.equal(catalog.requireTimeRangeFor('events'), true);
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr-')) }) }));
-  const s = await e.build_pipeline_model({ action: 'start', name: 'guard', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
-  // commit without a time window → blocked by the guardrail.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id }), /require_time_range/);
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('tr') }) }));
+  const s = await e.build_model({ action: 'start', name: 'guard', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  // commit without a time window → blocked by the guardrail, in the call (no task is started to fail)
+  const tasksBefore = e.jobs.list().length;
+  await assert.rejects(() => e.raw.build_model({ action: 'materialize', context_id: s.context_id }), (err) => /require_time_range/.test(err.message) && err.field === 'time_range');
+  // a start that builds its steps in the same call: the steps are added, the build is refused beside them
+  const built = await e.raw.build_model({ name: 'guard2', source: 'events', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], materialize: true });
+  assert.deepEqual([built.steps_count, built.materialize.ok, built.materialize.error.stage], [1, false, 'validate']);
+  assert.match(built.materialize.error.message, /require_time_range/);
+  assert.equal(e.jobs.list().length, tasksBefore, 'no build task was started');
   // the same pipeline WITH a window passes validation (fails later only because no runner is wired).
-  const s2 = await e.build_pipeline_model({ action: 'start', name: 'guarded', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
-  const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s2.draft_id });
+  const s2 = await e.build_model({ action: 'start', name: 'guarded', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' } });
+  await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const out = await e.build_model({ action: 'materialize', context_id: s2.context_id });
   assert.equal(out.kind, 'pipeline'); // reached registration (no time-range rejection)
   // a stage-level where on the time column ALSO satisfies the guard.
-  const s3 = await e.build_pipeline_model({ action: 'start', name: 'wherebound', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s3.draft_id, stage: { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01' }] } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s3.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
-  const out3 = await e.build_pipeline_model({ action: 'materialize', draft_id: s3.draft_id });
+  const s3 = await e.build_model({ action: 'start', name: 'wherebound', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: s3.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01' }] }] }] });
+  await e.build_model({ action: 'add_steps', context_id: s3.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const out3 = await e.build_model({ action: 'materialize', context_id: s3.context_id });
   assert.equal(out3.kind, 'pipeline');
+  // …but the time column named inside an or / a not bounds nothing: the other branch reads every row
+  const since = { fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01' }] };
+  for (const loose of [{ fn: 'or', args: [since, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }, { fn: 'not', args: [since] }]) {
+    const s4 = await e.build_model({ action: 'start', name: 'loose', source: 'events' });
+    await e.build_model({ action: 'add_steps', context_id: s4.context_id, steps: [{ stage: 'where', conditions: [loose] }] });
+    await assert.rejects(() => e.raw.build_model({ action: 'materialize', context_id: s4.context_id }), (err) => /require_time_range/.test(err.message), loose.fn);
+  }
 });
 
 // Default: no flag → unbounded pipelines still allowed (backwards-safe).
@@ -76,10 +96,10 @@ test('without require_time_range an unbounded pipeline is not rejected', async (
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const catalog = loadCatalog(CATALOG, {});
   assert.equal(catalog.requireTimeRangeFor('events'), false);
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr0-')) }) }));
-  const s = await e.build_pipeline_model({ action: 'start', name: 'free', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
-  const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('tr0') }) }));
+  const s = await e.build_model({ action: 'start', name: 'free', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const out = await e.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(out.kind, 'pipeline');
 });
 
@@ -87,7 +107,7 @@ test('without require_time_range an unbounded pipeline is not rejected', async (
 test('partition_late_days: a whole number of days is accepted, anything else is refused at catalog load', () => {
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const text = readFileSync(CATALOG, 'utf8');
-  const dir = mkdtempSync(join(tmpdir(), 'late-'));
+  const dir = tempDir('late');
   const load = (value) => { const p = join(dir, `c${Math.random().toString(36).slice(2)}.yml`); writeFileSync(p, text.replace('partition_late_days: 3', `partition_late_days: ${value}`)); return loadCatalog(p); };
   assert.equal(load(30).getModel('events').partition_late_days, 30);
   assert.throws(() => load(-1), /partition_late_days/);

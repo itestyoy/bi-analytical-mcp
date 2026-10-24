@@ -1,6 +1,8 @@
 // The catalog SEARCH subsystem behind semantic_index({ request: { search } }). Owns all matching +
 // ranking so the engine just delegates. Five corpora are searched in one call:
-//   event names · event properties · dimension attributes · recipes · indexed VALUES.
+//   event names · event properties · models' columns · recipes · indexed VALUES.
+// Every match names what it found as the ref names it — { source, event }, { source, property },
+// { source, column } — so a hit is the view to drill into, written as that view takes it.
 //
 // The four SCHEMA corpora are static for the engine's life, so their Fuse indexes are
 // built ONCE (lazily) and reused — weighted so a NAME/id outranks a description match.
@@ -8,13 +10,23 @@
 // via the value index (exact substring in SQL + a fuzzy fallback over a bounded pool).
 //
 // Every match across every corpus carries { score (similarity, 1=best), match:
-// 'exact' | 'fuzzy' }, exact hits first — a consistent shape the AI can rely on.
+// 'exact' | 'prefix' | 'mentioned' | 'fuzzy' }, exact hits first — a consistent shape the AI can rely on.
 
 import { FuzzyIndex } from './fuzzy.js';
+import { keyRef, keyView } from './engine/value-index-views.js';
 
 const round3 = (n) => (n == null ? null : Math.round(n * 1000) / 1000);
 const NAME_WEIGHT = 2; // a name/id match outranks a description match
 const DESC_WEIGHT = 1;
+const RECIPE_MATCHES = 3; // recipes listed for one query, at most
+const RECIPE_SPREAD = 0.15; // and only those within this of the best score
+const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
+const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
+const MENTIONED = 0.8; // a name whose description (not the name itself) holds the word scores this
+const MENTIONED_SHOWN = 3; // …and that many of them are listed per kind, beside the names that hold it
+const RECIPE_BESIDE_NAME = 0.9; // beside a match of the data's own names, a loose recipe below this is left out
+const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
+const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
 
 export class CatalogSearch {
   constructor({ catalog, recipes, valueIndex }) {
@@ -46,8 +58,7 @@ export class CatalogSearch {
       ],
       tiebreak: (p) => `${p.source}.${p.name}`,
     });
-    // Dimension attributes of the non-fact models (users/experiments): { source, column } —
-    // the same pair the { source, property } drill-down takes.
+    // The models' groupable columns: { source, column } — the pair the { source, column } view takes.
     const dimItems = [];
     // EVERY model's attributes, events sources included: a dimension that lives only on a fact
     // (the app column, a crash source's app_version) is as searchable as a users attribute.
@@ -105,46 +116,104 @@ export class CatalogSearch {
       events: appliesOf(p.source)[p.name] || null,
       score: round3(score), match,
     }));
-    const dimension_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
+    const column_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
       source: d.source, column: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
     const recipe_matches = recipes
-      ? recipes.search(query, opts).map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
+      ? recipes.search(query, opts).map(({ item: r, score, match }) => {
+        // a word found only in a recipe's prose (when to use it, its technique) is mentioned there, not
+        // what the recipe is: exact is kept for its id and title
+        const named = [r.id, r.title, r.task_type].some((x) => String(x || '').toLowerCase().includes(String(query).toLowerCase()));
+        return match === 'exact' && !named
+          ? { id: r.id, title: r.title, task_type: r.task_type, score: MENTIONED, match: 'mentioned' }
+          : { id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match };
+      })
+        // a loose query touches many recipes' prose: the few nearest the best one are the answer
+        .filter((r, i, all) => i < RECIPE_MATCHES && r.score >= all[0].score - RECIPE_SPREAD)
       : [];
 
     // VALUE matches live in the (dynamic) value index: exact substring + fuzzy fallback.
-    // Each hit names its SOURCE plus the property within it — so "rewarded" resolves to the
+    // Each hit names its SOURCE plus what carries it there — so "rewarded" resolves to the
     // property that carries it, and a mistyped "germny" still surfaces 'Germany'.
+    // An indexed value belongs to (source, key): an event property of that source ({ property }), or one
+    // of its columns ({ column }) — which, the catalog says (keyRef), as the views take them.
     const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
-      const base = { value: v.value, freq: v.freq, source: v.source, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
-      // An indexed value belongs to (source, property): an event property of that source, or one
-      // of its dimension columns.
-      const isEventProp = c.isFact(v.source) && c.eventProps(v.source).includes(v.property);
-      if (isEventProp) {
-        return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
-      }
-      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, model: v.source, events: null };
+      const ref = keyRef(c, v.source, v.property);
+      const base = { value: v.value, freq: v.freq, source: v.source, ...ref, score: round3(v.score ?? 1), match: v.match || 'exact' };
+      const type = ref.property !== undefined ? c.eventPropertySpec(v.property, v.source)?.type ?? null : c.models[v.source]?.dimensions?.[v.property]?.type ?? null;
+      // an array or a struct is indexed by a few whole EXAMPLES of it (its shape), not by a frequency
+      const { freq: _freq, ...shape } = base;
+      const kept = /^(array|struct|json)/.test(String(type ?? '')) ? { ...shape, example: true } : base;
+      return { ...kept, type, events: ref.property !== undefined ? appliesOf(v.source)[v.property] || null : null };
     });
+    // A loose match is said only near the best one: a query that names something exactly (or nearly)
+    // is answered by that, not by every name its letters resemble — within a list, an exact match
+    // leaves out the list's loose ones; across the lists, a match far below the best is left out.
+    const lists = { event_names, property_matches, column_matches, value_matches, recipe_matches };
+    // a name holds the word, or only its description does: the second is mentioned there, not a match of
+    // the name — and a value equal to the word ranks above one that only contains it (US before USD)
+    const q = String(query).toLowerCase();
+    // (a value match names its value — beside the column or property that carries it)
+    const nameOf = (m) => String(m.value ?? m.event ?? m.property ?? m.column ?? '').toLowerCase();
+    // (a short word — two or three letters — names a thing only where a word of the name begins with it:
+    // 'ad' is in ad_shown, not in breadcrumbs)
+    const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameHolds = (m) => (q.length <= 3 ? new RegExp(`(^|[^a-z0-9])${esc}`).test(nameOf(m)) : nameOf(m).includes(q));
+    // (and where it begins a longer word — 'ad' in admob — the name starts with it: a prefix, not the word)
+    const wholeWord = (m) => new RegExp(`(^|[^a-z0-9])${esc}($|[^a-z0-9])`).test(nameOf(m));
+    for (const k of ['event_names', 'property_matches', 'column_matches', 'value_matches']) {
+      lists[k] = lists[k].map((m) => (m.match !== 'exact' ? m : !nameHolds(m) ? { ...m, score: MENTIONED, match: 'mentioned' } : q.length <= 3 && !wholeWord(m) ? { ...m, match: 'prefix' } : m));
+    }
+    // (a recipe is named by its id and title: a short word there too only where a word begins with it)
+    if (q.length <= 3) lists.recipe_matches = lists.recipe_matches.map((m) => (m.match === 'exact' && ![m.id, m.title].some((x) => new RegExp(`(^|[^a-z0-9])${esc}`).test(String(x || '').toLowerCase())) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
+    lists.value_matches = lists.value_matches.slice().sort((a, b) => (nameOf(b) === q) - (nameOf(a) === q));
+    const best = Math.max(0, ...Object.values(lists).flat().map((m) => m.score ?? 0));
+    const near = (list) => {
+      const exact = list.some((m) => m.match === 'exact');
+      // (a name whose description holds the word is kept beside the names that hold it — "revenue" finds a
+      // price described as purchase revenue — a few of them)
+      const mentioned = list.filter((m) => m.match === 'mentioned' && q.length > 3).slice(0, MENTIONED_SHOWN);
+      return [...list.filter((m) => m.match === 'exact' || m.match === 'prefix' || (!exact && m.match !== 'mentioned' && (m.score ?? 0) >= best - MATCH_SPREAD)), ...mentioned];
+    };
+    // (where nothing matches closely, a few resemblances per list are enough to say so)
+    for (const k of Object.keys(lists)) lists[k] = near(lists[k]).slice(0, best < WEAK_MATCH ? WEAK_SHOWN : undefined);
+    // a recipe is a task type, not a name of the data: beside a name the word does match (an event, a
+    // value), a recipe whose title only resembles it is left out — an exact one, or a close one, stays
+    const named = ['event_names', 'property_matches', 'column_matches', 'value_matches'].some((k) => lists[k].length);
+    if (named) lists.recipe_matches = lists.recipe_matches.filter((m) => m.match === 'exact' || (m.score ?? 0) >= RECIPE_BESIDE_NAME);
+    const recommendations = this._recommend({ query, fuzzy, ...lists });
 
-    return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations: this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) };
+    return { query, fuzzy, ...lists, recommendations };
   }
 
   /** Concrete next-move guidance from the matches (≤4), with a did-you-mean note. */
-  _recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) {
+  _recommend({ query, fuzzy, event_names, property_matches, column_matches, value_matches, recipe_matches }) {
     const recs = [];
     if (value_matches.length) {
       const top = value_matches[0];
-      recs.push(`Value '${top.value}' lives in ${top.model ? 'attribute' : 'property'} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ request: { source: '${top.source}', property: '${top.property}' } }).`);
-      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
+      // a column of its model, or a property riding on that source's events (run() says which)
+      const name = top.property ?? top.column;
+      recs.push(`Value '${top.value}' lives in ${top.property !== undefined ? 'property' : 'column'} '${name}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: ${keyView(this.catalog, top.source, name)}.`);
+      // (said once: the event list's own best match recommends the same view)
+      if (top.events?.[0] && !(event_names[0]?.event === top.events[0] && event_names[0]?.source === top.source)) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }
-    if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.`);
-    if (dimension_matches.length) { const d = dimension_matches[0]; recs.push(`Attribute '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ request: { source: '${d.source}', property: '${d.column}' } }).`); }
-    if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ request: { source: '${pm.source}', property: '${pm.property}' } }).`); }
-    if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ request: { source: '${ev.source}', event: '${ev.event}' } }).`); }
+    // the schema's best matches, the closest first (an event before a column at the same score)
+    const named = [
+      ...(event_names.length ? [{ score: event_names[0].score, text: `See what event '${event_names[0].event}' of source '${event_names[0].source}' carries: semantic_index({ request: { source: '${event_names[0].source}', event: '${event_names[0].event}' } }).` }] : []),
+      ...(property_matches.length ? [{ score: property_matches[0].score, text: `Drill into property '${property_matches[0].property}' of source '${property_matches[0].source}' for its real values + cardinality: semantic_index({ request: { source: '${property_matches[0].source}', property: '${property_matches[0].property}' } }).` }] : []),
+      ...(column_matches.length ? [{ score: column_matches[0].score, text: `Column '${column_matches[0].column}' of source '${column_matches[0].source}' matches — drill its values with semantic_index({ request: { source: '${column_matches[0].source}', column: '${column_matches[0].column}' } }).` }] : []),
+      // (a recipe is said to cover the task only where it matches it closely — a loose one is listed, not recommended)
+      ...(recipe_matches.length && (recipe_matches[0].match === 'exact' || recipe_matches[0].score >= RECIPE_CLOSE) ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),
+    ];
+    const all = [...event_names, ...property_matches, ...column_matches, ...value_matches, ...recipe_matches];
+    const best = all.length ? Math.max(...all.map((m) => (m.match === 'exact' || m.match === 'prefix' ? 1 : m.score ?? 0))) : 0;
+    // (a match that only resembles the word is listed, not recommended: the note below says the data may not hold it)
+    if (best >= WEAK_MATCH) recs.push(...named.sort((a, b) => b.score - a.score).map((n) => n.text));
 
-    const all = [...event_names, ...property_matches, ...dimension_matches, ...value_matches, ...recipe_matches];
-    if (all.length && !all.some((m) => m.match === 'exact')) {
-      recs.unshift(`No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
+    if (all.length && !all.some((m) => m.match === 'exact' || m.match === 'prefix')) {
+      recs.unshift(best < WEAK_MATCH
+        ? `Nothing in the catalog matches '${query}' closely — the matches below only resemble it (fuzzy, best ${best}); the data may not hold it. Check the event list (semantic_index({ request: {} })) before building on one of them.`
+        : `No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
     }
     if (!all.length) recs.push(`No catalog match for '${query}'${fuzzy ? '' : ' (fuzzy disabled)'}. Try semantic_index({ request: {} }) for the event list, a broader substring${fuzzy ? '' : ', or drop fuzzy:false'}.`);
     return recs.slice(0, 4);

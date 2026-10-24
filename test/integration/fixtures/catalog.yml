@@ -170,12 +170,12 @@ models:
           meta: { mcp: { property: true } }
       - name: monetization_type_of_event_data
         data_type: string
-        description: "Monetization category. Events: currency_income, currency_outcome."
+        description: "Monetization category. Events: iap_purchase_completed, iap_purchase_failed."
         config:
           meta: { mcp: { property: true } }
       - name: price_in_usd_of_event_data
         data_type: numeric
-        description: "IAP purchase price in USD. Events: iap_purchase_completed, iap_purchase_failed."
+        description: "IAP purchase price in USD — in-app purchase revenue on a completed purchase. Events: iap_purchase_completed, iap_purchase_failed."
         config:
           meta: { mcp: { property: true } }
       - name: product_id_of_event_data
@@ -190,7 +190,7 @@ models:
           meta: { mcp: { property: true } }
       - name: status_of_event_data
         data_type: string
-        description: "Result status. Events: iap_*, ad_*."
+        description: "Result status of a purchase. Events: iap_*."
         config:
           meta: { mcp: { property: true } }
       - name: ad_type_of_event_data
@@ -250,7 +250,7 @@ models:
       # JSON-vs-STRING comparison.
       - name: words_selected_json_of_event_data
         data_type: json
-        description: "Words collected on a completed level, as a native JSON array column. Events: level_completed."
+        description: "Words collected on a completed level — a JSON array held as JSON text in a column of its own (read as an array with { property }). Events: level_completed."
         config:
           meta: { mcp: { array: { items: string, encoding: json } } }
       # numeric value that physically arrives as STRING — aggregating it needs a cast
@@ -266,12 +266,18 @@ models:
       attributes changed has several versions. Every join to it is point-in-time — the player
       key AND a time that falls inside the window — otherwise a row matches every historical
       version and counts inflate. The window bounds are install_time_valid_from /
-      install_time_valid_until; MetricFlow applies them itself, a pipeline states them in
-      `between`.
+      install_time_valid_until; MetricFlow applies them itself, a pipeline names the moment in its
+      join contract's `time`.
     config:
       meta:
         mcp:
           role: users
+          # THE JOIN CONTRACT: a row of other rows meets the ONE version of its player valid at the
+          # moment it names — the key and the window are unique together
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            time: { within: [install_time_valid_from, install_time_valid_until] }
     columns:
       - name: player_id_of_internal
         data_type: string
@@ -287,7 +293,7 @@ models:
           meta: { mcp: { dimension: { validity: start } } }
       - name: install_time_valid_until
         data_type: timestamp
-        description: "End of this version's validity window (inclusive)."
+        description: "End of this version's validity window — inclusive in a pipeline join (the row's own time); a metric query compares the day, the end exclusive (MetricFlow's rule)."
         config:
           meta: { mcp: { dimension: { validity: end } } }
       - name: install_date
@@ -335,6 +341,11 @@ models:
       meta:
         mcp:
           role: experiments
+          # one row per player × experiment: joined for ONE experiment, named by its value
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            select: { experiment: experiment_name }
     columns:
       - name: player_id_of_internal
         data_type: string
@@ -389,14 +400,22 @@ models:
             # same relationship, so the caller picks the format the question is about:
             # ad_funnel_rewarded / _interstitial / _banner. Joining it to the events source
             # reconstructs the funnel that was running when the crash happened.
-            # NOBODY owns this key: one funnel id spans SEVERAL events, so neither side is
-            # unique on it and MetricFlow cannot join it — it is a pipeline join.
+            # For the semantic layer NOBODY owns this key; a pipeline joins a crash onto the events
+            # of its funnel by the join contract below.
             ad_funnel:
               type: foreign
               variants:
                 rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
                 interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
                 banner:       { key: [banner_tracking_id, player_id_of_internal] }
+          # THE JOIN CONTRACT: one crash report per player and ad funnel (the authors' guarantee, which the data holds), on
+          # the tracking-id column of the format the caller names
+          join:
+            unique: true
+            key:
+              user: player_id_of_internal
+              funnel: { by: format, columns: { rewarded: rewarded_tracking_id, interstitial: interstitial_tracking_id, banner: banner_tracking_id } }
+            select: { format: [rewarded, interstitial, banner] }
           event_semantics:
             crash_event: fatal_crash
           known_events:
@@ -418,17 +437,17 @@ models:
           meta: { mcp: { index: false } }
       - name: rewarded_tracking_id
         data_type: string
-        description: "Last REWARDED ad funnel seen before the crash; NULL if there was none."
+        description: "The REWARDED ad funnel this report follows — set on the first report after the funnel only, so a (player, funnel) pair names one report; NULL otherwise."
         config:
           meta: { mcp: { index: false } }
       - name: interstitial_tracking_id
         data_type: string
-        description: "Last INTERSTITIAL ad funnel seen before the crash; NULL if there was none."
+        description: "The INTERSTITIAL ad funnel this report follows — set on the first report after the funnel only, so a (player, funnel) pair names one report; NULL otherwise."
         config:
           meta: { mcp: { index: false } }
       - name: banner_tracking_id
         data_type: string
-        description: "Last BANNER ad funnel seen before the crash; NULL if there was none."
+        description: "The BANNER ad funnel this report follows — set on the first report after the funnel only, so a (player, funnel) pair names one report; NULL otherwise."
         config:
           meta: { mcp: { index: false } }
       - name: event_time
@@ -536,18 +555,24 @@ models:
     description: >
       Player-level acquisition spend: one row per (player, day) with the cost, impressions and
       clicks attributed to that player. Amounts are MEASURES (aggregate them), the channel
-      columns are attributes (group by them). Joins to an events source by the PLAYER key alone
-      (many-to-many by design — carry a channel attribute onto events, never sum money over it),
-      and to the install record by the player key AND the validity window, point-in-time.
+      columns are attributes (group by them). Joins onto event rows by its contract — the player
+      AND the day of spend_date — so each event meets one row: it carries a channel attribute onto
+      events, never its money (a measure, compared beside the events on metric_time).
     config:
       meta:
         mcp:
           role: acquisition
           primary_entity: acquisition
+          # THE JOIN CONTRACT: one row per player and day — a row meets its player's spend record of
+          # the day of the moment it names
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            time: { same_day: spend_date }
           # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
           # marked column it fixes NO function — the caller picks one per question.
           measures:
-            cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd, description: "Per-row cost per click." }
+            cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd, description: "Per-row cost per click — a group's CPC is sum(cost) / sum(clicks), not an average of this." }
             # …and the governed twin: the same schema key WITH `agg` fixes one function for
             # everyone, while `cost` itself stays freely aggregatable per question.
             total_spend: { expr: cost, agg: sum, unit: usd, description: "Total acquisition spend — fixed as a sum." }

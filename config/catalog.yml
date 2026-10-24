@@ -7,8 +7,8 @@ version: 2
 # declared in sources.yml. Exactly one model per ROLE; several models may be events
 # SOURCES (each with its own known_events + event-scoped payload + primary_entity).
 # Events sources are INDEPENDENT AND EQUAL — none is a default: the source is always a
-# separate tool argument (semantic_index({ request: { source, event } }), build_pipeline_model({ request: { source } }),
-# semantic_models[].from) and never part of a name, and each keeps its own space in the
+# separate tool argument (semantic_index({ request: { source, event } }), build_model({ request: { source } }),
+# a semantic_model measure's source) and never part of a name, and each keeps its own space in the
 # value index. Within a source, event and property names are used as-is.
 # The parsing/attribution already happened upstream — we DO NOT re-parse anything;
 # we take the ready, flattened columns as-is and only re-shape (rename role columns).
@@ -1522,6 +1522,12 @@ models:
       meta:
         mcp:
           role: users            # logical name (the dbt model can be named anything)
+          # THE JOIN CONTRACT: what a pipeline names to join this model onto its rows — the player and
+          # the moment; the version valid then is the one row it meets (key + window are unique)
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            time: { within: [install_time_valid_from, install_time_valid_until] }
           # NO measures here: MetricFlow forbids them on a model with a validity window, so any
           # declared measure would be dropped with a warning at render time. Count players on an
           # events source instead — count_distinct of the player key.
@@ -1616,6 +1622,11 @@ models:
       meta:
         mcp:
           role: experiments
+          # one row per player × experiment: joined for ONE experiment, named by its value
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            select: { experiment: experiment_name }
     columns:
       - name: player_id_of_internal
         data_type: integer
@@ -1642,8 +1653,8 @@ models:
 
   # ── SECOND EVENTS FACT — Firebase Crashlytics (TEMPLATE, not active) ──────────────────
   # Uncomment and fill in the REAL column / event names of the prod crash table, then the
-  # whole events machinery applies to it as-is: its own semantic_index({ request: { model: 'crashlytics' } })
-  # and ({ event: 'crashlytics.<event>' }) views, event_scope in build_semantic_model,
+  # whole events machinery applies to it as-is: its own semantic_index({ request: { source: 'crashlytics' } })
+  # and { source: 'crashlytics', event } views, a semantic model from: 'crashlytics' (its where on event_name),
   # match_recognize funnels over source: 'crashlytics', value-index sample values, and a join
   # to dim_users by the user entity. Nothing else in the server needs to change.
   #
@@ -1653,7 +1664,7 @@ models:
   #   · a fact MUST declare is_event_name + is_time.
   #   · this source is EQUAL to the analytics one, not nested under it: address its events and
   #     properties with source: 'crashlytics' (semantic_index({ request: { source, event } }),
-  #     build_pipeline_model({ request: { source: 'crashlytics' } }), semantic_models[].from), and use the
+  #     build_model({ request: { source: 'crashlytics' } }), a semantic_model measure's source), and use the
   #     names as-is inside a pipeline or semantic model built from it.
   #   · column names use the `_of_` form, never `__` (MetricFlow reserves `__`).
   #   · a payload column is marked `property: true`; WHICH events populate it is measured by the index; it reads
@@ -1664,83 +1675,108 @@ models:
   #     Crash-reporting events fact: one row per crash / non-fatal error / ANR reported from
   #     the player's device. A SEPARATE stream from fct_analytics_events — its own events and
   #     its own payload. Join to dim_users / the analytics fact by player_id_of_internal.
-  #   meta:
-  #     mcp:
-  #       role: crashlytics
-  #       primary_entity: crash               # MUST NOT be `event`
-  #       partition_column: event_date        # TODO: the real partition column (cost hint)
-  #       event_semantics:
-  #         crash_event: fatal_crash          # TODO: which event marks a hard crash
-  #       known_events:                       # TODO: the real event_name values
-  #         - fatal_crash
-  #         - non_fatal
-  #         - anr
+  #   config:
+  #     meta:
+  #       mcp:
+  #         role: crashlytics
+  #         primary_entity: crash               # MUST NOT be `event`
+  #         # joinable onto the analytics events by player + the ad funnel of the format named
+  #         # (one crash report per player and funnel — the authors' guarantee):
+  #         join:
+  #           unique: true
+  #           key:
+  #             user: player_id_of_internal
+  #             funnel: { by: format, columns: { rewarded: rewarded_tracking_id, interstitial: interstitial_tracking_id, banner: banner_tracking_id } }
+  #           select: { format: [rewarded, interstitial, banner] }
+  #         partition_column: event_date        # TODO: the real partition column (cost hint)
+  #         event_semantics:
+  #           crash_event: fatal_crash          # TODO: which event marks a hard crash
+  #         known_events:                       # TODO: the real event_name values
+  #           - fatal_crash
+  #           - non_fatal
+  #           - anr
   #   columns:
   #     - name: player_id_of_internal
   #       data_type: integer
   #       description: "Player identifier — joins crash reports to dim_users and the analytics fact."
-  #       meta: { mcp: { entity: { name: user, type: foreign } } }
+  #       config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
   #     - name: event_timestamp               # TODO: the real crash-time column
   #       data_type: timestamp
   #       description: "When the crash was reported — the metric time axis of THIS fact."
-  #       meta: { mcp: { is_time: true } }
+  #       config: { meta: { mcp: { is_time: true } } }
   #     - name: event_name
   #       data_type: string
   #       description: "Crash event type; always one of known_events."
-  #       meta: { mcp: { is_event_name: true } }
+  #       config: { meta: { mcp: { is_event_name: true } } }
   #     # Envelope columns — present on EVERY crash row → plain groupable dimensions.
   #     - name: app_version
   #       data_type: string
   #       description: "App version the crash was reported from. Present on every row."
-  #       meta: { mcp: { dimension: {} } }
+  #       config: { meta: { mcp: { dimension: {} } } }
   #     - name: bundle_id
   #       data_type: string
   #       description: "The app the crash came from. Present on every row."
-  #       meta: { mcp: { dimension: { bundle: true } } }   # per-app coverage for THIS fact
+  #       config: { meta: { mcp: { dimension: { bundle: true } } } }   # per-app coverage for THIS fact
   #     # Event-scoped PAYLOAD columns — populated only on the listed events, NULL elsewhere.
   #     - name: issue_title_of_event_data
   #       data_type: string
   #       description: "Crashlytics issue title (the grouping key of a crash). Events: all."
-  #       meta: { mcp: { property: true } }
+  #       config: { meta: { mcp: { property: true } } }
   #     - name: anr_duration_of_event_data
   #       data_type: numeric
   #       description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
-  #       meta: { mcp: { unit: seconds, property: true } }
+  #       config: { meta: { mcp: { unit: seconds, property: true } } }
   #     # COMPLEX payload columns. A crash report is not flat: a breadcrumb trail, an exception
   #     # stack of frames, and whatever custom keys the app attached. Flattened, each is ONE
   #     # column holding JSON — declare the shape and the pipeline can explode or read it.
   #     - name: breadcrumbs_of_event_data          # ARRAY of scalars
   #       data_type: string
   #       description: "Breadcrumb trail leading up to the report — a JSON array of strings, in order."
-  #       meta: { mcp: { array: { items: string, encoding: json } } }
+  #       config: { meta: { mcp: { array: { items: string, encoding: json } } } }
   #     - name: stack_frames_of_event_data         # ARRAY OF STRUCTS
   #       data_type: string
   #       description: "Exception stack, innermost frame first — a JSON array of { file, line, in_app }."
-  #       meta:
-  #         mcp:
-  #           property: true                       # NULL on anr: a blocked thread has no stack
-  #           array:
-  #             encoding: json                     # a STRING holding JSON (native = a real ARRAY column)
-  #             fields: { file: string, line: int, in_app: boolean }
+  #       config:
+  #         meta:
+  #           mcp:
+  #             property: true                       # NULL on anr: a blocked thread has no stack
+  #             array:
+  #               encoding: json                     # a STRING holding JSON (native = a real ARRAY column)
+  #               fields: { file: string, line: int, in_app: boolean }
   #     - name: custom_keys_of_event_data          # a JSON OBJECT, not an array
   #       data_type: string
   #       description: "Custom keys attached to the report — a JSON object."
-  #       meta: { mcp: { property: true } }
+  #       config: { meta: { mcp: { property: true } } }
   #
   #   HOW A PIPELINE READS THEM:
-  #     array, per element   unnest { source, as }                    -> one row per element
-  #     array, per report    derive { op: array_length | contains }   -> grain unchanged
-  #     array<struct>        unnest { source, as, field }             -> one field per row, or
-  #                          unnest { source, as } + compute json_field -> several fields, same row
+  #     array, per element   unnest { expr: { property }, name }      -> one row per element
+  #     array, per report    compute { name, expr: { fn: array_length | array_contains, args: [{ property }, …] } }
+  #                                                                   -> grain unchanged
+  #     array<struct>        unnest { expr: { property }, name, field } -> one field per row, or
+  #                          unnest { expr: { property }, name } + compute json_field -> several fields, same row
   #     array, positional    compute json_parse_array -> element_at / array_last
-  #     JSON object          derive { op: struct_field, field } or compute json_field
-  #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads NULL. Both
+  #     JSON object          compute { name, expr: { property, field } } or json_field
+  #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads 0. Both
   #   readings are correct — pick the grain the question is about.
 
+  # ── JOIN CONTRACTS (meta.mcp.join) ────────────────────────────────────────────────────
+  # A model is JOINABLE onto a pipeline's rows only when it declares a join contract — its key's
+  # parts, declared UNIQUE by its authors (not checked on data), the time it is matched at and the
+  # values it is narrowed to:
+  #
+  #   join:
+  #     unique: true
+  #     key:    { user: player_id_of_internal }            # each part equals a column of the rows
+  #     time:   { within: [<valid from>, <valid until>] }  # or { same_day: <column> }
+  #     select: { experiment: experiment_name }            # a VALUE the model is filtered to first
+  #
+  # A pipeline names every part: { stage: 'join', source: '<model>', on: { user: <column>,
+  # time: <column>, experiment: '<value>' }, attrs }. A joined model's amounts are not carried —
+  # they are measures of the semantic layer. An events source declares none: it is not joinable.
+  #
   # ── DECLARED JOIN KEYS (meta.mcp.entities) ────────────────────────────────────────────
-  # A relationship between two models is declared ONCE, in the schema, and both paths use it:
-  # a metric query groups by <relationship>__<attribute>, a pipeline joins with `via: <name>`.
-  # Neither ever restates a column.
+  # A relationship between two models for the SEMANTIC LAYER is declared once, in the schema: a
+  # metric query groups by { source, column } through it. It never restates a column.
   #
   #   meta.mcp.entities:
   #     <relationship name>:
@@ -1752,22 +1788,18 @@ models:
   #
   # `primary`/`unique` make the model the join TARGET — exactly one model may own a relationship,
   # and it must be unique per row there. `foreign` points at whichever model owns it. A
-  # relationship NOBODY owns is still a perfectly good PIPELINE join (a many-to-many match); it
-  # simply has no governed path, because MetricFlow can only join onto a unique key.
+  # relationship NOBODY owns has no governed path: MetricFlow joins only onto a unique key.
   #
   # ── JOINING A SLOWLY-CHANGING MODEL (the install record) ──────────────────────────────
   # dim_users below carries a VALIDITY WINDOW (install_time_valid_from / _until), so it holds
   # several versions per player and every join to it must be POINT-IN-TIME: the player key AND a
   # time inside the window. Joining on the key alone matches every historical version and
   # inflates every count.
-  #   · governed path — MetricFlow applies the window itself; just group by user__<attribute>;
-  #   · pipeline — state it in the join stage, explicitly:
-  #       { stage: "join", with: "users", via: "user",
-  #         between: { value: "<this source's time column>",
-  #                    from: "install_time_valid_from", to: "install_time_valid_until" } }
+  #   · governed path — MetricFlow applies the window itself; just group by { source: users, column };
+  #   · pipeline — its join contract's time: { stage: "join", source: "users",
+  #       on: { user: "<the rows' player column>", time: "<the rows' moment>" }, attrs }
   # MetricFlow allows a model with a validity window exactly ONE join key, as its natural key —
-  # a second `primary`/`unique` key there is rejected at catalog load. Such a key can still be
-  # declared `foreign` and joined in a pipeline.
+  # a second `primary`/`unique` key there is rejected at catalog load.
   #
   # ── VARIANTS: one relationship carried by SEVERAL columns ─────────────────────────────
   # A crash source records the last ad-funnel id it saw PER AD FORMAT, one column each, only the
@@ -1788,8 +1820,9 @@ models:
   #   entities:
   #     ad_funnel: { type: foreign, key: [tracking_id, player_id_of_internal] }
   #
-  # Joining them reconstructs the ad funnel that was running when the app died. Several events
-  # share one funnel id, so neither side is unique on it: this one is pipeline-only, by nature.
+  # Several events share one funnel id, so neither side is unique on it for the semantic layer. A
+  # pipeline joins the crash report onto the funnel's events by the crash source's join contract
+  # (its funnel part picks the format's column): on: { user, funnel: 'tracking_id', format: 'rewarded' }.
   # ── ACQUISITION SPEND (TEMPLATE, not active) ──────────────────────────────────────────
   # A NON-events source: no event_name, so it is not an events fact — but it has its own time
   # axis and its own AMOUNTS, and both are declared HERE, in the schema. The schema says only
@@ -1813,50 +1846,55 @@ models:
   #   meta.mcp.is_time                -> the source's time axis, so metric_time and time_range
   #                                     work here exactly as on an events source.
   #
-  # HOW IT JOINS (both keys declared in the schema, never restated at the call site):
-  #   · to an events source        — by the PLAYER key alone (via: 'user'). One player has many
-  #     events and several spend days, so this pairing is many-to-many BY DESIGN: use it to carry
-  #     a channel attribute onto events, NEVER to sum money over (the total inflates).
-  #   · to the install record      — by the PLAYER key AND the validity window, point-in-time:
-  #     the governed path applies the window itself; a pipeline states it in the join stage's
-  #     `between` ({ value: spend_date, from: install_time_valid_from, to: install_time_valid_until }).
+  # HOW IT JOINS (its contract below, never restated at the call site):
+  #   · onto other rows — by the player AND the day: { stage: 'join', source: 'acquisition',
+  #     on: { user: <column>, time: <moment> }, attrs } carries the day's channel attributes; its
+  #     amounts are not carried (they would repeat on every row of that day) — they are measures.
+  #   · the install record onto it — users' contract, at spend_date: { stage: 'join', source: 'users',
+  #     on: { user: 'player_id_of_internal', time: 'spend_date' }, attrs }.
   #
   # - name: fct_player_acquisition           # TODO: the real dbt model / view name
   #   description: >
   #     Player-level acquisition spend: one row per (player, day) with the cost and impressions
   #     attributed to that player. Amounts are MEASURES; the channel columns are attributes.
-  #   meta:
-  #     mcp:
-  #       role: acquisition
-  #       primary_entity: acquisition        # MUST differ from every other model's
-  #       partition_column: spend_date       # TODO: the real partition column (cost hint)
-  #       # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
-  #       # marked column it fixes NO aggregation — the caller picks one per question.
-  #       measures:
-  #         cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd }
+  #   config:
+  #     meta:
+  #       mcp:
+  #         role: acquisition
+  #         primary_entity: acquisition        # MUST differ from every other model's
+  #         # joinable by player + the day of the moment named (one row per player and day)
+  #         join:
+  #           unique: true
+  #           key: { user: player_id_of_internal }
+  #           time: { same_day: spend_date }
+  #         partition_column: spend_date       # TODO: the real partition column (cost hint)
+  #         # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
+  #         # marked column it fixes NO aggregation — the caller picks one per question.
+  #         measures:
+  #           cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd }
   #   columns:
   #     - name: acquisition_id               # TODO: a surrogate key for the (player, day) grain
   #       data_type: string
-  #       meta: { mcp: { entity: { name: acquisition, type: primary } } }
+  #       config: { meta: { mcp: { entity: { name: acquisition, type: primary } } } }
   #     - name: player_id_of_internal
   #       data_type: integer
-  #       meta: { mcp: { entity: { name: user, type: foreign } } }
+  #       config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
   #     - name: spend_date
   #       data_type: timestamp
   #       description: "The day the spend was recorded — this source's time axis."
-  #       meta: { mcp: { is_time: true } }
+  #       config: { meta: { mcp: { is_time: true } } }
   #     - name: cost
   #       data_type: numeric
   #       description: "Acquisition cost attributed to the player that day."
-  #       meta: { mcp: { measure: { unit: usd, label: "UA cost" } } }
+  #       config: { meta: { mcp: { measure: { unit: usd, label: "UA cost" } } } }
   #     - name: impressions
   #       data_type: integer
-  #       meta: { mcp: { measure: { agg: sum } } }
+  #       config: { meta: { mcp: { measure: { agg: sum } } } }
   #     - name: media_source                 # a plain attribute: groupable, value-indexed
   #       data_type: string
   #     - name: campaign_id
   #       data_type: string
-  #       meta: { mcp: { index: false } }    # groupable, but an id has no value set worth profiling
+  #       config: { meta: { mcp: { index: false } } }    # groupable, but an id has no value set worth profiling
   #     - name: ingest_batch_id
   #       data_type: string
-  #       meta: { mcp: { dimension: false } } # a real column, not an attribute
+  #       config: { meta: { mcp: { dimension: false } } } # a real column, not an attribute

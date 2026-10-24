@@ -5,9 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
@@ -17,10 +14,11 @@ import { RESEARCH_DOMAINS, RESEARCH_GUIDES, RESEARCH_ROUTE, researchGuide } from
 import { buildSkills } from '../../src/skills.js';
 import { coreInstructions } from '../../src/mcp-surface.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
-const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'research-')) }) }));
+const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('research') }) }));
 const strings = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []);
 
 test('semantic_index serves the research guide and one guide per domain — exactly the objects researchGuide builds', async () => {

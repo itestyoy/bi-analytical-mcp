@@ -50,8 +50,8 @@ export const SCHEMA_KEYS = ['items', 'additionalProperties', 'not', 'if', 'then'
 
 /**
  * Fold a repeated VOCABULARY — the same `enum` list offered at several sites under different
- * descriptions (a source's payload properties are the measure's `field`, the dimension's `expr`
- * and the filter's `property`). The values move to one `$defs` entry and each site keeps its own
+ * descriptions (a source's payload properties are the { property } leaf of a pipeline's and a
+ * semantic model's expressions, and a dimension's `property`). The values move to one `$defs` entry and each site keeps its own
  * sentence: `{ $ref, description }`. On the production catalog one such list is ~5 KB and appears
  * three times per tool, in two tools.
  *
@@ -70,7 +70,7 @@ export function foldVocabularies(schema, { minSize = MIN_FOLD } = {}) {
   const names = new Map();
   for (const k of shared) {
     const [type, values] = JSON.parse(k);
-    const name = defName({ enum: values }, Object.keys($defs));
+    const name = defName({ enum: values }, Object.keys($defs), sitesOf(schema, (n) => keyOf(n) === k));
     $defs[name] = { ...(type ? { type } : {}), enum: values };
     names.set(k, name);
   }
@@ -95,7 +95,7 @@ export function foldRepeats(schema, { minSize = MIN_FOLD, maxDefs = 40 } = {}) {
     }
     if (!best) break;
     const def = JSON.parse(best.json);
-    const key = defName(def, Object.keys(out.$defs || {}));
+    const key = defName(def, Object.keys(out.$defs || {}), sitesOf(out, (n) => JSON.stringify(n) === best.json));
     const ref = { $ref: `#/$defs/${key}` };
     const fold = (n) => (JSON.stringify(n) === best.json ? ref : n);
     const $defs = Object.fromEntries(Object.entries(out.$defs || {}).map(([k, v]) => [k, mapSchemas(v, fold)]));
@@ -126,16 +126,46 @@ export function mapSchemas(node, fn) {
 }
 
 /**
- * A readable name for a folded definition — what it IS, not `shared_3`: the vocabulary it pins,
- * the stage it describes, or its first field.
+ * Where a folded subtree sits: for each site, the field it is the value of (an `items` site is named
+ * after its list, `<list>_item`) and, where the object holding it pins its `source`, that source.
  */
-export function defName(node, taken) {
-  const base = node.enum?.length ? `enum_${node.enum[0]}`
+export function sitesOf(root, matches) {
+  const sites = [];
+  const walk = (node, key, holder) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    if (key && matches(node)) {
+      const src = holder?.properties?.source;
+      sites.push({ key, source: src?.const ?? (src?.enum?.length === 1 ? src.enum[0] : null) });
+      return;
+    }
+    for (const k of SCHEMA_MAPS) if (node[k] && typeof node[k] === 'object') for (const [kk, v] of Object.entries(node[k])) walk(v, k === 'properties' ? kk : null, k === 'properties' ? node : null);
+    for (const k of SCHEMA_LISTS) if (Array.isArray(node[k])) for (const v of node[k]) walk(v, key && `${key}_form`, holder);
+    for (const k of SCHEMA_KEYS) if (node[k] && typeof node[k] === 'object' && !Array.isArray(node[k])) walk(node[k], k === 'items' && key ? `${key}_item` : null, null);
+  };
+  walk(root, null, null);
+  return sites;
+}
+
+/**
+ * A readable name for a folded definition — what it IS, not `shared_3`: its title; else the one field
+ * every site is the value of (`context_id`, `users_column` where the holder pins its source); else the
+ * vocabulary it pins, the stage it describes, or its first field.
+ */
+export function defName(node, taken, sites = []) {
+  const keys = [...new Set(sites.map((x) => x.key).filter(Boolean))];
+  const sources = [...new Set(sites.map((x) => x.source))];
+  const bySite = keys.length === 1 ? `${sources.length === 1 && sources[0] ? `${sources[0]}_` : ''}${keys[0]}` : null;
+  const titled = typeof node.title === 'string' && node.title.length <= 40 ? node.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') : null;
+  // an object by the fields it requires ({ name, expr } → name_expr), a union by what its branches are
+  const fieldsOf = (n) => (n.required?.length ? n.required : Object.keys(n.properties || {}).slice(0, 1)).slice(0, 3).join('_');
+  const branchName = (b) => (typeof b?.title === 'string' ? b.title : b?.properties ? fieldsOf(b) : b?.$ref ? String(b.$ref).split('/').pop() : b?.type || '');
+  const branches = node.oneOf || node.anyOf;
+  const base = titled || bySite || (node.enum?.length ? `enum_${node.enum[0]}`
     : node.properties?.stage?.enum?.[0] ? `stage_${node.properties.stage.enum[0]}`
       : node.items?.$ref ? `list_${String(node.items.$ref).split('/').pop()}`
-        : node.properties ? `obj_${Object.keys(node.properties)[0]}`
-          : node.oneOf || node.anyOf ? 'union'
-            : 'shared';
+        : node.properties ? fieldsOf(node)
+          : branches ? branches.slice(0, 3).map(branchName).filter(Boolean).map((t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')).join('_or_') || 'one_of'
+            : 'shared');
   const key = String(base).replace(/[^A-Za-z0-9_]/g, '_').slice(0, 48);
   let name = key; let n = 2;
   while (taken.includes(name)) { name = `${key}_${n}`; n += 1; }

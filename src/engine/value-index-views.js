@@ -5,10 +5,30 @@
 
 import { ToolError } from '../validate.js';
 
+/**
+ * An indexed key of `source` — one of its event properties, or one of its columns — named as the ref
+ * names it, and as its semantic_index view takes it: { property } or { column }. The catalog says which
+ * (attributeKind); a key it no longer declares keeps the name the index kept it under, a property.
+ */
+export function keyRef(catalog, source, name) {
+  const kind = catalog?.attributeKind(source, name);
+  return kind && kind !== 'property' ? { column: name } : { property: name };
+}
+
+/** The semantic_index view of an indexed key, as a call to copy. */
+export function keyView(catalog, source, name) {
+  const [[k, v]] = Object.entries(keyRef(catalog, source, name));
+  return `semantic_index({ request: { source: '${source}', ${k}: '${v}' } })`;
+}
+
 export class ValueIndexViews {
-  constructor({ valueIndex, jobs }) {
+  constructor({ valueIndex, jobs, catalog = null, toolOf = (kind) => kind }) {
+    // how a task's kind is said: by the tool that reads it (TaskRunner.toolOf)
+    this.toolOf = toolOf;
     this.valueIndex = valueIndex;
     this.jobs = jobs;
+    // what an indexed key is — a property or a column — is the catalog's word (keyRef)
+    this.catalog = catalog;
   }
 
   /**
@@ -20,11 +40,18 @@ export class ValueIndexViews {
     const st = this.valueIndex.stats(source, key);
     const dc = st?.distinctCount ?? null;
     const total = st?.totalCount ?? null;
-    const orderBy = input.order_by === 'value' ? 'value' : 'freq';
-    const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
+    // order_by: [{ key, direction? }] — the first item orders the values, a second one the values the
+    // first one ties (only the value itself can: each value occurs once, with one frequency)
+    const keys = (input.order_by?.length ? input.order_by : [{ key: 'freq' }]).map((o) => ({ key: o.key, direction: o.direction || (o.key === 'value' ? 'asc' : 'desc') }));
+    if (keys.length > 1 && keys[0].key === keys[1].key) throw new ToolError(`order_by names '${keys[0].key}' twice — a second item orders what the first one ties, so it takes the other key`, { stage: 'validate', field: 'order_by' });
+    if (keys.length > 1 && keys[0].key === 'value') throw new ToolError("order_by: the values are distinct, so nothing after 'value' has a tie to order — give one item", { stage: 'validate', field: 'order_by' });
+    const orderBy = keys[0].key;
+    const dir = keys[0].direction;
+    // ties on the frequency are ordered by the value: ascending unless a second item says otherwise
+    const tie = orderBy === 'freq' ? (keys[1]?.direction || 'asc') : null;
     const limit = input.limit ?? 10;
     const offset = input.offset ?? 0;
-    const fetched = this.valueIndex.listValues(source, key, { limit: limit + 1, offset, by: orderBy, dir });
+    const fetched = this.valueIndex.listValues(source, key, { limit: limit + 1, offset, by: orderBy, dir, tie });
     const has_more = fetched.length > limit;
     const samples = has_more ? fetched.slice(0, limit) : fetched;
     // top_value is the single most frequent value; share = its fraction of indexed rows.
@@ -40,16 +67,21 @@ export class ValueIndexViews {
       top_share: top && total ? Math.round((top.freq / total) * 1000) / 1000 : null,
       indexed: !!st, indexed_at: st?.indexedAt ?? null,
       // values stored are capped (top-by-frequency); paging past them returns [].
-      returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
+      returned: samples.length, limit, offset, order_by: tie ? [keys[0], { key: 'value', direction: tie }] : [keys[0]],
       has_more,
       indexed_value_count: storedValues, values_capped: valuesCapped,
     };
     return { samples, value_stats };
   }
 
-  /** Compact row for a property's per-run indexing record. */
+  /** Compact row for an indexed key's per-run record: the key named as its view takes it ({ source, property } or { source, column }). */
   propertyRow(r) {
-    return { ...(r.source ? { source: r.source } : {}), property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
+    return { ...(r.source ? { source: r.source, ...keyRef(this.catalog, r.source, r.property) } : { property: r.property }), ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
+  }
+
+  /** The view of a row propertyRow made, as a call to copy. */
+  rowView(row) {
+    return row.source ? keyView(this.catalog, row.source, row.property ?? row.column) : `semantic_index({ request: { source: '<source>', property: '${row.property}' } })`;
   }
 
   /**
@@ -100,7 +132,7 @@ export class ValueIndexViews {
       // NB: per-property `ms` is only meaningful for properties scanned individually (~0 when batched).
       ...(fallbacks.length ? { fallbacks } : {}),
       recommendations: [
-        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ request: { source: '${props[0].source || '<source>'}', property: '${props[0].property}' } }).` : `No per-property timing recorded for run ${run.id}.`,
+        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property ?? p.column} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with ${this.rowView(props[0])}.` : `No per-property timing recorded for run ${run.id}.`,
         ...(fallbacks.length ? [`${fallbacks.length} batch(es) fell back to per-property — full reason in fallbacks[].`] : []),
       ],
     };
@@ -125,17 +157,17 @@ export class ValueIndexViews {
 
     // [{ task_id, tool, status, table, context_id, age_ms }] — the newest first: `recent` is the latest tasks,
     // of every side (a feature's too), not the first ones this process ever started
-    const jobs = this.jobs.list().sort((a, b) => a.age_ms - b.age_ms);
+    const jobs = this.jobs.list().map((j) => (j.tool ? { ...j, tool: this.toolOf(j.tool) } : j)).sort((a, b) => a.age_ms - b.age_ms);
     const running = jobs.filter((j) => j.status === 'running');
     const byStatus = jobs.reduce((m, j) => { m[j.status] = (m[j.status] || 0) + 1; return m; }, {});
 
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ request: { source, property } }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ request: { source, property } }) and ({ source, column }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ request: { source, property } }).`);
-    if (running.length) recommendations.push(`${running.length} task(s) running — read one with the query tool of the side its \`tool\` names (query_semantic_model, query_pipeline_model, or a feature's own) and { task_ids }; it waits for the task.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ request: { run: ${last.id} } }) for the full breakdown, or semantic_index({ request: { source: '${slowest[0].source}', property: '${slowest[0].property}' } }) for one property across syncs.`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect an event property's values via semantic_index({ request: { source, property } }), a column's via ({ source, column }).`);
+    if (running.length) recommendations.push(`${running.length} task(s) running — read one with query_model (a feature's task with its own query tool) and { task_ids }; it waits for the task.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ request: { run: ${last.id} } }) for the full breakdown, or ${this.rowView(slowest[0])} for one across syncs.`);
     if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ request: { run: ${last.id} } }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No running tasks and the value index is idle/current.`);
 

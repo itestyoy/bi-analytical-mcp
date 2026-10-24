@@ -4,16 +4,46 @@
 
 import { ToolError } from '../validate.js';
 import { compileDeclaration, measureRefs } from '../compile.js';
-import { renderContext } from '../yaml-render.js';
+import { renderContext, slowlyChangingNoMeasures } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
-import { clone } from './helpers.js';
+import { refText, wants } from './semantic-query.js';
+import { declarationOf, joinKeysOf } from '../pipeline/semantic-stage.js';
+import { builtModel, catalogWith } from '../catalog/built-model.js';
+
+/** What a semantic declaration keeps in a context's state — all a new semantic_model step replaces. */
+const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
+
+/**
+ * How `model` is loaded into a context for its columns: a join of its semantic_model step, where a model
+ * of the catalog carries a key it owns — or, where none does, a measure of it (`source`), whose own
+ * columns then group that measure.
+ */
+export const loadModelCall = (contextId, model, catalog = null) => {
+  const joinable = !catalog || (catalog.joinContract(model) && Object.keys(catalog.entitiesOf(model)).some((r) => catalog.joinTargetFor(r) === model && catalog.modelKeys().some((m) => m !== model && catalog.entityKey(m, r)?.length)));
+  const edit = `build_model({ request: { action: 'edit_step', context_id: '${contextId}', index, step } }), then materialize`;
+  return joinable
+    ? `join it in the build's semantic_model step — { source: '${model}', on: { … } } in its join (${edit})`
+    : `nothing of the catalog points at a key '${model}' owns, so it is no join — a measure of the build's semantic_model step with source: '${model}' loads it, and its own columns group that measure (${edit})`;
+};
+
+/**
+ * A declaration whose every metric would be left out of the layer (each reads a measure declared on a
+ * slowly-changing model, which takes none) is refused in the call, with the way out — a build that
+ * answered "done" with no metric to query left the caller nothing. When some of its metrics remain,
+ * the others are left out with a warning (renderContext).
+ */
+function refuseIfNoMetricLeft(catalog, compiled, render) {
+  const asked = (compiled.metrics || []).map((m) => m.name);
+  if (!asked.length || asked.some((n) => render.metricNames.includes(n))) return;
+  throw new ToolError(`no metric of this declaration can be queried — ${asked.map((n) => `'${n}'`).join(', ')} ${asked.length > 1 ? 'read measures' : 'reads a measure'} declared on ${render.droppedFrom.map((m) => `'${m}'`).join(', ')}. ${slowlyChangingNoMeasures(catalog, render.droppedFrom)}`, { stage: 'validate', field: 'semantic_models' });
+}
 
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
-  _compile(input) {
+  _compile(input, options, catalog = this.catalog) {
     try {
-      return compileDeclaration(this.catalog, input);
+      return compileDeclaration(catalog, input, options);
     } catch (e) {
       if (e instanceof ToolError) throw e;
       // compile.js attaches the offending INPUT FIELD to the error — surface it so the
@@ -25,16 +55,16 @@ export const semanticBuildMethods = {
   /**
    * The model a reference resolves onto must be LOADED in this context: a task built from one
    * source does not load another's semantic model, so MetricFlow would reject the entity. The
-   * model is taken from the reference the caller wrote — the compiled path is not read back.
+   * model is taken from the reference the caller wrote — the compiled path is not read back; `said`
+   * is how the reference is shown (users.country), `at` where it stands (steps[1] group_by[0]).
    */
-  _checkModelLoaded(ctx, ref) {
-    const model = ref?.model;
-    if (!model || !this.catalog.models[model]) return; // metric_time, a bare token, or already refused
+  _checkModelLoaded(ctx, model, said, field = 'group_by', at = null) {
+    if (!model || !this._catalogOf(ctx).models[model]) return; // already refused
     if (ctx.state.usedModels?.includes(model)) return;
     throw new ToolError(
-      `'${model}.${ref.attribute}' needs model '${model}', which is not loaded in this context. `
-        + `Recreate/update the task with use_base_models including '${model}'.`,
-      { stage: 'validate', field: 'model' },
+      `${at ? `${at}: ` : ''}'${said}' needs model '${model}', which this context does not read. `
+        + `Load it: ${loadModelCall(ctx.id, model, this._catalogOf(ctx))}.`,
+      { stage: 'validate', field },
     );
   },
 
@@ -45,8 +75,8 @@ export const semanticBuildMethods = {
    * downstream join/aggregate slice it by user attributes — no separate engine.
    */
   async _buildPipeline(input) {
-    this._validate('build_pipeline_model.pipeline', input);
-    // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_ids } })
+    this._validate('build_model.pipeline', input);
+    // a build is a task: the id now, the rows from query_model({ request: { task_ids } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'build_pipeline_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });
@@ -61,6 +91,8 @@ export const semanticBuildMethods = {
     const model = ctx.state.model;
     // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go, and so
     // do the models of its earlier builds (`_cN`): the base name owns the whole family.
+    // (what the build stored it as: a table unless it asked for a view)
+    const stored = ctx.state.pipeline_model?.materialized === 'view' ? 'view' : 'table';
     const consumers = this._checkpointConsumers(ctx.id); // forks reading a table built here
     const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model.replace(/_c\d+$/, ''));
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.pipeline_model;
@@ -74,42 +106,94 @@ export const semanticBuildMethods = {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (delete_context({ request: { context_id } })) or the store cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: `the model is removed: no task reads its rows any more (a read of one says so). The ${stored} object itself is dropped from the warehouse with the context (delete_context({ request: { context_id } })) or by the store's cleanup of ephemeral objects.` };
   },
 
-  async build_semantic_model(input) {
-    this._validate('build_semantic_model', input);
-    // a context that is read as it is (the project's own semantic models) is refused in every mode —
-    // an update, a dry run, a declaration — before anything reads it
-    if (input.context_id && this.ctxs.has(input.context_id)) this._ctxToWrite(input.context_id);
-    // Two modes, one tool: declaring a task from scratch, and adding to / removing from the task
-    // already in a context. They share this schema (and therefore its vocabularies, which is the
-    // whole reason they are one tool) but not their bodies.
-    if (input.action === 'update') return this._updateSemanticModel(input);
-    const compiled = this._compile(input);
-
-    if (input.dry_run) {
-      const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
-      if (input.context_id && this.ctxs.has(input.context_id)) {
-        const cur = this._ctx(input.context_id).state;
-        mergeCompiled(draft, { additions: clone(cur.additions), metrics: clone(cur.metrics), usedModels: [...cur.usedModels], task: null });
-      }
-      mergeCompiled(draft, compiled);
-      const render = renderContext(this.catalog, draft, { spec: this._semanticSpec() });
-      const out = { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
-      return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), input.context_id ? { context_id: input.context_id } : {});
+  /**
+   * THE SEMANTIC LAYER A BUILD'S LAST STEP DECLARES (src/pipeline/semantic-stage.js) — compiled and
+   * rendered on a copy, nothing written: { decl, compiled, render, catalog, layerModel? }. Over the build's
+   * source when the step is its only one; over the table the steps before it built otherwise — that table a
+   * model of the context's catalog (src/catalog/built-model.js: its time axis the step's `time`, its foreign
+   * keys its joins'), `table` the dbt model that holds it (the next build's name where none is known yet).
+   * Every mistake refused, naming the part of the step it is in.
+   */
+  async _semanticLayerOf(ctx, draft, st, { table = null } = {}) {
+    const say = (e) => new ToolError(`semantic_model: ${e.message}`, { stage: 'validate', field: e.field ? `semantic_model.${e.field}` : 'semantic_model' });
+    let catalog = this.catalog;
+    let layerModel = null;
+    let source = draft.source;
+    if (draft.stages.length || draft.base) {
+      const key = draft.name;
+      const c = this.catalog;
+      if (c.models[key] || c.primaryByEntity[key] || c.joinEntityNames().includes(key)) throw say(Object.assign(new Error(`the build's name '${key}' is a model or a key of the catalog, and its table is a model of the context under that name — name the build apart from them`), { field: 'name' }));
+      if (st.time === undefined) throw say(Object.assign(new Error('time: name the column of the table the steps before this one built that is its time axis (metric_time) — a column of the time type'), { field: 'time' }));
+      const columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages));
+      const axis = columns.find((x) => x.name === st.time);
+      if (!axis) throw say(Object.assign(new Error(`time: '${st.time}' is no column of the table the steps before this one built — its columns: ${columns.map((x) => x.name).join(', ')}`), { field: 'time' }));
+      if (!['time', 'unknown'].includes(axis.type)) throw say(Object.assign(new Error(`time: '${st.time}' is ${axis.type}, not a moment — the time axis is a moment the steps before this one carry: a time column, or one made of it (min / max of it in an aggregate, date_trunc of it)`), { field: 'time' }));
+      let keys;
+      try { keys = joinKeysOf(c, st.join || [], columns.map((x) => x.name)); } catch (e) { throw say(e); }
+      const model = builtModel({ key, dbtModel: table || this._nextPipelineModel(ctx, draft.name), columns, time: st.time, keys, description: draft.description, from: draft.source });
+      catalog = catalogWith(c, key, model);
+      layerModel = { key, model };
+      source = key;
     }
+    let decl;
+    try { decl = declarationOf(catalog, { name: draft.name, description: draft.description, source }, st); } catch (e) { throw say(e); }
+    const compiled = this._compile(decl, undefined, catalog);
+    const layer = { tasks: [], additions: {}, metrics: [], usedModels: [] };
+    mergeCompiled(layer, compiled);
+    let render;
+    try { render = renderContext(catalog, layer, { spec: this._semanticSpec() }); } catch (e) {
+      if (e instanceof ToolError || !e.field) throw e;
+      throw new ToolError(e.message, { stage: 'compile', field: e.field });
+    }
+    refuseIfNoMetricLeft(catalog, compiled, render);
+    return { decl, compiled, render, catalog, layerModel };
+  },
 
-    // The declaration is taken IN THE CALL — compiled, merged, written — so a query issued right
-    // after it validates against these metrics; parsing it (dbt) is the task, and a query on this
-    // context waits for it (tasks on one context run in order).
-    const ctx = input.context_id ? this._ctxToWrite(input.context_id) : this.ctxs.create();
+  /**
+   * The semantic layer of a build, made the context's: its declaration replaces the one the context held,
+   * taken in the call — so a query issued right after it validates against these metrics — and parsed by
+   * dbt in a task (a query on the context waits for it: tasks on one context run in order). Over the table
+   * its steps build, that build goes first — or the table that already stands for them, a checkpoint or a
+   * task's — and the layer is written once it stands.
+   */
+  async _materializeLayer(ctx, draft) {
+    let table = null;
+    let built = null; // the build of the steps before the step, when they are no table yet
+    if (draft.stages.length || draft.base) {
+      const plan = draft.stages.length ? this._renderPlan(draft, draft.stages, { forBuild: true }) : null;
+      if (!draft.stages.length) table = draft.base.model;
+      else if (plan.checkpoint && !plan.stages.length) table = plan.checkpoint.model;
+      else {
+        built = await this._draftMaterialize(ctx, draft, { stagesOnly: true });
+        table = built.model;
+      }
+    }
+    const { decl, compiled, render, layerModel } = await this._semanticLayerOf(ctx, draft, draft.semantic, { table });
+    for (const k of SEMANTIC_STATE) delete ctx.state[k];
+    Object.assign(ctx.state, { tasks: [], additions: {}, metrics: [], usedModels: [] });
+    if (layerModel) ctx.state.layer_model = layerModel; else delete ctx.state.layer_model;
     mergeCompiled(ctx.state, compiled);
-    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
-    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
-    const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, input, compiled, render, file), { input });
-    return this._taskStarted(taskId, { context_id: ctx.id });
+    const write = () => this.ctxs.writeSemanticYaml(ctx.id, render);
+    const input = { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, steps: [...draft.stages, draft.semantic] };
+    if (!built) {
+      const file = write();
+      const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, decl, compiled, render, file), { input });
+      return this._taskStarted(taskId, { context_id: ctx.id });
+    }
+    // the layer is written once its table stands: the build runs first on the context
+    const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
+      const job = this.jobs.get(built.task_id);
+      if (job?.status !== 'ready') {
+        const why = job?.error || `its build ended ${job?.status || 'unknown'}`;
+        return { ok: false, status: 'error', context_id: ctx.id, error: { stage: 'build', message: `the table the semantic layer stands on (${table}, task ${built.task_id}) did not build: ${why}` } };
+      }
+      return this._declared(ctx, decl, compiled, render, write());
+    }, { input });
+    return this._taskStarted(taskId, { context_id: ctx.id, model: table });
   },
 
   /** The finished answer of a declared task: parsed, with what it can be grouped by and the next call. */
@@ -117,108 +201,137 @@ export const semanticBuildMethods = {
     const parse = await this._parse(ctx.id);
     const { now: groupable, afterLoading } = this._groupableSplit(ctx);
     // the example must be a call that RUNS in this context, so it comes from what is loaded
-    const exRef = groupable[0];
-    const exText = exRef ? `{ model: '${exRef.model}', attribute: '${exRef.attribute}'${exRef.via ? `, via: '${exRef.via}'` : ''} }` : "{ time: 'metric_time', grain: 'day' }";
+    // — a categorical one where there is one: a time or a validity bound reads as an odd first cut
+    const c = this._catalogOf(ctx);
+    const plain = (r) => {
+      const dim = r.source !== undefined && r.column !== undefined ? c.models[r.source]?.dimensions?.[r.column] : null;
+      return dim && !/time|date|timestamp/i.test(String(dim.type || ''));
+    };
+    const exRef = groupable.find(plain) || groupable[0];
+    const exText = exRef ? refText(exRef) : "{ time: 'metric_time', grain: 'day' }";
     return {
+      ok: true,
       context_id: ctx.id,
       task: compiled.task,
-      files: [file],
-      ...(input.include_yaml ? { yaml: render.yaml } : {}),
+      ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),
       semantic_models: render.semanticModels,
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
       groupable,
-      ...(afterLoading.length ? {
+      // (said with the first build, as the layer's hints are)
+      ...(afterLoading.length && !ctx.state.told_layer_hints ? {
         groupable_after_loading: afterLoading,
-        groupable_after_loading_note: `These attributes are reachable in the catalog but their model is not loaded in this context — add it with use_base_models: ['${afterLoading[0].model}'] (create/update) before naming them in group_by/where.`,
+        groupable_after_loading_note: `These columns are reachable in the catalog but this context does not read their model — load it before naming them in a group_by or a where: ${loadModelCall(ctx.id, afterLoading[0].source, this.catalog)}.`,
       } : {}),
       parse,
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
-      next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] } }).`,
-      recommendations: [
-        `Bound every query with time_range. Group or filter by an attribute from \`groupable\`, addressed as { model, attribute } (e.g. ${exText}), or by { time: 'metric_time', grain }.`,
-        `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_model, ... } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
+      next: render.metricNames.length
+        ? `Query it: query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`
+        : `This context has no metric to query yet: add one to its semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } })) and materialize.`,
+      // how to query and change the layer is said on its first build; a rebuild of it says what changed only
+      recommendations: ctx.state.told_layer_hints ? [] : (ctx.state.told_layer_hints = true) && [
+        `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by; e.g. ${exText}), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column }, a declared event property { source, property }, a computed dimension or a column of a built table { semantic_model: [<its model>], dimension } — or by { time: 'metric_time', grain }.`,
+        `Change it later by editing its semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } })) and materializing again; inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };
   },
 
-  /** The INCREMENTAL path on an existing task: build_semantic_model({ request: { action: 'update', … } }). */
-  async _updateSemanticModel(input) {
-    const ctx = this._ctxToWrite(input.context_id);
-    const modelKey = input.semantic_model;
-    // dry_run must NOT mutate the context (state or files): work on a clone.
-    const state = input.dry_run ? clone(ctx.state) : ctx.state;
-    const add = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
+  /** The governed measures the catalog fixes on `model` (a declaration with `agg`), by name. */
+  _governedOf(ctx, model) {
+    return Object.entries(this._catalogOf(ctx).models[model]?.measures || {}).filter(([, mm]) => mm?.agg).map(([n]) => n);
+  },
 
-    // synthesize a declaration fragment for the add_* parts and compile it
-    const task = input.task || state.tasks[0] || 'task';
-    const frag = { name: task, semantic_models: [{ from: modelKey, dimensions: input.add_dimensions || [], measures: input.add_measures || [] }], metrics: input.add_metrics || [] };
-    const compiled = this._compile(frag);
-
-    // removals (with dependency checks for measures)
-    if (input.remove_metrics) state.metrics = state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
-    if (input.remove_measures) {
-      for (const rm of input.remove_measures) {
-        const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(rm));
-        if (dependents.length && !input.cascade) {
-          throw new ToolError(`cannot remove measure '${rm}'; metrics depend on it: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate', field: rm });
-        }
-      }
-      add.measures = add.measures.filter((m) => !input.remove_measures.includes(m.name));
+  /** delete_context semantic_model on a layer that is a step only: its measures over the model (`source`)
+   *  and its join go, and the metrics that read them — with cascade, else refused naming them. */
+  _deleteFromLayerStep(ctx, draft, modelKey, cascade) {
+    const st = draft.semantic;
+    const main = modelKey === draft.source && !draft.base && !draft.stages.length;
+    const gone = new Set((st.measures || []).filter((m) => (m.source ?? (main ? modelKey : null)) === modelKey).map((m) => m.name));
+    // (a metric may read a governed measure of the model by name: it goes with the model too)
+    const governed = this._governedOf(ctx, modelKey).filter((n) => (st.metrics || []).some((m) => m.measure === n));
+    for (const n of governed) gone.add(n);
+    const joined = (st.join || []).some((j) => j.source === modelKey);
+    if (!gone.size && !joined) {
+      const held = [...new Set([...(st.measures || []).map((m) => m.source).filter(Boolean), ...(st.join || []).map((j) => j.source)])];
+      return { context_id: ctx.id, removed: false, reason: `this context's semantic_model step neither measures '${modelKey}' nor joins it${held.length ? ` — it reads ${held.map((k) => `'${k}'`).join(', ')}` : ''}` };
     }
-    if (input.remove_dimensions) {
-      // A dimension is named by its ATTRIBUTE — the name `groupable` offers and `add_dimensions`
-      // takes. What is STORED is the task-namespaced copy ('ret_country'), a name the caller is
-      // never shown, so matching on it made every removal a silent no-op that still reported
-      // success. Match on the attribute the dimension declares, and refuse a name that matches
-      // nothing rather than pretending to have removed it.
-      for (const name of input.remove_dimensions) {
-        if (!add.dimensions.some((d) => d._attribute === name || d.name === name)) {
-          const have = [...new Set(add.dimensions.map((d) => d._attribute))];
-          throw new ToolError(`cannot remove dimension '${name}': '${modelKey}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove_dimensions' });
-        }
-      }
-      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d._attribute) && !input.remove_dimensions.includes(d.name));
+    // the metrics that read a removed measure, and those built on them
+    const reads = (m, names) => (m.measure && gone.has(m.measure)) || JSON.stringify(m.expr ?? {}).match(/"metric":"([^"]+)"/g)?.some((x) => names.has(x.slice(10, -1)));
+    const dependents = new Set();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const m of st.metrics || []) if (!dependents.has(m.name) && reads(m, dependents)) { dependents.add(m.name); grew = true; }
     }
-
-    mergeCompiled(state, compiled);
-    const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
-    if (input.dry_run) {
-      const out = { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
-      return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
-    }
-    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
+    if (dependents.size && !cascade) throw new ToolError(`metrics depend on this model's measures: ${[...dependents].join(', ')} — add cascade: true to remove them with it, or edit the semantic_model step (build_model, action: "edit_step") to keep them on other measures`, { stage: 'validate', field: 'cascade' });
+    const next = { ...st, measures: (st.measures || []).filter((m) => !gone.has(m.name)), metrics: (st.metrics || []).filter((m) => !dependents.has(m.name)), join: (st.join || []).filter((j) => j.source !== modelKey) };
+    for (const k of ['measures', 'join']) if (!next[k].length) delete next[k];
+    if (next.metrics.length) draft.semantic = next; else delete draft.semantic;
     this.ctxs.touch(ctx.id);
-    const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
-      const parse = await this._parse(ctx.id);
-      return {
-        context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
-        metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
-        next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [...] } }) — \`metrics\` above is the current full list.`,
-      };
-    }, { input });
-    return this._taskStarted(taskId, { context_id: ctx.id });
+    return {
+      context_id: ctx.id, semantic_model: modelKey, removed: true,
+      metrics_remaining: next.metrics.map((m) => m.name), ...(dependents.size ? { metrics_removed: [...dependents] } : {}),
+      note: `removed from the semantic_model step, which is not built yet: materialize (build_model({ request: { action: "materialize", context_id: "${ctx.id}" } })) to build what is left.`,
+    };
   },
 
   async _deleteSemanticModel(input) {
     this._validate('delete_context.semantic_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
-    const add = ctx.state.additions[modelKey];
-    if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
-    const taskMeasureNames = new Set(add.measures.map((m) => m.name));
+    const draft0 = ctx.state.draft;
+    // a layer not built yet (a fork, a step not materialized) is its semantic_model step alone: the model is
+    // removed from the step, as from a built layer, and the next materialize builds what is left
+    if (draft0?.semantic && !Object.keys(ctx.state.additions || {}).length) return this._deleteFromLayerStep(ctx, draft0, modelKey, input.cascade);
+    // a model the layer only joins (its columns to group by, no measure or dimension of its own): the
+    // join goes, and with it the model
+    const joined = (draft0?.semantic?.join || []).some((j) => j.source === modelKey);
+    const add = ctx.state.additions[modelKey] || (joined ? { measures: [], dimensions: [] } : null);
+    if (!add) {
+      const held = [...new Set([...Object.keys(ctx.state.additions || {}), ...(draft0?.semantic?.join || []).map((j) => j.source)])];
+      return { context_id: ctx.id, removed: false, reason: `the semantic layer of this context neither declares measures or dimensions on '${modelKey}' nor joins it${held.length ? ` — it holds ${held.map((k) => `'${k}'`).join(', ')}` : ''}` };
+    }
+    // what goes with the model: the measures the layer declared on it, and the governed measures the catalog
+    // fixes on it (a metric may read one by name) — a metric reading either depends on the model
+    const taskMeasureNames = new Set([...add.measures.map((m) => m.name), ...this._governedOf(ctx, modelKey)]);
     const dependents = ctx.state.metrics.filter((m) => [...measureRefs(m, ctx.state.metrics)].some((mm) => taskMeasureNames.has(mm)));
     if (dependents.length && !input.cascade) {
-      throw new ToolError(`metrics depend on this model's measures: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate' });
+      throw new ToolError(`metrics depend on this model's measures: ${dependents.map((d) => d.name).join(', ')} — add cascade: true to remove them with it, or edit the semantic_model step (build_model, action: "edit_step") to keep them on other measures`, { stage: 'validate', field: 'cascade' });
     }
+    // ALL OR NOTHING: what the removal changes is kept aside, and put back if the layer left does not render
+    const before = JSON.parse(JSON.stringify({ metrics: ctx.state.metrics, additions: ctx.state.additions, usedModels: ctx.state.usedModels ?? null, semantic: ctx.state.draft?.semantic ?? null }));
+    const restore = () => {
+      Object.assign(ctx.state, { metrics: before.metrics, additions: before.additions });
+      if (before.usedModels) ctx.state.usedModels = before.usedModels;
+      if (ctx.state.draft) { if (before.semantic) ctx.state.draft.semantic = before.semantic; else delete ctx.state.draft.semantic; }
+    };
     ctx.state.metrics = ctx.state.metrics.filter((m) => !dependents.includes(m));
     delete ctx.state.additions[modelKey];
-    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
+    // the layer is the build's semantic_model step: the step says the same, or the next materialize
+    // would build the removed model back (and a step with no metric left is no layer)
+    const draft = ctx.state.draft;
+    if (draft?.semantic) {
+      const gone = new Set(dependents.map((d) => d.name));
+      const st = { ...draft.semantic };
+      st.measures = (st.measures || []).filter((m) => !taskMeasureNames.has(m.name));
+      st.metrics = (st.metrics || []).filter((m) => !gone.has(m.name));
+      st.join = (st.join || []).filter((j) => j.source !== modelKey);
+      if (add.dimensions?.length) delete st.dimensions;
+      for (const k of ['measures', 'join']) if (!st[k].length) delete st[k];
+      if (st.metrics.length) draft.semantic = st; else delete draft.semantic;
+    }
+    // its join went with it (above): the layer reads it no more — the build's own source excepted
+    if (modelKey !== draft?.source) ctx.state.usedModels = (ctx.state.usedModels || []).filter((k) => k !== modelKey);
+    let render;
+    try { render = renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() }); } catch (e) {
+      restore();
+      throw new ToolError(`nothing was removed: the layer without '${modelKey}' does not hold — ${e.message}`, { stage: e.stage || 'validate', field: 'semantic_model' });
+    }
     this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
-    return { context_id: ctx.id, semantic_model: modelKey, removed: true, metrics: render.metricNames, parse };
+    // what the layer holds now, and what went with the model
+    return { context_id: ctx.id, semantic_model: modelKey, removed: true, metrics_remaining: render.metricNames, ...(dependents.length ? { metrics_removed: dependents.map((d) => d.name) } : {}), parse };
   },
 };

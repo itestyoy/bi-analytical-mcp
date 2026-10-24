@@ -10,7 +10,7 @@
 // metric can be grouped by — which joins MetricFlow makes, through which entity, at which grain:
 // MetricFlow says that itself (src/group-by-items.js), and a second copy of its rules here would be
 // one that can disagree with it. What MetricFlow compiles and the warehouse runs is checked by running
-// them (preview_semantic_model with validate) — this is only what the declaration itself says.
+// them (context describe with validate) — this is only what the declaration itself says.
 
 
 
@@ -71,6 +71,7 @@ export function manifestLayer(manifest) {
     // the legacy spec's aggregations; the latest spec has none (a simple metric carries its own)
     measures: (sm.measures || []).map((me) => compact({
       name: me.name, agg: me.agg, expr: me.expr ?? me.name,
+      label: me.label || undefined,
       percentile: me.agg === 'percentile' ? me.agg_params?.percentile : undefined,
       agg_time_dimension: me.agg_time_dimension || undefined,
       non_additive_dimension: me.non_additive_dimension ? compact({ dimension: me.non_additive_dimension.name, window: me.non_additive_dimension.window_choice, group_by: me.non_additive_dimension.window_groupings }) : undefined,

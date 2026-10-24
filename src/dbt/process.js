@@ -1,6 +1,9 @@
-// STARTING A dbt / MetricFlow PROCESS — the one place the dbt clients spawn one.
+// STARTING A dbt / MetricFlow PROCESS — where the dbt clients spawn a one-shot process (dbt, `mf
+// validate-configs`, a Python script asked once) or ask a warm one (MetricFlow kept warm), all under one
+// discipline (underTurn). The one-shot processes are spawned here; the warm ones — MetricFlow's
+// (src/dbt/metricflow-server.js) and the retentioneering check's — by src/warm-process.js.
 //
-// Two things ride along with every process:
+// Two things ride along with every process, and every request to a warm one:
 //   * the CANCELLATION of the call or task it works for (src/request-context.js): a call the client
 //     abandoned, or a task cancelled with { task_id, cancel: true }, stops its process instead of
 //     letting it scan the warehouse to the end — and one asked for after that is not started;
@@ -8,11 +11,18 @@
 //     file that ONE process may hold open ("Could not set lock on file … Conflicting lock is held"):
 //     two dbt processes on it at once — a batch of queries, a card's drill-down during a build, the
 //     value index — fail. Such a warehouse gets one FIFO turn per database, shared by every client
-//     on it (a context's queries, the indexer, the MetricFlow group-by script), and a process waits for it.
+//     on it (a context's queries, the indexer, MetricFlow's list of group-by items), and a process waits for it.
+//
+// A one-shot process has a TEMPORARY DIRECTORY OF ITS OWN (its TMPDIR, under the server's), removed
+// when it has ended — however it ended: what dbt and the Python under it leave there goes with it. dbt-duckdb
+// runs a Python model from a temporary .py that it removes after, and Python compiles it into a
+// __pycache__ beside it that nothing removes: in the server's own temporary directory that was one file
+// per Python model run, for good (and the .py too, where a cancel or a timeout killed the run).
 
 import { execFile, spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { currentSignal, currentProgress } from '../request-context.js';
 import { setting } from '../settings.js';
 
@@ -53,54 +63,74 @@ function waitFor(promise, signal) {
 export const warehouseTurns = new Turns();
 
 /**
+ * Run `start(signal)` — what spawns a process, or asks a warm one — under the discipline every dbt /
+ * MetricFlow process shares: `turn` (a database key) makes it wait for that warehouse's turn first; the
+ * call's cancellation (passed to `start`) stops it, and one cancelled before it starts is not started; a
+ * task's progress and DBT_TIMING_LOG name it by `bin args`. Never throws: what `start` resolves with is
+ * the outcome, a cancellation while waiting is { ok: false, cancelled: true, … }, and anything `start`
+ * throws is a failure with its reason — never reported as a cancellation.
+ */
+function underTurn(bin, args, start, { turn = null } = {}) {
+  const signal = currentSignal();
+  const report = reporter(bin, args, turn);
+  const asked = Date.now();
+  let began = asked;
+  const run = async () => {
+    began = Date.now();
+    report.running();
+    if (signal?.aborted) return cancelledResult('not started — the call was cancelled');
+    return start(signal);
+  };
+  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
+  return (turn ? warehouseTurns.run(turn, run, signal) : run()).catch(failedResult).then(done);
+}
+
+/**
  * Run `bin args` and collect what it printed. `turn` (a database key) makes it wait for that
  * warehouse's turn first. Never throws: the outcome is { ok, code, killed, signal, cancelled?,
  * stdout, stderr, error }.
  */
 export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null } = {}) {
-  const signal = currentSignal();
-  const report = reporter(bin, args, turn);
-  const asked = Date.now();
-  let began = asked;
-  const start = () => { began = Date.now(); report.running(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
-  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
-  if (!turn) return start().then(done);
-  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+  return underTurn(bin, args, (signal) => spawnOnce(bin, args, { cwd, env, timeout, signal }), { turn });
 }
 
 /**
  * Run `bin args` with `input` written to its stdin (then closed), and collect what it printed — for a
- * process that takes its request on stdin (python/mf_group_bys.py, asked once). Waits for `turn` like
+ * process that takes its request on stdin (python/ast_gate.py, asked once). Waits for `turn` like
  * runProcess, stops with the call's cancellation, and never throws: { ok, code, cancelled?, stdout,
  * stderr, error? }.
  */
 export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, turn = null } = {}) {
-  const signal = currentSignal();
-  const report = reporter(bin, args, turn);
-  const asked = Date.now();
-  let began = asked;
-  const start = () => new Promise((resolve) => {
-    began = Date.now();
-    report.running();
-    if (signal?.aborted) return resolve(cancelledResult('not started — the call was cancelled'));
-    const child = spawn(bin, args, { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) });
+  return underTurn(bin, args, (signal) => new Promise((resolve) => {
+    const child = ownTemp((TMPDIR) => spawn(bin, args, { cwd, env: { ...process.env, ...env, TMPDIR }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) }));
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    let timer = null;
     child.on('error', (e) => { clearTimeout(timer); resolve(signal?.aborted ? cancelledResult('the call was cancelled') : { ok: false, code: null, stdout, stderr, error: e.message }); });
     child.on('close', (code, sig) => {
       clearTimeout(timer);
       if (signal?.aborted) return resolve(cancelledResult('the call was cancelled'));
       resolve({ ok: code === 0, code, killed: !!sig, signal: sig, stdout, stderr, ...(code === 0 ? {} : { error: sig ? `killed (${sig}) — it ran past ${Math.round(timeout / 1000)}s` : `exited with code ${code}` }) });
     });
+    // no standard streams (EMFILE / ENFILE): its 'error', above, says why
+    if (!child.stdin || !child.stdout || !child.stderr) return;
+    timer = setTimeout(() => child.kill('SIGTERM'), timeout);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
     child.stdin.on('error', () => { /* the process may exit before reading */ });
     child.stdin.end(input);
-  });
-  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
-  if (!turn) return start().then(done);
-  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+  }), { turn });
+}
+
+/**
+ * Ask a WARM process one request (MetricFlow kept warm, src/dbt/metricflow-server.js) under the same
+ * discipline as a process run by runProcess; a task's progress and DBT_TIMING_LOG name it by `bin args`
+ * — the command it stands for (`mf query`). `ask(signal)` sends the request and resolves with its
+ * outcome ({ ok, … }); this never throws, and a call cancelled while waiting for the turn is answered
+ * { ok: false, cancelled: true, error } without asking.
+ */
+export function runWarm(bin, args, ask, { turn = null } = {}) {
+  return underTurn(bin, args, ask, { turn });
 }
 
 /**
@@ -136,10 +166,33 @@ function cancelledResult(message) {
   return { ok: false, code: null, killed: true, signal: 'SIGTERM', cancelled: true, stdout: '', stderr: '', error: message };
 }
 
+/** What a start that threw is: a cancellation only when it was one (the wait for the turn, cancelled); else a failure with its reason. */
+function failedResult(e) {
+  if (e?.cancelled) return cancelledResult(e.message || 'cancelled');
+  const error = `could not run: ${e?.message || e}`;
+  return { ok: false, code: null, killed: false, signal: null, stdout: '', stderr: error, error };
+}
+
+/**
+ * Spawn `start(TMPDIR)` — a one-shot process — with a temporary directory of its own, removed once the
+ * child has CLOSED (not when its outcome is known: a cancelled call is answered while the process it
+ * killed may still be writing), or at once when the process never started (the spawn threw, or it has
+ * no pid).
+ */
+function ownTemp(start) {
+  const dir = mkdtempSync(join(tmpdir(), 'dbt-proc-'));
+  const clear = () => {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* a process it started outlived it: theirs */ }
+  };
+  let child;
+  try { child = start(dir); } catch (e) { clear(); throw e; }
+  if (child.pid === undefined) clear(); else child.once('close', clear);
+  return child;
+}
+
 function spawnOnce(bin, args, { cwd, env, timeout, signal }) {
-  if (signal?.aborted) return Promise.resolve(cancelledResult('dbt not started — the tool call was cancelled'));
   return new Promise((resolve) => {
-    execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
+    ownTemp((TMPDIR) => execFile(bin, args, { cwd, env: { ...process.env, ...env, TMPDIR }, timeout, maxBuffer: 64 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
       // The useful failure fact JS gives us is killed/signal/code — NOT err.message/err.stack,
       // which is just the "Command failed: <whole command>" + node-internal-stack wrapper.
       // A killed/SIGTERM exit means the runner timeout fired (the query never finished) — unless
@@ -155,6 +208,6 @@ function spawnOnce(bin, args, { cwd, env, timeout, signal }) {
             : `dbt exited with code ${err.code}`;
       }
       resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed || cancelled, signal: err?.signal ?? null, ...(cancelled ? { cancelled: true } : {}), stdout: stdout || '', stderr: stderr || '', error });
-    });
+    }));
   });
 }

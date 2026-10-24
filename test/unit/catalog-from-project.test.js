@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog, loadCatalogFromProject } from '../../src/catalog.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Build a throwaway dbt project: dbt_project.yml + schema YAML(s) under models/.
 function project(schemaFiles) {
-  const dir = mkdtempSync(join(tmpdir(), 'proj-'));
+  const dir = tempDir('proj');
   writeFileSync(join(dir, 'dbt_project.yml'), 'name: test\nprofile: test\nmodel-paths: ["models"]\n');
   const mdir = join(dir, 'models');
   mkdirSync(mdir, { recursive: true });
@@ -97,8 +97,18 @@ test('a key the loader does not read is refused at load, on a model and on a col
   }
 });
 
+// Allowed non-data test: an input-validation guard. required_filter marks a column every question over
+// the model should filter: it is true or absent, and the catalog lists the columns that carry it.
+test('required_filter is read off a column as true, and anything else is refused at load', () => {
+  const marked = usersYml.replace('{ name: country, data_type: string }', '{ name: country, data_type: string, config: { meta: { mcp: { required_filter: true } } } }');
+  const dir = project({ 'users.yml': marked, 'events.yml': eventsYml });
+  assert.deepEqual(loadCatalogFromProject(dir, { dialect: 'duckdb' }).requiredFilters('users'), ['country']);
+  const wrong = project({ 'users.yml': marked.replace('required_filter: true', 'required_filter: prod'), 'events.yml': eventsYml });
+  assert.throws(() => loadCatalogFromProject(wrong, { dialect: 'duckdb' }), /column 'country' of model 'dim_users': meta\.mcp\.required_filter must be true/);
+});
+
 test('a catalog file that is not a dbt model-schema YAML is refused', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cat-'));
+  const dir = tempDir('cat');
   try {
     writeFileSync(join(dir, 'catalog.json'), JSON.stringify({ models: { events: { dbt_model: 'fct_events' } } }));
     writeFileSync(join(dir, 'registry.yml'), 'models:\n  events: { dbt_model: fct_events }\n');

@@ -9,7 +9,8 @@ import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
 import { measureRefs } from './compile.js';
 
-const EVENT_TIME_DIM = 'event_time';
+/** An events source's time axis as a dimension of its semantic model (MetricFlow's agg_time_dimension). */
+export const EVENT_TIME_DIM = 'event_time';
 /** The partition column as a dimension of its semantic model — what a metric query bounds, next to
  *  the window on metric_time, so the warehouse reads only the partitions the window touches. */
 export const PARTITION_DIM = 'partition_day';
@@ -118,7 +119,7 @@ export function renderBaseModel(catalog, key) {
   const scd = !!m.scd;
   const pe = m.primary_entity;
   if (!pe) {
-    throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
+    throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one is reached through a pipeline join stage; it cannot be loaded into a semantic layer.`);
   }
   const peName = pe.name;
 
@@ -127,7 +128,13 @@ export function renderBaseModel(catalog, key) {
   // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
   if (scd) sm.primary_entity = peName;
   const peExpr = pe.key ? entityExpr(catalog, pe) : undefined;
-  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
+  // a model with no key of its own (a build's table: src/catalog/built-model.js) names its identity
+  // alone — its dimensions are reached under it, and nothing joins onto it
+  // …and so does a model whose identity names no key column (a fact's grain, an amount per row): an entity
+  // there would read a column of that name, which the table does not have
+  const keyless = m.built || (!scd && !peExpr);
+  if (keyless) sm.primary_entity = peName;
+  sm.entities = keyless ? [] : [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
   }
@@ -187,6 +194,53 @@ function manifestOnly(decl) {
  * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
  * @returns { yaml, semanticModels: string[], metricNames: string[] }
  */
+/**
+ * Why a slowly-changing model takes no measure, in the caller's words, with the way out written as a
+ * value: the same count on an events source that carries the model's key (named from the catalog).
+ */
+export function slowlyChangingNoMeasures(catalog, models) {
+  const [model] = models;
+  const entity = model ? primaryEntityName(catalog.getModel(model)) : null;
+  const keyOn = (f) => (typeof catalog.entityKey === 'function' ? catalog.entityKey(f, entity) : undefined);
+  const fact = entity ? (catalog.facts || []).find((f) => keyOn(f)?.length === 1) : null;
+  const key = fact ? keyOn(fact)[0].column : null;
+  const instead = key
+    ? `count on an events source instead — a measure over '${fact}' (the build's source, or a measure with source: '${fact}'), e.g. { name: '${entity}s', expr: { fn: 'count_distinct', args: [{ column: '${key}' }] } } — and group it by ${model}'s columns`
+    : 'count on an events source instead, and group it by its columns';
+  return `${models.map((m) => `'${m}'`).join(', ')} ${models.length > 1 ? 'are' : 'is'} slowly-changing (several versions per key, each with a validity window), so ${models.length > 1 ? 'they take' : 'it takes'} no measures; ${instead}.`;
+}
+
+/**
+ * A name MetricFlow takes as ONE kind of element across the layer (its ElementConsistencyRule): a measure
+ * named as a dimension or an entity of any semantic model — of the same model or another — is refused at
+ * parse. Said here, when the step is checked, naming what the step declared and what already holds the
+ * name. `additions`: what the step declared, per model.
+ */
+function refuseElementConflicts(semanticModels, additions) {
+  const kinds = new Map(); // name → Map(kind → semantic model)
+  const note = (name, kind, sm) => {
+    if (!kinds.has(name)) kinds.set(name, new Map());
+    if (!kinds.get(name).has(kind)) kinds.get(name).set(kind, sm);
+  };
+  for (const sm of semanticModels) {
+    for (const e of sm.entities || []) note(e.name, 'entity', sm.name);
+    if (sm.primary_entity) note(sm.primary_entity, 'entity', sm.name);
+    for (const d of sm.dimensions || []) note(d.name, 'dimension', sm.name);
+    for (const me of sm.measures || []) note(me.name, 'measure', sm.name);
+  }
+  const declared = (kind) => new Set(Object.values(additions).flatMap((a) => (a[`${kind}s`] || []).map((x) => x.name)));
+  const own = { measure: declared('measure'), dimension: declared('dimension') };
+  for (const [name, byKind] of kinds) {
+    if (byKind.size < 2) continue;
+    const mine = own.measure.has(name) ? 'measure' : own.dimension.has(name) ? 'dimension' : null;
+    if (!mine) continue;
+    const other = [...byKind].filter(([k]) => k !== mine).map(([k, sm]) => `${k === 'entity' ? 'an entity' : `a ${k}`} of '${sm}'`).join(' and ');
+    const e = new Error(`${mine} '${name}': '${name}' is already ${other}, and MetricFlow takes a name as one kind of thing across the semantic layer — give the ${mine} a name of its own`);
+    e.field = `${mine}s.name`;
+    throw e;
+  }
+}
+
 export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const modelsToRender = new Set(state.usedModels || []);
   // always include any model that received additions
@@ -194,28 +248,35 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
 
   const semanticModels = [];
   const droppedMeasures = new Set(); // measures removed because their model is SCD (join-only)
+  const droppedFrom = new Set(); // the slowly-changing models they were declared on
   for (const key of modelsToRender) {
     const sm = renderBaseModel(catalog, key);
     const scd = !!catalog.getModel(key).scd;
     const add = state.additions?.[key];
     if (add) {
-      // A task may re-declare an attribute the base model already carries (it is offered in the
-      // schema either way). Two dimensions with one name is a manifest dbt rejects, so the base
-      // one stands and the duplicate is dropped.
-      const have = new Set(sm.dimensions.map((d) => d.name));
+      // A step may declare an attribute the base model already carries (a column, with a label or a
+      // grain of its own): it is stored under the column's name, so it takes the base one's place —
+      // two dimensions with one name is a manifest dbt rejects.
       // a task's time dimension over a column of the model reads it as the base model's own do
-      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(d.type === 'time' && d._attribute ? { ...manifestOnly(d), expr: timeExpr(catalog, key, d.expr) } : manifestOnly(d)); }
+      for (const d of add.dimensions || []) {
+        const dim = d.type === 'time' && d._attribute ? { ...manifestOnly(d), expr: timeExpr(catalog, key, d.expr) } : manifestOnly(d);
+        const at = sm.dimensions.findIndex((x) => x.name === d.name);
+        if (at === -1) sm.dimensions.push(dim);
+        else sm.dimensions[at] = dim;
+      }
       for (const me of add.measures || []) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
-        if (scd) { droppedMeasures.add(me.name); continue; }
-        const mm = onWarehouse(catalog, { ...me });
+        if (scd) { droppedMeasures.add(me.name); droppedFrom.add(key); continue; }
+        const mm = onWarehouse(catalog, manifestOnly(me));
         if (catalog.isFact(key) && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
       }
     }
     semanticModels.push(sm);
   }
+
+  refuseElementConflicts(semanticModels, state.additions || {});
 
   // Drop metrics that reference a measure we removed from an SCD model — otherwise dbt fails parse
   // with "a semantic model having a measure `X` does not exist but was referenced".
@@ -237,7 +298,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
     : yaml.dump(inertProse(doc), { lineWidth: 120, noRefs: true, quotingType: '"' });
   const warnings = [];
   if (droppedMeasures.size) {
-    warnings.push(`SCD dimension model is join-only: MetricFlow forbids measures on a validity_params model, so measure(s) [${[...droppedMeasures].join(', ')}] were not emitted${droppedMetrics.length ? ` (and metric(s) [${droppedMetrics.join(', ')}] that depended on them were dropped)` : ''}. Source of such a measure is the catalog's meta.mcp.measures on this model OR a prior task on a reused context_id (it stays in ctx.state.additions) — not auto-generated. Define user counts on the events fact (count_distinct of the user key) instead.`);
+    warnings.push(`measure(s) ${[...droppedMeasures].map((m) => `'${m}'`).join(', ')} were left out${droppedMetrics.length ? `, and with them metric(s) ${droppedMetrics.map((m) => `'${m}'`).join(', ')}, which cannot be queried` : ''}: ${slowlyChangingNoMeasures(catalog, [...droppedFrom])}`);
   }
   return {
     yaml: latest ? body : unquoteRefs(body),
@@ -245,6 +306,8 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
     semanticModels: semanticModels.map((s) => s.name),
     metricNames: metrics.map((m) => m.name),
     warnings,
+    // the slowly-changing models a measure was declared on and left out from
+    droppedFrom: [...droppedFrom],
   };
 }
 

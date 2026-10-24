@@ -4,15 +4,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDbt, detectDbtMajor } from '../../src/dbt/index.js';
 import { warehouseOf } from '../../src/dbt/warehouse.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** A project dir with a profile of `type` (and a DuckDB path read from DUCKDB_PATH). */
 function project(type) {
-  const dir = mkdtempSync(join(tmpdir(), 'dbtc-'));
+  const dir = tempDir('dbtc');
   writeFileSync(join(dir, 'dbt_project.yml'), 'name: p\nprofile: p\n');
   writeFileSync(join(dir, 'profiles.yml'), `p:\n  target: dev\n  outputs:\n    dev:\n      type: ${type}\n      path: "{{ env_var('DUCKDB_PATH') }}"\n`);
   return dir;
@@ -32,11 +32,11 @@ test('the warehouse is read from the project\'s profile: DuckDB takes turns by i
   assert.deepEqual(w, { adapter: 'duckdb', singleWriter: true, turn: '/data/a.duckdb' });
   const bq = project('bigquery');
   assert.deepEqual(warehouseOf(bq, bq, {}), { adapter: 'bigquery', singleWriter: false, turn: null });
-  assert.deepEqual(warehouseOf(mkdtempSync(join(tmpdir(), 'none-')), undefined, {}).adapter, null, 'no profile: unknown, no turn');
+  assert.deepEqual(warehouseOf(tempDir('none'), undefined, {}).adapter, null, 'no profile: unknown, no turn');
 });
 
 test('on a single-writer warehouse the client runs one process at a time; elsewhere they run together', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'turns-'));
+  const dir = tempDir('turns');
   const log = join(dir, 'log');
   writeFileSync(log, '');
   // each process notes when it starts and ends, and takes a moment in between
@@ -54,9 +54,9 @@ test('on a single-writer warehouse the client runs one process at a time; elsewh
 });
 
 test('the client is chosen by the dbt major version: 1.x before 1.12 reads the legacy semantic YAML, 1.12 and v2 the latest; others are refused', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ver-'));
+  const dir = tempDir('ver');
   const v1 = bin(dir, 'echo "Core:"; echo "  - installed: 1.11.11"');
-  const v112 = join(mkdtempSync(join(tmpdir(), 'ver112-')), 'dbt');
+  const v112 = join(tempDir('ver112'), 'dbt');
   writeFileSync(v112, '#!/bin/sh\necho "Core:"; echo "  - installed: 1.12.5"\n', { mode: 0o755 });
   const v2 = bin(dir, 'echo "dbt 2.0.6"');
   assert.equal(detectDbtMajor(v1), 1);
@@ -74,7 +74,7 @@ test('dbt runs in a named environment (`dbt-v1` unless named, for now); MetricFl
   const { resolveEnvironment, listEnvironments } = await import('../../src/dbt/environments.js');
   const { environmentBuild, INSTALLER } = await import('../../src/dbt/environment-specs.js');
   const { mkdirSync } = await import('node:fs');
-  const dir = mkdtempSync(join(tmpdir(), 'envs-'));
+  const dir = tempDir('envs');
   // a venv with these executables, each answering --version for its dbt, marked as built by
   // `dbt-env create` from its spec as it is now
   const venv = (name, bins, version) => {
@@ -119,4 +119,27 @@ test('dbt runs in a named environment (`dbt-v1` unless named, for now); MetricFl
   // the client takes the environment's binaries, and its version from them
   const c = createDbt({ environment: d });
   assert.deepEqual([c.major, c.dbtBin, c.mfBin, c.environment.name], [1, d.dbtBin, d.mfBin, 'dbt-v1']);
+});
+
+test('a dbt v2 show runs in a target directory of its own, removed after: the file it writes on every call never lands in the context\'s target/', async () => {
+  const { existsSync, mkdirSync, readdirSync } = await import('node:fs');
+  const dir = tempDir('show-target');
+  const proj = project('bigquery');
+  mkdirSync(join(proj, 'target'));
+  // a stand-in dbt: writes a file under a fresh name into the target it was given, as v2's show does,
+  // and reports which target that was
+  const dbt = bin(dir, 'T="${DBT_TARGET_PATH:-target}"; touch "$T/inline_$$.sql"; echo "{\\"show\\": [{\\"target\\": \\"$T\\"}]}"');
+  const files = () => readdirSync(join(proj, 'target'));
+  const v2 = createDbt({ version: 2, dbtBin: dbt, profilesDir: proj });
+  for (let i = 0; i < 3; i++) {
+    const shown = await v2.show(proj, 'select 1');
+    assert.equal(shown.ok, true);
+    assert.notEqual(shown.rows[0].target, 'target');
+    assert.equal(existsSync(shown.rows[0].target), false, 'removed after');
+  }
+  assert.deepEqual(files(), [], 'nothing of three shows is left in the context\'s target/');
+  await v2.run(proj, 'm');
+  assert.equal(files().length, 1, 'a v2 run still writes to the context\'s own target/');
+  const v1 = createDbt({ version: 1, dbtBin: dbt, profilesDir: proj });
+  assert.equal((await v1.show(proj, 'select 1')).rows[0].target, 'target', 'a 1.x show, which rewrites one file in place, runs in the context\'s own target/');
 });

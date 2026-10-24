@@ -123,9 +123,14 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
   const zStar = normalQuantile(1 - (1 - confidence) / 2);
   const seDiff = Math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2);
   const diff = p2 - p1;
-  // CI on the RELATIVE lift (p2/p1 − 1) via the log-ratio delta method (independent groups).
+  // a difference of two rates lies in [−p1, 1 − p1] (the variant's rate is in [0, 1]), and so does its interval
+  const ci = [Math.max(-p1, diff - zStar * seDiff), Math.min(1 - p1, diff + zStar * seDiff)];
+  // CI on the RELATIVE lift (p2/p1 − 1) via the log-ratio delta method (independent groups). A control
+  // that always converts has no spread to log: its relative lift is the absolute one (p1 = 1), and so
+  // is its interval — two methods there would disagree on the same difference.
   let relCi = null;
-  if (p1 > 0 && p2 > 0) {
+  if (p1 === 1) relCi = ci;
+  else if (p1 > 0 && p2 > 0) {
     const seLog = Math.sqrt((1 - p1) / (n1 * p1) + (1 - p2) / (n2 * p2));
     const lr = Math.log(p2 / p1);
     relCi = [Math.exp(lr - zStar * seLog) - 1, Math.exp(lr + zStar * seLog) - 1];
@@ -133,7 +138,7 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
   return {
     control_rate: p1, variant_rate: p2,
     absolute_lift: diff, relative_lift: p1 ? diff / p1 : null, relative_lift_ci: relCi,
-    z, p_value: pValue, confidence_interval: [diff - zStar * seDiff, diff + zStar * seDiff],
+    z, p_value: pValue, confidence_interval: ci,
     significant: pValue < 1 - confidence,
   };
 }
@@ -180,7 +185,7 @@ export function srmTest({ groups, ratios }) {
 
 function zAlpha(alpha, alternative) { return alternative === 'two_sided' ? normalQuantile(1 - alpha / 2) : normalQuantile(1 - alpha); }
 
-/** Required sample size PER GROUP to detect an absolute rate lift `mde` from `baseline`. */
+/** Required sample size per group to detect an absolute rate lift `mde` from `baseline`. */
 export function sampleSizeProportion({ baseline, mde, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
   const p1 = baseline; const p2 = baseline + mde; const pbar = (p1 + p2) / 2;
   const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
@@ -195,10 +200,16 @@ export function mdeProportion({ baseline, n, alpha = 0.05, power = 0.8, alternat
   return (lo + hi) / 2;
 }
 
-/** Required sample size PER GROUP to detect an absolute mean lift `mde` at spread `stddev`. */
+/** Required sample size per group to detect an absolute mean lift `mde` at spread `stddev`. */
 export function sampleSizeMean({ stddev, mde, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
   const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
   return Math.ceil(2 * ((za + zb) ** 2) * stddev * stddev / (mde * mde));
+}
+
+/** Smallest absolute lift detectable at `power` by a test whose difference has variance `variance`
+ *  (each group's own spread over its own n — what the test itself reads). */
+export function mdeFromVariance({ variance, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
+  return (zAlpha(alpha, alternative) + normalQuantile(power)) * Math.sqrt(variance);
 }
 
 /** Smallest absolute mean lift detectable at `power` with `n` per group. */

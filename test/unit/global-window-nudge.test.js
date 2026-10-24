@@ -11,43 +11,41 @@
 //
 // These are the same kind of checks as the python-preparation nudge: what the server SAYS about a
 // declared stage, plus input validation on the two forms of least/greatest. Nothing here asserts on
-// generated SQL — the numbers are proven in test/integration/pipeline.test.js.
+// generated SQL — the numbers are proven in test/integration/pipeline-stages.test.js.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildSchemas } from '../../src/schema.js';
-import { pipelineStageSchema } from '../../src/pipeline.js';
+import { stageSchema } from '../../src/pipeline.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { getDialect } from '../../src/dialects/index.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes } from '../helpers/settle.js';
+import { formWhere } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (dialect) => {
   const catalog = loadCatalog(CATALOG, dialect ? { dialect } : {});
   if (dialect) catalog.dialect = dialect;
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'win-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('win') }) }));
 };
 
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] };
-const DERIVE = { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] };
+const DERIVE = { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } };
 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
   const e = engine();
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'win', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: DERIVE });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: AGG });
-  const out = await e.build_pipeline_model({
-    action: 'add_step', draft_id,
-    stage: { stage: 'compute', name: 'revenue_avg', expr: { fn: 'average', args: [{ column: 'revenue' }], over: {} } },
-  });
-  const said = [...(out.recommendations || []), ...(out.warnings || [])].join(' ');
+  const { context_id } = await e.build_model({ action: 'start', name: 'win', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id, steps: [DERIVE] });
+  await e.build_model({ action: 'add_steps', context_id, steps: [AGG] });
+  const out = await e.build_model({
+    action: 'add_steps', context_id,
+    steps: [{ stage: 'compute', name: 'revenue_avg', expr: { fn: 'average', args: [{ column: 'revenue' }], over: {} } }] });
+  const said = [...(stepNotes(out) || []), ...(out.warnings || [])].join(' ');
   assert.match(said, /Global analytic window/);
   assert.match(said, /Resources exceeded/, 'it says what the failure looks like');
   assert.match(said, /aggregate` stage with no group_by/, 'and the cheap form of the same question');
@@ -56,13 +54,12 @@ test('a window with no partition_by is named as a global window, with the aggreg
 
 test('the same window PER GROUP says nothing — a partition is what a window is for', async () => {
   const e = engine();
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'win2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: DERIVE });
-  const out = await e.build_pipeline_model({
-    action: 'add_step', draft_id,
-    stage: { stage: 'compute', name: 'running', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] } } },
-  });
-  const said = [...(out.recommendations || []), ...(out.warnings || [])];
+  const { context_id } = await e.build_model({ action: 'start', name: 'win2', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id, steps: [DERIVE] });
+  const out = await e.build_model({
+    action: 'add_steps', context_id,
+    steps: [{ stage: 'compute', name: 'running', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] } } }] });
+  const said = [...(stepNotes(out) || []), ...(out.warnings || [])];
   assert.ok(!said.some((w) => /Global analytic window/.test(w)), said.join(' '));
 });
 
@@ -85,7 +82,7 @@ test('raw SQL carrying OVER () is caught too, and a partitioned one is not', () 
 // Pass 2 of the ladder: the numbers come back as literals, so `least` has to take one.
 test('least/greatest take their arguments as expressions — columns and literals alike — and say how many they need', () => {
   const validators = makeValidators(buildSchemas(loadCatalog(CATALOG, {})));
-  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_step', draft_id: 'ctxabc123456', stage });
+  const step = (stage) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'ctxabc123456', steps: [stage] });
 
   assert.equal(step({ stage: 'compute', name: 'capped', expr: { fn: 'least', args: [{ column: 'revenue' }, { value: 100 }] } }).ok, true);
   assert.equal(step({ stage: 'compute', name: 'capped', expr: { fn: 'least', args: [{ column: 'revenue' }, { column: 'budget' }] } }).ok, true);
@@ -109,15 +106,15 @@ test('the stage says whether this warehouse computes median/percentile exactly o
   const describe = (dialect) => {
     const catalog = loadCatalog(CATALOG, { dialect });
     catalog.dialect = dialect;
-    const stages = pipelineStageSchema(catalog);
-    const branches = stages.anyOf || stages.oneOf || [];
-    return branches.find((b) => b.properties?.stage?.enum?.[0] === 'aggregate').description;
+    // the one stage definition, its forms grouped by what they need (SQL over rows holds aggregate)
+    const stage = stageSchema(catalog);
+    return formWhere(stage, stage, 'stage', 'aggregate').description;
   };
   assert.match(describe('bigquery'), /median\/percentile are APPROXIMATE/);
   assert.match(describe('duckdb'), /every measure here is exact/);
   // …and both warn off the global window, since that part is not per warehouse
   for (const d of ['bigquery', 'duckdb']) {
-    assert.match(describe(d), /NO group_by/);
+    assert.match(describe(d), /no group_by/i);
     assert.match(describe(d), /Resources exceeded/);
   }
 });

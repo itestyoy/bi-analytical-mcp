@@ -10,17 +10,17 @@ import { JobManager } from '../../src/jobs.js';
 import { TaskRunner } from '../../src/task-runner.js';
 import { runProcess } from '../../src/dbt/process.js';
 
-const sides = { query_pipeline_model: 'pipeline' };
+const sides = { query_model: 'pipeline' };
 const ctxs = { acquire() {}, release() {} };
 const ctx = { id: 'c1' };
 
 test('a read of a running task names its phase — queued behind the work before it, then running the process it is on', async () => {
   const jobs = new JobManager();
-  const runner = new TaskRunner({ jobs, ctxs, sideOf: (tool) => sides[tool] || null, readers: { pipeline: 'query_pipeline_model' } });
+  const runner = new TaskRunner({ jobs, ctxs, sideOf: (tool) => sides[tool] || null, readers: { pipeline: 'query_model' } });
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const first = runner.start(ctx, 'query_pipeline_model', () => gate.then(() => runProcess(process.execPath, ['-e', 'setTimeout(() => {}, 400)'])).then(() => ({ ok: true })));
-  const second = runner.start(ctx, 'query_pipeline_model', async () => ({ ok: true }));
+  const first = runner.start(ctx, 'query_model', () => gate.then(() => runProcess(process.execPath, ['-e', 'setTimeout(() => {}, 400)'])).then(() => ({ ok: true })));
+  const second = runner.start(ctx, 'query_model', async () => ({ ok: true }));
   await new Promise((r) => setTimeout(r, 20));
 
   const running = runner.status(first).pending;
@@ -48,24 +48,25 @@ test('a where that bounds a time column from above by a bare date is told so; a 
   const advisor = new PipelineAdvisor({ catalog: null, valueIndex: null });
   const cols = [{ name: 'event_at', type: 'time' }, { name: 'event_name', type: 'categorical' }];
   const warned = (conditions) => advisor.dateBoundWarnings({ stage: 'where', conditions }, cols).length;
-  assert.equal(warned([{ column: 'event_at', op: 'between', value: ['2026-01-01', '2026-01-31'] }]), 1);
-  assert.equal(warned([{ or: [{ column: 'event_at', op: 'lte', value: '2026-01-31' }] }]), 1);
-  assert.equal(warned([{ column: 'event_at', op: 'lte', value: '2026-01-31 23:59:59' }]), 0);
-  assert.equal(warned([{ column: 'event_at', op: 'gte', value: '2026-01-01' }, { column: 'event_at', op: 'lt', value: '2026-02-01' }]), 0);
-  assert.equal(warned([{ column: 'event_name', op: 'lte', value: '2026-01-31' }]), 0, 'not a time column');
+  const cond = (fn, column, ...values) => ({ fn, args: [{ column }, ...values.map((value) => ({ value }))] });
+  assert.equal(warned([cond('between', 'event_at', '2026-01-01', '2026-01-31')]), 1);
+  assert.equal(warned([{ fn: 'or', args: [cond('lte', 'event_at', '2026-01-31'), cond('eq', 'event_name', 'x')] }]), 1, 'inside an or too');
+  assert.equal(warned([cond('lte', 'event_at', '2026-01-31 23:59:59')]), 0);
+  assert.equal(warned([cond('gte', 'event_at', '2026-01-01'), cond('lt', 'event_at', '2026-02-01')]), 0);
+  assert.equal(warned([cond('lte', 'event_name', '2026-01-31')]), 0, 'not a time column');
 });
 
 test('a query only compiled waits for the build of its context, not for the queries queued before it', async () => {
   const jobs = new JobManager();
-  const runner = new TaskRunner({ jobs, ctxs, sideOf: (tool) => (tool.endsWith('semantic_model') ? 'semantic' : null), readers: { semantic: 'query_semantic_model' } });
+  const runner = new TaskRunner({ jobs, ctxs, sideOf: (tool) => (tool.endsWith('semantic_model') ? 'semantic' : null), readers: { semantic: 'query_model' } });
   const order = [];
   let finishBuild; let finishQuery;
   const build = new Promise((r) => { finishBuild = r; });
   const slow = new Promise((r) => { finishQuery = r; });
   runner.start(ctx, 'build_semantic_model', () => build.then(() => { order.push('build'); return { ok: true }; }));
-  runner.start(ctx, 'query_semantic_model', () => slow.then(() => { order.push('query'); return { ok: true }; }));
-  const compiled = runner.start(ctx, 'query_semantic_model', async () => { order.push('compiled'); return { ok: true }; }, { batch: runner.afterBuilds(ctx) });
-  const behind = runner.start(ctx, 'query_semantic_model', async () => { order.push('behind'); return { ok: true }; });
+  runner.start(ctx, 'query_model', () => slow.then(() => { order.push('query'); return { ok: true }; }));
+  const compiled = runner.start(ctx, 'query_model', async () => { order.push('compiled'); return { ok: true }; }, { batch: runner.afterBuilds(ctx) });
+  const behind = runner.start(ctx, 'query_model', async () => { order.push('behind'); return { ok: true }; });
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(order, [], 'nothing runs before the build');
   finishBuild();

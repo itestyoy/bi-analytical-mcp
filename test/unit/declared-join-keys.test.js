@@ -7,14 +7,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 import { loadCatalog } from '../../src/catalog.js';
+import { mcp } from '../helpers/catalog-doc.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** Write a catalog YAML and load it. */
 function load(models) {
-  const file = join(mkdtempSync(join(tmpdir(), 'joinkey-')), 'catalog.yml');
+  const file = join(tempDir('joinkey'), 'catalog.yml');
   writeFileSync(file, `version: 2\nmodels:\n${models}`);
   return loadCatalog(file, {});
 }
@@ -314,4 +317,22 @@ test('a variant is held to the shape of the entity it expands into', () => {
 `;
   assert.throws(() => load(EVENTS_DAY(true) + SPEND(true) + variants + USERS()),
     /entity 'user_day_b' is joined at a different grain on each side/);
+});
+
+// (from test/integration/declared-joins.test.js) A grain is part of the key, so it is checked like
+// one: an unknown unit, or a field that is not a key part at all, is refused at LOAD — not silently
+// dropped, leaving a join that compares raw. Driven off the fixture catalog the integration suites
+// load, with one key part changed.
+test('a key part takes column + grain, and nothing else', () => {
+  const fixture = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
+  const bad = (part) => () => {
+    const d = yaml.load(readFileSync(fixture, 'utf8'));
+    const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
+    mcp(M.fct_analytics_events).entities.player_day = { type: 'foreign', key: ['player_id_of_internal', part] };
+    const at = join(tempDir('badpart'), 'catalog.yml');
+    writeFileSync(at, yaml.dump(d));
+    return loadCatalog(at, {});
+  };
+  assert.throws(bad({ column: 'device_time', grain: 'fortnight' }), /grain 'fortnight' is not one of day, week, month, quarter, year/);
+  assert.throws(bad({ column: 'device_time', truncate: 'day' }), /'truncate' is not a key-part field/);
 });

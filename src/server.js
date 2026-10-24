@@ -101,7 +101,7 @@ export async function makeEngine(opts = {}) {
       dialect: catalog.dialect,
       python: !!catalog.pythonRuntime?.available,
       runtime: frameProfile(catalog.pythonRuntime, catalog.pythonRuntime?.config || {}).key,
-    })
+    }, catalog)
     : undefined;
   const ctxs = new ContextManager({
     baseProjectDir,
@@ -141,7 +141,7 @@ export async function makeEngine(opts = {}) {
     }
   }
   // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is
-  // configured (+ a key); otherwise null and memory({ request: { search } }) stays purely fuzzy.
+  // configured (+ a key); otherwise null and semantic_index({ request: { search } }) stays purely fuzzy.
   const embedder = createEmbedder();
   // Durability for the memory tool: by default findings share the store (and survive
   // MCP_DB_RESET), but the store lives on the container FS — point MCP_MEMORY_DB at a
@@ -165,7 +165,7 @@ export async function makeEngine(opts = {}) {
   // that is not a whole number of days is the default, as for every setting (src/config.js).
   const tableExpirationDays = S.MCP_TABLE_EXPIRATION_DAYS;
   // the dbt project's own semantic models and metrics, read once before the tools are served: the
-  // schema names them, and query_semantic_model runs them in their own context with no build
+  // schema names them, and query_model runs them in their own context with no build
   const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;
   if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
   if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);

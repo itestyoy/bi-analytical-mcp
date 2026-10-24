@@ -18,8 +18,8 @@
 //           differ from the truth and the grader to refuse it — a case whose wrong metric lands on the
 //           right number cannot tell a model that chose right from one that did not. Every indirect
 //           case has one: choosing the metric is what it tests.
-//   ref     a path through the tools that reaches the same answer — a pipeline over `source`,
-//           read at `column` (number), or at `key`/`value` (label: the row with the largest
+//   ref     a path through the tools that reaches the same answer — a pipeline over `source` in
+//           `steps` (build_model's, each added as it is), read at `column` (number), or at `key`/`value` (label: the row with the largest
 //           value; map: every row). `npm run eval:check` runs it and holds it to `answer.sql`, so
 //           every positive case is known to be answerable with the tools as they are.
 //
@@ -27,7 +27,7 @@
 // events, crashlytics, acquisition, users and experiments. Nothing here names a column the model
 // could not find through semantic_index.
 
-const ANSWERING = ['query_semantic_model', 'query_pipeline_model', 'build_pipeline_model'];
+const ANSWERING = ['query_model', 'build_model'];
 const PURCHASED = "event_name = 'iap_purchase_completed'";
 
 export const CASES = [
@@ -41,10 +41,10 @@ export const CASES = [
     decoy: { sql: "SELECT SUM(price_in_usd_of_event_data) AS v FROM fct_analytics_events WHERE event_name IN ('iap_purchase_completed', 'iap_purchase_failed')" },
     ref: {
       source: 'events',
-      stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-        { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
+      steps: [
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
+        { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
       ],
       column: 'revenue',
     },
@@ -58,9 +58,9 @@ export const CASES = [
     decoy: { sql: `SELECT COUNT(*) AS v FROM fct_analytics_events WHERE ${PURCHASED}` }, // purchases, not payers
     ref: {
       source: 'events',
-      stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'aggregate', measures: [{ name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] },
+      steps: [
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'aggregate', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
       ],
       column: 'payers',
     },
@@ -72,7 +72,7 @@ export const CASES = [
     expect: { any: ANSWERING, max_calls: 10 },
     answer: { kind: 'number', sql: 'SELECT COUNT(*) AS v FROM fct_analytics_events' },
     decoy: { sql: 'SELECT COUNT(*) AS v FROM fct_crashlytics_events' }, // the other events source
-    ref: { source: 'events', stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }], column: 'n' },
+    ref: { source: 'events', steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }], column: 'n' },
   },
   {
     id: 'fatal_crashes',
@@ -83,10 +83,10 @@ export const CASES = [
     decoy: { sql: 'SELECT COUNT(*) AS v FROM fct_crashlytics_events' }, // every report, fatal or not
     ref: {
       source: 'crashlytics',
-      stages: [
-        { stage: 'derive', name: 'fatal', op: 'extract', source: 'is_fatal_of_event_data', type: 'string' },
-        { stage: 'where', conditions: [{ column: 'fatal', op: 'eq', value: 'true' }] },
-        { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+      steps: [
+        { stage: 'compute', name: 'fatal', expr: { property: 'is_fatal_of_event_data' } },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'fatal' }, { value: 'true' }] }] },
+        { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
       column: 'n',
     },
@@ -97,7 +97,7 @@ export const CASES = [
     prompt: 'What was our total user-acquisition spend (cost) over the whole period?',
     expect: { any: ANSWERING, max_calls: 10 },
     answer: { kind: 'number', sql: 'SELECT SUM(cost) AS v FROM fct_player_acquisition' },
-    ref: { source: 'acquisition', stages: [{ stage: 'aggregate', measures: [{ name: 'spend', agg: 'sum', column: 'cost' }] }], column: 'spend' },
+    ref: { source: 'acquisition', steps: [{ stage: 'aggregate', measures: [{ name: 'spend', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }], column: 'spend' },
   },
   {
     id: 'payers_by_variant',
@@ -114,11 +114,10 @@ export const CASES = [
     decoy: { sql: "SELECT variant_group AS k, COUNT(DISTINCT player_id_of_internal) AS v FROM fct_experiment_assignments WHERE experiment_name = 'checkout_flow' GROUP BY 1" },
     ref: {
       source: 'events',
-      stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }, { column: 'experiment_name' }] },
-        { stage: 'where', conditions: [{ column: 'experiment_name', op: 'eq', value: 'checkout_flow' }] },
-        { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] },
+      steps: [
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment: 'checkout_flow' }, kind: 'inner', attrs: [{ column: 'variant_group' }] },
+        { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
       ],
       key: 'variant_group',
       value: 'payers',
@@ -134,11 +133,11 @@ export const CASES = [
     decoy: { sql: `SELECT product_id_of_event_data AS v FROM fct_analytics_events WHERE ${PURCHASED} GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 1` },
     ref: {
       source: 'events',
-      stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'derive', name: 'product', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
-        { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-        { stage: 'aggregate', group_by: ['product'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
+      steps: [
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'compute', name: 'product', expr: { property: 'product_id_of_event_data' } },
+        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
+        { stage: 'aggregate', group_by: ['product'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
       ],
       key: 'product',
       value: 'revenue',
@@ -153,9 +152,9 @@ export const CASES = [
     decoy: { sql: `SELECT COUNT(*) AS v FROM fct_analytics_events WHERE ${PURCHASED}` }, // the ones that did
     ref: {
       source: 'events',
-      stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_failed' }] },
-        { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+      steps: [
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_failed' }] }] },
+        { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
       column: 'n',
     },
@@ -170,7 +169,7 @@ export const CASES = [
     decoy: { sql: 'SELECT media_source AS v FROM fct_player_acquisition GROUP BY 1 ORDER BY COUNT(DISTINCT player_id_of_internal) DESC, 1 LIMIT 1' },
     ref: {
       source: 'acquisition',
-      stages: [{ stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', agg: 'sum', column: 'cost' }] }],
+      steps: [{ stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
       key: 'media_source',
       value: 'spend',
     },
@@ -190,13 +189,13 @@ export const CASES = [
     decoy: { sql: "SELECT COUNT(DISTINCT player_id_of_internal) AS v FROM fct_analytics_events WHERE event_name = 'first_launch'" }, // everyone who entered
     ref: {
       source: 'events',
-      stages: [
-        { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: [
+      steps: [
+        { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [
           { name: 'launch', event_name: ['first_launch'] },
-          { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+          { name: 'tut1', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_1' }] }] },
         ] },
-        { stage: 'where', conditions: [{ column: 'reached_tut1', op: 'eq', value: true }] },
-        { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+        { stage: 'where', conditions: [{ column: 'reached_tut1' }] },
+        { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
       column: 'n',
     },
@@ -221,7 +220,7 @@ export const CASES = [
     prompt: 'How many orders did customers place in our online shop last month? Use the orders table.',
     // looking is right (the catalog says what exists); building or querying something that is not
     // there, or answering with a number, is not
-    expect: { forbid: ['build_semantic_model', 'build_pipeline_model', 'query_semantic_model', 'query_pipeline_model', 'display_model_result'] },
+    expect: { forbid: ['build_model', 'query_model', 'display_model_result'] },
     answer: { kind: 'none' },
   },
   {

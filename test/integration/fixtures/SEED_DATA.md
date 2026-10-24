@@ -434,7 +434,7 @@ Two relationships are declared in `fixtures/catalog.yml` under `meta.mcp.entitie
 | relationship | key | owner | declared on |
 |---|---|---|---|
 | `user` | `player_id_of_internal` | `dim_users` (**SCD-2**, see §13) | every other source |
-| `ad_funnel_{rewarded,interstitial,banner}` | `<format>_tracking_id` + player ↔ `tracking_id` + player | **nobody** | `fct_crashlytics_events` (three variants) ↔ `fct_analytics_events` (one plain key) |
+| `ad_funnel_{rewarded,interstitial,banner}` | `<format>_tracking_id` + player ↔ `tracking_id` + player | **nobody** (for the semantic layer; a pipeline joins a report onto its funnel's events by the crash source's join contract) | `fct_crashlytics_events` (three variants) ↔ `fct_analytics_events` (one plain key) |
 
 ### The ad funnel (`tracking_id`)
 
@@ -460,35 +460,38 @@ events carry no funnel (NULL).
 `fnl_dup` is **deliberately reused** by u2 and u10: a join that forgot the player would pull
 u10's events into u2's crash. Nothing else shares an id.
 
-`fct_crashlytics_events` keeps one column per ad format, holding the **last funnel of that
-format before the crash** (empty when there was none):
+`fct_crashlytics_events` keeps one column per ad format, holding the funnel of that format the
+report **follows** — the last one before it, reported by the FIRST crash after it only (a later crash of
+the same player leaves the column empty). So a crash report is unique per (player, funnel) on every
+format, which is what the crash source's join contract declares (`unique: true`):
 
 | crash | player | time | rewarded | interstitial | banner |
 |---|---|---|---|---|---|
 | k1 | u1 | 01-05 10:00 | `fnl_01` | `fnl_02` | — |
-| k2 | u1 | 01-05 11:00 | `fnl_01` | `fnl_02` | — |
-| k3 | u1 | 01-06 10:00 | `fnl_01` | `fnl_02` | — |
+| k2 | u1 | 01-05 11:00 | — | — | — |
+| k3 | u1 | 01-06 10:00 | — | — | — |
 | k4 | u2 | 01-05 12:00 | — | — | `fnl_dup` |
-| k5 | u2 | 01-07 09:00 | — | — | `fnl_dup` |
+| k5 | u2 | 01-07 09:00 | — | — | — |
 | k6 | u3 | 01-06 15:00 | `fnl_04` | — | — |
 | k7 | u4 | 01-05 09:00 | — | `fnl_05` | — |
-| k8 | u4 | 01-06 09:00 | — | `fnl_05` | — |
+| k8 | u4 | 01-06 09:00 | — | — | — |
 | k9 | u5 | 01-06 12:00 | `fnl_06` | — | — |
-| k10 | u1 | 01-07 08:00 | `fnl_01` | `fnl_02` | — |
+| k10 | u1 | 01-07 08:00 | — | — | — |
 | k11 | u6 | 01-05 14:00 | — | — | `fnl_07` |
-| k12 | u6 | 01-08 14:00 | — | — | `fnl_07` |
+| k12 | u6 | 01-08 14:00 | — | — | — |
 | k13 | u7 | 01-08 16:00 | `fnl_08` | — | — |
 
-Crash → its funnel's events, inner join (each funnel is 2 events):
+An event joined to the crash report of its funnel (the crash source's contract, inner join — each
+funnel is 2 events, each meets at most one report):
 
-| variant | crashes carrying it | rows |
+| format | reports carrying it | rows (= events) |
 |---|---|---|
-| `ad_funnel_rewarded` | k1, k2, k3, k10, k6, k9, k13 (**7**) | **14** |
-| `ad_funnel_interstitial` | k1, k2, k3, k10, k7, k8 (**6**) | **12** |
-| `ad_funnel_banner` | k4, k5, k11, k12 (**4**) | **8** |
+| `rewarded` | k1, k6, k9, k13 (**4**) | **8** |
+| `interstitial` | k1, k7 (**2**) | **4** |
+| `banner` | k4, k11 (**2**) | **4** |
 
-A LEFT join on `ad_funnel_banner` gives **17** rows over all **13** crashes (4 matched × 2
-funnel events + 9 unmatched × 1).
+A LEFT join on `banner` keeps all **184** events, 4 of them with a report. The funnel id ALONE (the
+player left out) would hand u2's banner report k4 to u10's `fnl_dup` events too: **6** rows, not 4.
 
 ---
 
@@ -504,7 +507,7 @@ not cut off at midnight). 13 rows for 12 players:
 - the other 11 players have one version each, from their install day to `2035-12-31`.
 
 Every join to installs is therefore **point-in-time** — the player key AND a time inside the
-window. MetricFlow does it itself; a pipeline states it in `between`.
+window. MetricFlow does it itself; a pipeline names the moment in the users contract's `time`.
 
 | grouped by `country`, point-in-time | US | GB | DE | BR | total |
 |---|---|---|---|---|---|
@@ -572,8 +575,8 @@ k11 `ui_freeze→gc_pause`, k13 `gc_pause→gc_pause`, k2 `level_start→level_s
 
 `in_app` true 13 / false 3 (the three Engine.cs frames). `sum(line)` **922**, deepest
 **Engine.cs:250** in k6. Depth per report: k1 2, k2 1, k3 3, k4 2, k5 1, k6 2, k7 1, k8 2,
-k9 1, k10 1; k11–k13 NULL (an ANR has no exception stack). So an `unnest` yields 16 rows over
-10 reports while `array_length` keeps all 13 with NULL for the ANRs.
+k9 1, k10 1; k11–k13 none (an ANR has no exception stack: the key is NULL). So an `unnest` yields
+16 rows over 10 reports while `array_length` keeps all 13, with 0 for the ANRs.
 
 **Custom keys** — `network` wifi **8** / cellular **5**; `sum(coins)` **5205**;
 `sum(level)` **163**, max **31**, median **12**. Breadcrumb elements split by network:
@@ -581,15 +584,14 @@ wifi **13** / cellular **7**.
 
 Crossing the complex data with a join: breadcrumb elements by the install country valid at the
 crash — GB **10** / US **6** / DE **3** / BR **1** (20, no duplicates). Stack frames × the
-rewarded ad funnel — **20** rows over 6 reports, 5 files, 6 funnel events (k13 carries a funnel
-but no stack, Ads.cs sits only on k4 which carries none).
+rewarded ad funnel — **10** rows over 3 reports (k1, k6, k9), 3 files, 6 funnel events (k13 carries
+a funnel but no stack, Ads.cs sits only on k4 which carries none).
 
-## 15. `funnel_tracking_id` — the one key on the crash source a `unique` claim fits
+## 15. `funnel_tracking_id` — the crash source's own unique key
 
-The three `*_tracking_id` columns record the last funnel per ad format, so a value repeats
-across reports (`fnl_01` is on four of u1's reports) — no `unique` claim about them is true.
-`funnel_tracking_id` is the opposite by construction: **one distinct value per crash report**,
-so it is the column a `type: unique` declaration can honestly own.
+The three `*_tracking_id` columns carry a funnel only on the first report after it (§12), so each is
+unique per (player, funnel) — what the join contract declares. `funnel_tracking_id` is unique on its
+own: **one distinct value per crash report**, the column a `type: unique` entity owns.
 
 | report | k1 | k2 | k3 | k4 | k5 | k6 | k7 | k8 | k9 | k10 | k11 | k12 | k13 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -600,7 +602,7 @@ nothing. Joining events to reports by this key alone (many events → one report
 of the 184 events and, because the key is genuinely unique, adds no row: grouped by the report's
 `app_version` the count is 1.0.0 **16** / 1.1.0 **8** / unmatched **160**, total **184**; by
 `device_model` iphone **12** / pixel **8** / galaxy **4** / unmatched **160**. The same query
-over `rewarded_tracking_id` — where the claim is false — totals **190** instead.
+over `rewarded_tracking_id` totals **184** as well: no funnel is carried by two reports.
 
 ---
 

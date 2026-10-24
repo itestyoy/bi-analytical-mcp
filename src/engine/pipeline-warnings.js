@@ -7,9 +7,28 @@
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { stageDef, listSome } from '../pipeline.js';
-import { FNS, exprCalls } from '../pipeline/compute.js';
-import { eachCondition } from '../conditions.js';
+import { stageDef } from '../pipeline.js';
+import { exprCalls, exprColumns, isWindowCall, comparisonOf, eachCondition, comparedColumns } from '../pipeline/compute.js';
+
+/** The aggregates that count distinct values — not additive across groups a key can fall into twice. */
+const DISTINCT_FNS = new Set(['count_distinct', 'approx_count_distinct', 'hll_init']);
+
+/** The values a where's own conditions scope `column` to — each a comparison of the column with
+ *  constants by eq / in at the top of the list (one inside an or, or a negation, keeps other rows too). */
+function scopedValues(stages, column) {
+  const values = [];
+  let scoped = false;
+  for (const st of stages) {
+    if (st?.stage !== 'where') continue;
+    for (const c of st.conditions || []) {
+      const cmp = comparisonOf(c);
+      if (!cmp || cmp.subject.column !== column || !(cmp.op === 'eq' || cmp.op === 'in')) continue;
+      scoped = true;
+      values.push(...cmp.values);
+    }
+  }
+  return scoped ? values : null;
+}
 
 export class PipelineAdvisor {
   constructor({ catalog, valueIndex }) {
@@ -23,7 +42,7 @@ export class PipelineAdvisor {
     if (!stage || stage.stage !== 'match_recognize' || (stage.rows || 'one_per_partition') !== 'one_per_match') return [];
     // said until a where on `completed` follows the funnel — the one judgement, for a step as it is
     // added (nothing follows it yet) and for a whole pipeline alike
-    if (after.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed'))) return [];
+    if (after.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => exprColumns(c).includes('completed')))) return [];
     return [`rows:'one_per_match' counts EVERY occurrence of the start step — including partial/abandoned chains, not only completed funnels. To count only COMPLETED situations, add a downstream where on completed = true (the funnel exposes a 'completed' boolean). Keep it unfiltered only if you really want all starts.`];
   }
 
@@ -34,14 +53,51 @@ export class PipelineAdvisor {
    * _buildPipeline is exactly where a silently-wrong join does the most damage, because
    * nobody stepped through it.
    */
-  stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
+  stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false, declared = null } = {}) {
     const draft = { source, stages, timeRange, startsFromTable };
-    return stages.flatMap((st, i) => [
-      ...this.joinCompletenessWarnings(st, draft),
-      ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
-      ...this.pythonPreparationWarnings(st, draft, i),
-      ...this.globalWindowWarnings(st),
+    return sayOnce([
+      ...(startsFromTable ? [] : this.requiredFilterWarnings(source, [stages, declared])),
+      ...stages.flatMap((st, i) => [
+        ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
+        ...this.pythonPreparationWarnings(st, draft, i),
+        ...this.globalWindowWarnings(st),
+        ...this.offsetMaturityWarnings(st, stages.slice(0, i)),
+      ]),
     ]);
+  }
+
+  /**
+   * A COLUMN THE CATALOG MARKS required_filter (a stream, a test flag: meta.mcp.required_filter) that no
+   * condition over `source`'s rows compares — in `declared`, anything that holds conditions (steps,
+   * measures, a query's where steps): its rows then hold every value of it. Said, never refused: a
+   * question may really be about all of them.
+   */
+  requiredFilterWarnings(source, declared) {
+    const required = this.catalog.requiredFilters?.(source) || [];
+    if (!required.length) return [];
+    const compared = comparedColumns(declared);
+    const missing = required.filter((c) => !compared.has(c) && !compared.has(`${source}.${c}`));
+    if (!missing.length) return [];
+    const names = missing.map((c) => `'${c}'`).join(' and ');
+    return [`'${source}' marks ${names} required_filter — every question over it says which value${missing.length > 1 ? 's' : ''} it is about — and no condition here compares ${missing.length > 1 ? 'them' : 'it'}: these rows hold all of ${missing.length > 1 ? 'their' : 'its'} values together (the column's description says what they are). Filter ${missing.length > 1 ? 'each' : 'it'} — a where step, before the metrics step in a metric query, or a case in each measure — or say in the answer why every value belongs. semantic_index({ request: { source: '${source}', column: '${missing[0]}' } }) lists its values.`];
+  }
+
+  /**
+   * AN OFFSET FROM AN ANCHOR (date_diff or elapsed_days of two moments: day N since install, weeks since a first
+   * purchase) is only measured where the data reaches it: an anchor late in the data has not lived to
+   * day N yet, so a count of it there is 0 or missing — no measurement — and a curve or a cohort grid
+   * read over every anchor bends down at its end. Said where such a column is made.
+   */
+  offsetMaturityWarnings(stage, before = []) {
+    if (stage?.stage !== 'compute') return [];
+    // an anchor is a moment the rows were given per entity — an attribute a join before it brought (an
+    // install date, a first purchase): a gap to the previous row or between a funnel's steps is no age
+    const joined = new Set(before.filter((st) => st?.stage === 'join').flatMap((st) => (st.attrs || []).map((a) => a.name ?? a.column)));
+    const diff = exprCalls(stage.expr).find((c) => (c.fn === 'date_diff' || c.fn === 'elapsed_days') && joined.has(c.args?.[0]?.column));
+    if (!diff) return [];
+    const from = diff.args[0].column;
+    const unit = diff.fn === 'elapsed_days' ? 'day' : diff.unit || 'day';
+    return [`'${stage.name}' counts ${unit}s from '${from}': an anchor late in the data has not reached a large value yet, so there its count is 0 or missing — no measurement. Read a value N only over anchors early enough to reach it: a where on '${from}' ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).`];
   }
 
   /**
@@ -87,7 +143,7 @@ export class PipelineAdvisor {
     // test included (a where takes no window function at all: it is refused when the step is added)
     if (stage?.stage !== 'compute') return [];
     const calls = exprCalls(stage.expr);
-    const windowed = calls.find((c) => FNS[c.fn]?.window && !(c.over?.partition_by || []).length);
+    const windowed = calls.find((c) => isWindowCall(c) && !(c.over?.partition_by || []).length);
     // Raw SQL is where this actually came from: a window function is only reachable through its
     // `over`, but `fn: 'raw'` carries whatever the caller wrote.
     const rawGlobal = calls.some((c) => c.fn === 'raw' && /\bover\s*\(\s*(order\s+by[^)]*)?\)/i.test(String(c.sql || '')));
@@ -96,30 +152,6 @@ export class PipelineAdvisor {
     return [`Global analytic window: ${what}, so it is computed over EVERY row at once and the value is attached to each. One worker has to hold the whole input for that, which is how a large table runs out of memory ("Resources exceeded during query execution") — an exact percentile worst of all, since it must also order the values.`
       + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (sub / div, or least / greatest, with { value }).`
       + ` If it is per group (per player, per day, per session), name those columns in over.partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
-  }
-
-  /**
-   * An events↔dimension join is INCOMPLETE when it joins a slowly-changing (SCD-2) dimension on the
-   * key alone: without a point-in-time `between` window it fans out to EVERY historical version of
-   * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
-   * add the window (and fix it) instead of trusting a silently wrong join.
-   */
-  joinCompletenessWarnings(stage, draft = null) {
-    if (!stage || stage.stage !== 'join' || stage.between) return [];
-    let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
-    if (!m?.scd) return [];
-    const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
-    const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
-    const eventTime = draft?.source ? this.catalog.getModel(draft.source)?.time?.column : null;
-    const fix = (from && to && eventTime)
-      ? ` Add between: { value: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
-      : ' Add a `between` window (value = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
-    // The key may be named by the relationship (`via`) or restated inline (`on`) — say whichever
-    // the caller actually used, or the message reads "key 'undefined'".
-    const named = stage.via
-      ? `the declared relationship '${stage.via}'`
-      : `key '${Array.isArray(stage.on) ? stage.on.join(' + ') : stage.on}'`;
-    return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on ${named} with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
   }
 
   /**
@@ -135,6 +167,10 @@ export class PipelineAdvisor {
   checkFilterValue(at, value) {
     if (value == null || typeof value === 'number' || typeof value === 'boolean') return null; // only string literals are case/value-checked
     if (!at) return null;
+    if (at.events) {
+      const refusal = this.catalog.eventNameRefusal(at.source, String(value));
+      return refusal ? { kind: 'event', value: String(value), message: refusal } : null;
+    }
     const st = this.valueIndex.stats(at.source, at.property);
     if (!st) return null; // not indexed → cannot verify (do not block)
     const stored = this.valueIndex.sampleValues(at.source, at.property, 1000); // all stored values (≤ indexer cap)
@@ -161,6 +197,9 @@ export class PipelineAdvisor {
   valueKeyForColumn(sourceKey, column) {
     const c = this.catalog;
     if (!column) return null;
+    // an events source's event-name column is checked against the catalog's events — the whole
+    // vocabulary of the source, so a wrong name is refused for certain, never matched to nothing
+    if (c.isFact(sourceKey) && column === c.eventNameColumn(sourceKey)) return { source: sourceKey, property: column, events: true };
     return c.attributeKind(sourceKey, column) ? { source: sourceKey, property: column } : null;
   }
 
@@ -183,7 +222,8 @@ export class PipelineAdvisor {
         // exists with different casing) and a value absent from a FULLY-indexed small set.
         // A fuzzy near-match or any incompletely-indexed (top-N) column → WARN, never block —
         // a real value may simply not be in the index, so we must not reject it.
-        if (r.kind === 'case') errors.push(`${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`);
+        if (r.kind === 'event') errors.push(`${where}: ${r.message}`);
+        else if (r.kind === 'case') errors.push(`${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`);
         else if (r.kind === 'absent') errors.push(`${where}: value '${r.value}' does not occur in this column (its full value set is indexed).${fix || ` Known values: ${(r.suggest || []).map((s) => `'${s}'`).join(', ')}.`}`);
         else if (r.kind === 'typo') warnings.push(`${where}: value '${r.value}' was not found among indexed values; a similar value exists.${fix} Verify the exact value before relying on this filter.`);
         // a value past the indexed top-N is most often real: said only if the query comes back
@@ -192,10 +232,48 @@ export class PipelineAdvisor {
       }
     }
     if (errors.length) {
-      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ request: { source, property } }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
+      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ request: { source, property } }) for an event property, ({ source, column }) for a column, and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
     }
     warnings.onEmpty = unverified;
     return warnings;
+  }
+
+  /** A measure that sums or averages an amount the catalog declares as a per-row RATIO (an expression that
+   *  divides): that is not the group's ratio, which divides the sums — said with how to write it. */
+  ratioMeasureWarnings(source, measures) {
+    const out = [];
+    for (const m of measures || []) {
+      const model = m.source ?? source; // (a built table's measure: its columns are no catalog amounts)
+      if (!model || !this.catalog.models[model]) continue;
+      const ratios = new Map(this.catalog.aggregatableFields(model).filter((a) => a.expr !== a.name && /\//.test(String(a.expr))).map((a) => [a.name, a.expr]));
+      if (!ratios.size) continue;
+      for (const c of exprCalls(m.expr)) {
+        if (!['sum', 'average'].includes(c.fn)) continue;
+        const col = (c.args || []).find((a) => a?.column !== undefined && ratios.has(a.column))?.column;
+        if (col) out.push(`measure '${m.name}' ${c.fn === 'sum' ? 'sums' : 'averages'} '${col}', a ratio per row (${ratios.get(col)}): that is not the ratio of a group, which divides the sums — measure the numerator and the denominator with sum and divide them in a derived metric ({ fn: "div", args: [{ metric }, { metric }] }).`);
+      }
+    }
+    return out;
+  }
+
+  /** The same gotcha in a semantic layer: a measure that folds an event property populated on SEVERAL
+   *  events (a price on a completed and on a failed purchase) folds it on all of them unless it names
+   *  the event — said, with the events, so a total is not read as one event's. */
+  measureScopeWarnings(source, measures) {
+    const c = this.catalog;
+    if (!c.isFact(source)) return [];
+    const props = c.eventProps(source);
+    const applies = this.valueIndex.appliesMap(source, props);
+    const evCol = c.eventNameColumn(source);
+    const out = [];
+    for (const m of measures || []) {
+      if (m.source !== undefined) continue;
+      const s = JSON.stringify(m.expr ?? {});
+      if (s.includes(`"column":"${evCol}"`)) continue; // the measure names its event(s)
+      const p = props.find((x) => s.includes(`"property":"${x}"`) && (applies[x] || []).length > 1);
+      if (p) out.push(`measure '${m.name}' folds '${p}' on every event that carries it — ${applies[p].join(', ')} — not one of them: to read one event's, fold a case that yields it on that event alone ({ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "${evCol}" }, { value: "<event>" }] }], then: { property: "${p}" } }] })`);
+    }
+    return out;
   }
 
   /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
@@ -208,23 +286,55 @@ export class PipelineAdvisor {
     if (!c.isFact(draft?.source)) return []; // a measures/dimension pipeline reads no event payload
     const fact = draft.source; // the pipeline reads ONE fact — its own
     const applies = this.valueIndex.appliesMap(fact, c.eventProps(fact)); // key -> observed [event_name]
+    // a funnel's step reads a property on the events it names itself: a property its step names is
+    // scoped by that step (flagged only where the step names an event the property is not on), and only
+    // what the stage reads outside its steps is held to the where steps before it
+    if (stage?.stage === 'match_recognize' && Array.isArray(stage.steps)) {
+      for (const st of stage.steps) {
+        const inStep = c.eventProps(fact).filter((p) => JSON.stringify(st).includes(`"${p}"`));
+        for (const p of inStep) {
+          const evs = applies[p];
+          const off = evs?.length ? (st.event_name || []).filter((e) => !evs.includes(e)) : [];
+          if (off.length) return [`'${p}' is populated only on event(s) ${evs.join(', ')} — step '${st.name ?? '?'}' also names ${off.join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
+        }
+      }
+      // a capture reads its column at the row its step matched: scoped by that step's events as the step is
+      for (const cp of stage.capture || []) {
+        const st = stage.steps.find((x) => x.name === cp.step);
+        const p = c.eventProps(fact).find((x) => x === cp.column);
+        const evs = p ? applies[p] : null;
+        const off = st && evs?.length ? (st.event_name || []).filter((e) => !evs.includes(e)) : [];
+        if (off.length) return [`capture '${cp.name}' reads '${p}' at step '${st.name}', on event(s) ${off.join(', ')} — '${p}' is populated only on ${evs.join(', ')}, so it reads NULL there.`];
+      }
+      stage = { ...stage, steps: [], capture: [] };
+    }
+    // a row-wise stage (a compute, an unnest) reads the field where it is and NULL elsewhere — that is
+    // its value there, not a mistake (an unnest drops those rows itself); what can mislead is a stage that
+    // FOLDS rows over it, or keeps rows by it
+    if (stage?.stage === 'compute' || stage?.stage === 'unnest') return [];
     const s = JSON.stringify(stage);
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
+    // (a field every event of the source carries reads NULL on none of them)
+    const allEvents = c.eventNames(fact);
+    // a stage that names the events itself (a case on the event column, a condition on it) says which
+    // event's value it reads: the where steps before it need not
+    if (s.includes(`"column":"${evCol}"`)) return [];
     // the events a where keeps: only a condition that NAMES them (eq / in) at the top of a where scopes
-    // the rows to them — a neq / not_in, or one inside an { or }, keeps others too
-    const scoped = new Set(); let hasScope = false;
-    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol && (cond.op === 'eq' || cond.op === 'in')) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
+    // the rows to them — a neq / not_in, or one inside an or, keeps others too
+    const named = scopedValues(draft.stages, evCol);
+    const hasScope = !!named;
+    const scoped = new Set(named || []);
     // the risk is ROWS WITHOUT THE FIELD: no scope at all (every other event reads NULL), or a scope that
     // keeps an event the field is not populated on. A scope within the field's events is the right one.
     const missing = (evs) => (hasScope ? [...scoped].filter((e) => !evs.includes(e)) : null);
-    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && (!hasScope || missing(evs).length); });
+    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !(allEvents.length && allEvents.every((e) => evs.includes(e))) && (!hasScope || missing(evs).length); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
     return [hasScope
       ? `'${p}' is populated only on event(s) ${evs.join(', ')} — your event_name scope also keeps ${missing(evs).join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`
-      : `'${p}' is populated only on event(s) ${evs.join(', ')} — add an earlier where on event_name to those, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
+      : `'${p}' is populated only on event(s) ${evs.join(', ')} — add an earlier where on event_name to those, or it reads NULL on the other rows${evs.length > 1 ? `; and it is on several events, so a total over it adds each event's value of it — keep the one you mean` : ''} (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
   }
 
   /**
@@ -245,15 +355,14 @@ export class PipelineAdvisor {
     const used = props.filter((p) => s.includes(`"${p}"`)); // event-properties referenced by THIS step
     if (!used.length) return [];
     // Concrete scope from all where-stages so far (eq / in only).
-    const scopedEvents = new Set(); const scopedBundles = new Set();
-    for (const st of draft.stages) if (st.stage === 'where') for (const cd of st.conditions || []) {
-      if (!cd || cd.column == null || !(cd.op === 'eq' || cd.op === 'in')) continue;
-      const vals = Array.isArray(cd.value) ? cd.value : [cd.value];
-      if (cd.column === evCol) vals.forEach((v) => scopedEvents.add(String(v)));
-      else if (bundleCol && cd.column === bundleCol) vals.forEach((v) => scopedBundles.add(String(v)));
-    }
+    const scopedEvents = new Set((scopedValues(draft.stages, evCol) || []).map(String));
+    const scopedBundles = new Set((bundleCol ? scopedValues(draft.stages, bundleCol) || [] : []).map(String));
     if (!scopedBundles.size && !scopedEvents.size) return []; // nothing concrete scoped → _eventScopeWarnings covers it
     const fmt = (arr) => arr.slice(0, 4).join(', ') + (arr.length > 4 ? ', …' : '');
+    // a step that names the events itself (a case on the event column, a condition on it) reads the field
+    // where it says: a scoped event the field is empty on is no surprise there — only a field empty on
+    // every scoped one still is
+    const namesEvents = s.includes(`"column":"${evCol}"`);
     const warns = [];
     for (const p of used) {
       if (scopedBundles.size && scopedEvents.size) {
@@ -264,18 +373,18 @@ export class PipelineAdvisor {
           if (!cell || cell.non_null === 0) empty.push(`${b} + ${ev}`); // missing cell = no rows for that combo
         }
         const total = scopedBundles.size * scopedEvents.size;
-        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ request: { bundle: '${[...scopedBundles][0]}' } }) or semantic_index({ request: { source: '${fact}', property: '${p}' } }).bundle_coverage / event_coverage.`);
-        else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
+        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ request: { source: '${fact}', bundle: '${[...scopedBundles][0]}' } }) or semantic_index({ request: { source: '${fact}', property: '${p}' } }).bundle_coverage / event_coverage.`);
+        else if (empty.length && !namesEvents) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
       } else if (scopedBundles.size) {
         const byB = new Map(this.valueIndex.bundleCoverage(fact, p).map((x) => [x.bundle, x]));
         const empty = [...scopedBundles].filter((b) => byB.get(b) && byB.get(b).non_null === 0);
-        if (empty.length === scopedBundles.size) warns.push(`'${p}' is NULL for app(s) ${fmt(empty)} — this step likely yields no '${p}' values for ${empty.length > 1 ? 'them' : 'this app'} (semantic_index({ request: { bundle: '${empty[0]}' } })).`);
+        if (empty.length === scopedBundles.size) warns.push(`'${p}' is NULL for app(s) ${fmt(empty)} — this step likely yields no '${p}' values for ${empty.length > 1 ? 'them' : 'this app'} (semantic_index({ request: { source: '${fact}', bundle: '${empty[0]}' } })).`);
         else if (empty.length) warns.push(`'${p}' is empty for app(s) ${fmt(empty)} (populated for the other scoped app(s)).`);
       } else {
         const byE = new Map(this.valueIndex.coverage(fact, p).map((x) => [x.event_name, x]));
         const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
         if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`);
-        else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
+        else if (empty.length && !namesEvents) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
       }
     }
     return warns.slice(0, 3);
@@ -292,23 +401,76 @@ export class PipelineAdvisor {
     const dateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     const hits = [];
     eachCondition(stage.conditions, (c) => {
-      const col = c.column ?? c.left?.column;
+      const cmp = comparisonOf(c);
+      const col = cmp?.subject.column;
       if (!timeCols.has(col)) return;
-      const value = c.value ?? c.right?.value;
-      const upper = c.op === 'lte' ? value : c.op === 'between' && Array.isArray(value) ? value[1] : undefined;
+      const upper = cmp.op === 'lte' ? cmp.values[0] : cmp.op === 'between' ? cmp.values[1] : undefined;
       if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
     });
-    return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { column: "${col}", op: "lt", value: "<the next day>" } (with gte for the start); on a DATE column the bound is right as it is.`);
+    return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { fn: "lt", args: [{ column: "${col}" }, { value: "<the next day>" }] } (with gte for the start); on a DATE column the bound is right as it is.`);
   }
 
-  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
-  stepRecommendations(stage, available) {
+  /**
+   * An aggregate that counts distinct values grouped by a column a SLOWLY-CHANGING model's join brought in
+   * (the model declares a validity window): a key whose version changed within the rows is counted under
+   * each value it held, so the groups add up to more than the whole. → [{ model, columns }] — the models and
+   * their columns grouped by; the caller asks the warehouse whether those columns change between a key's
+   * versions at all (WarehouseProbe.versionsDiffer), and says it only where they do or that is not known.
+   */
+  versionedDistinctGroups(stages, stage, source = null) {
+    if (stage?.stage !== 'aggregate' || !(stage.group_by || []).length) return [];
+    // a join matched at each row's own time can meet several versions of a key; one matched at another moment
+    // (an install, a first event — one per key) meets one version each, and nothing is counted twice
+    const rowTime = source ? this.catalog.getModel(source)?.time?.column : null;
+    const distinct = (stage.measures || []).some((m) => exprCalls(m.expr).some((c) => DISTINCT_FNS.has(c.fn)));
+    if (!distinct) return [];
+    const at = stages.indexOf(stage);
+    const byModel = new Map();
+    for (const st of at < 0 ? stages : stages.slice(0, at)) {
+      if (st?.stage !== 'join' || !this.catalog.models[st.source]?.scd) continue;
+      // (matched at another moment of the rows: said too, for where that moment differs between a key's rows)
+      const at = typeof st.on?.time === 'string' && st.on.time !== rowTime ? st.on.time : null;
+      for (const a of st.attrs || []) {
+        if (!stage.group_by.includes(a.name ?? a.column)) continue;
+        if (!byModel.has(st.source)) byModel.set(st.source, { columns: [], at });
+        byModel.get(st.source).columns.push(a.column);
+      }
+    }
+    return [...byModel].map(([model, { columns, at }]) => ({ model, columns, ...(at ? { at } : {}) }));
+  }
+
+  /** What versionedDistinctGroups' models mean for the counts, said once for them all. */
+  versionedDistinctNote(groups) {
+    const at = groups.map((g) => g.at).filter(Boolean);
+    return `A distinct count grouped by ${groups.map((g) => `'${g.model}'`).join(', ')}'s columns, a slowly-changing model: the join matches each row to the version valid at ${at.length ? `'${at.join("', '")}'` : 'its time'}, so a key whose version changed ${at.length ? 'between those moments of its rows' : 'within these rows'} is counted under each value it held, and the groups add up to more than the keys in all — read the total from an aggregate without that group_by, not from their sum${at.length ? ` (a moment that is the same on all of a key's rows — an install — meets one version)` : ''}.`;
+  }
+
+  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go.
+   *  `building`: the call that adds it also starts the build (materialize: true), so "materialize when done" is not said. */
+  stepRecommendations(stage, available, { building = false } = {}) {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...this.dateBoundWarnings(stage, available),
-      ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
-      'Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", draft_id } }); materialize when done.',
+      ...(own ? own(available, stage) : []),
+      ...(building ? [] : ['Preview the SQL anytime with build_model({ request: { action: "preview", context_id } }); materialize when done.']),
     ];
   }
 }
 
+/**
+ * Notes said once in one answer: a note said before (in `said`, which this adds to) is left out, and one
+ * whose explanation — what follows its first sentence — was said before keeps its first sentence alone.
+ */
+export function sayOnce(notes, said = new Set()) {
+  const out = [];
+  for (const n of notes) {
+    const cut = n.indexOf('. ');
+    const tail = cut > 0 ? n.slice(cut + 2) : null;
+    if (said.has(n)) continue;
+    if (tail && said.has(`tail:${tail}`)) out.push(`${n.slice(0, cut + 1)} (as said above)`);
+    else out.push(n);
+    said.add(n);
+    if (tail) said.add(`tail:${tail}`);
+  }
+  return out;
+}

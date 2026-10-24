@@ -134,6 +134,15 @@ export function mergeCompiled(state, compiled) {
   return state;
 }
 
+/** Whether a context's built table is older than its draft's steps: an edit since the build retired the
+ *  checkpoint of the last step, or steps were added after it — a read of the table reads the old steps. */
+export function builtBehind(state) {
+  const built = state?.pipeline_model?.model;
+  const draft = state?.draft;
+  if (!built || !draft || !Array.isArray(draft.stages)) return false;
+  return !(draft.checkpoints || []).some((cp) => cp.at === draft.stages.length && cp.model === built);
+}
+
 export class ContextManager {
   constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'duckdb', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
     this.baseProjectDir = baseProjectDir;
@@ -226,6 +235,14 @@ export class ContextManager {
     // an internal context (the parsed copy the project's own contexts share) is nobody's to address
     return [...this.contexts.values()].filter((c) => !c.state?.internal).map((c) => ({
       context_id: c.id,
+      // the build's name, and what the context holds: a pipeline's table, a semantic layer, a draft
+      ...(c.state.draft?.name || c.state.semantic_model ? { name: c.state.draft?.name || c.state.semantic_model } : {}),
+      holds: [
+        ...(c.state.engine === 'project' ? ['the dbt project\'s semantic model'] : []),
+        ...(c.state.pipeline_model ? [`a built table (${c.state.pipeline_model.model})${builtBehind(c.state) ? ', older than the steps — they changed since it was built: materialize to rebuild it' : ''}`] : []),
+        ...((c.state.metrics || []).length && c.state.engine !== 'project' ? ['a semantic layer'] : []),
+        ...(c.state.draft && !c.state.pipeline_model && !(c.state.metrics || []).length ? ['a draft, not built yet'] : []),
+      ],
       tasks: c.state.tasks || [],
       // What the caller said this context is FOR. A listing of ids, task names and metric names
       // says what is in a context, never why it exists — which is the thing you need when several
@@ -234,7 +251,8 @@ export class ContextManager {
       ...(c.state.pipeline_model?.description || c.state.draft?.description
         ? { description: c.state.pipeline_model?.description || c.state.draft?.description }
         : {}),
-      semantic_models: Object.keys(c.state.additions || {}),
+      // every model the layer reads — those it declares measures or dimensions on and those it joins
+      semantic_models: Object.keys(c.state.additions || {}).length ? [...new Set([...Object.keys(c.state.additions), ...(c.state.usedModels || [])])] : [],
       metrics: (c.state.metrics || []).map((m) => m.name),
       age_ms: now - c.createdAt,
       idle_ms: now - (c.lastUsedAt || c.createdAt),

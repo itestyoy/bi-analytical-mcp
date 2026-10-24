@@ -33,8 +33,9 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 | Tool | Role |
 |------|------|
 | `semantic_index` | The catalog: overview, a source's events and properties, models, search, guides, recipes |
-| `build_semantic_model` / `query_semantic_model` / `preview_semantic_model` | The governed side: named metrics, their queries (tasks), inspection |
-| `build_pipeline_model` / `query_pipeline_model` | The pipeline side: one-off tables built stage by stage, read with projections |
+| `build_semantic_model` / `preview_semantic_model` | The governed side: named metrics, inspection |
+| `build_pipeline_model` | The pipeline side: one-off tables built step by step (`steps`, each a stage) |
+| `query_model` | Every query and every task read: a query is `steps` — with one `metrics` step a metric query (where steps before it, the pipeline's read stages re-slicing its result after it), without one a read of the stored pipeline table in the same read stages |
 | `display_model_result` / `drill_result` | Draw a model result as a card (once); a drawn card's drill-down read |
 | `experiment` | A/B statistics over numbers the caller brings |
 | `context` / `delete_context` | Read / remove the contexts builds produce |
@@ -46,6 +47,8 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 ## Notes
 
 - A call that starts warehouse work returns `{ task_id }` at once; the same side's query tool reads it with `{ task_ids }`.
+- Every tool writes conditions, measures and computed values in one expression grammar — `{ fn, args, …params }` over leaves (`src/pipeline/compute.js`); a value in an earlier spelling is refused with the converted value (`src/earlier-spelling.js`).
+- One definition per concept, one builder and one name each — `$defs.expr` (and, where a place takes a closed part of the grammar, a kind of its own: a semantic measure's `$defs.aggregate`, a derived metric's `$defs.metric_expr` — `EXPR_KINDS`; a window function's `over` `$defs.over`, an aggregate over a window's `$defs.over_frame`), `$defs.stage`, `$defs.ref` (a model's column `{ source, column }`, an event property `{ source, property }`, …) and `include: [...]`; in each tool's schema it holds the union of what that tool's places take (`TOOL_PLACES` in `src/schema.js`; a read's has no join stage, event property or `raw`), and where the places of one kind differ, each is checked when the value is built (`PLACES`, `STAGE_PLACES`, `REF_PLACES`).
 - `structuredContent` rides on a drawn card and on the answers of tools with an `outputSchema`; everything else is text.
 
 ## Source Of Truth

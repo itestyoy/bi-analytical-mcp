@@ -11,14 +11,15 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { isNumericType } from './dialects/base.js';
+import { rankFuzzy } from './fuzzy.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
-import { MEASURE_AGGS, NUMERIC_AGGS } from './catalog/measures.js';
+import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
-import { physicalColumnType } from './catalog/column-types.js';
+import { physicalColumnType, isArrayPropertyType, groundedType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
-export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
+export { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
 
 export { SUPPORTED_DIALECTS };
 
@@ -117,7 +118,8 @@ export class Catalog {
    * reads a time column by, a scalar property's type, an amount's type, and a dimension's time /
    * categorical kind where it was read off the data_type (a stated type, a validity bound and the
    * declared time axis stand).
-   * An array or a JSON payload keeps its declared encoding. → { <model>: ['col: from → to', …] }
+   * An array or a JSON payload keeps its declared encoding; a native array holds the items the warehouse
+   * reports (an ARRAY<INT64> is an array<int>, whatever `items` says). → { <model>: ['col: from → to', …] }
    */
   typeToPhysical(typesByModel = {}) {
     const retyped = {};
@@ -130,11 +132,12 @@ export class Catalog {
         return type === 'unknown' ? null : { dtype, type };
       };
       const note = (what, from, to) => { if (from !== to) (retyped[key] ||= []).push(`${what}: ${from ?? '—'} → ${to}`); };
-      const scalar = (t) => t !== 'json' && t !== 'array';
+      const scalar = (t) => t !== 'json' && !isArrayPropertyType(t);
       for (const c of m.columns || []) {
         const p = physical(c.name);
-        // the declared time axis (meta.mcp.is_time) is a statement of role, like a validity bound
-        if (!p || !scalar(c.type) || !scalar(p.type) || c.name === m.time?.column) continue;
+        // the declared time axis (meta.mcp.is_time) is a statement of role, like a validity bound; a JSON
+        // payload, and an array the warehouse names no items of, keep what is declared (groundedType)
+        if (!p || groundedType(c.type, p.type) !== p.type || c.name === m.time?.column) continue;
         note(c.name, c.type, p.type); c.type = p.type;
         // the semantic layer reads a time column by the warehouse's data type (TIMESTAMP vs DATETIME)
         (m.data_types ||= {})[c.name] = p.dtype;
@@ -249,6 +252,12 @@ export class Catalog {
         const parts = e.key || [];
         if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
       }
+      // A JOIN CONTRACT naming a column the table lacks would join on nothing: the model stops being
+      // joinable (one capability, dropped alone)
+      if (m.join) {
+        const named = [...m.join.key.flatMap((k) => (k.by ? Object.values(k.columns) : [k.column])), ...(m.join.time?.within || []), ...(m.join.time?.same_day ? [m.join.time.same_day] : []), ...m.join.select.filter((s) => s.column).map((s) => s.column)];
+        if (named.some((c) => !has(c))) { delete m.join; gone.add('join contract'); }
+      }
       // A model is SLOWLY-CHANGING only while it still HAS its window. If the validity columns
       // did not survive, the table has no windows to join on, so the flag has to go with them:
       // left set, the model would render a `natural` entity with no validity_params, which
@@ -315,6 +324,11 @@ export class Catalog {
     return primaryEntityName(this.getModel(key));
   }
 
+  /** The columns every question over `key` should filter (meta.mcp.required_filter): a stream, a test flag. */
+  requiredFilters(key) {
+    return this.models[key]?.required_filters || [];
+  }
+
   /** True when queries over `source` must carry a time window (partition-pruning guardrail). */
   requireTimeRangeFor(source) {
     return !!(this._requireTimeRangeAll ?? this.models[source]?.require_time_range);
@@ -362,16 +376,42 @@ export class Catalog {
   }
 
   /**
+   * The models a semantic layer can load (yaml-render.js renderBaseModel): a fact, or a model with a
+   * primary entity — what MetricFlow addresses its dimensions through. A model without one (an
+   * experiments source) is reached through a pipeline join stage instead.
+   */
+  semanticModelKeys() {
+    return this.modelKeys().filter((k) => this.isFact(k) || !!this.models[k].primary_entity);
+  }
+
+  /**
    * The event `name` as seen from `fact`. Every source names its own events, so the name is
    * always bare here; it THROWS when this source does not declare it — naming which source
    * does, when one exists — so a cross-source mistake never degrades into a filter that
    * silently matches nothing. `hint` appends the caller's fix.
    */
   eventNameFor(fact, name, { hint } = {}) {
-    if (this.eventNames(fact).includes(name)) return name;
+    const refusal = this.eventNameRefusal(fact, name, { hint });
+    if (refusal) throw new Error(refusal);
+    return name;
+  }
+
+  /**
+   * Why `name` is not an event of `fact`, or null when it is: another source's event (named), or an
+   * unknown one with the names it may have meant — the same casing first, then the close ones. The
+   * catalog's events are the whole vocabulary of a source, so this is exact, not a guess from an index.
+   */
+  eventNameRefusal(fact, name, { hint } = {}) {
+    const own = this.eventNames(fact);
+    if (own.includes(name)) return null;
     const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
-    if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
-    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { model: '${fact}' } })`);
+    if (other) return `event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`;
+    const text = String(name);
+    const cased = own.filter((e) => e.toLowerCase() === text.toLowerCase());
+    // (a word of one or two letters is close to anything: it gets no guess)
+    const near = cased.length ? cased : text.length < 3 ? [] : rankFuzzy(text, own, { fields: (e) => [e], threshold: 0.7, limit: 3 }).map((r) => r.item);
+    const mean = near.length ? ` Did you mean ${near.map((e) => `'${e}'`).join(' or ')}?` : '';
+    return `unknown event '${text}' on '${fact}'.${mean} See semantic_index({ request: { source: '${fact}' } })`;
   }
 
   /**
@@ -443,6 +483,11 @@ export class Catalog {
     return [...new Set(this.facts.flatMap((f) => this.scalarEventProps(f)))];
   }
 
+  /** The event properties declared as arrays (of scalars or of structs) — what an unnest explodes. */
+  arrayEventPropEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.eventProps(f).filter((k) => isArrayPropertyType(this.eventPropertySpec(k, f)?.type))))];
+  }
+
   /** dbt column descriptions for a model: { columnName: description }. */
   columnDescriptions(key) {
     return this.getModel(key).column_descriptions || {};
@@ -492,7 +537,7 @@ export class Catalog {
    * What `name` is on `source`: 'property' for an events source's payload property, 'dimension'
    * for a groupable attribute of any model, null when the source does not carry it. THE one place
    * that answers "does this source have this attribute" — every resolver in the engine (value-index
-   * keys, the { source, property } view, memory targets) asks here, so a dimension is never asked for
+   * keys, the { source, property } view, what a memory note is about) asks here, so a dimension is never asked for
    * payload properties and no caller re-implements the rule.
    */
   attributeKind(source, name) {
@@ -519,13 +564,13 @@ export class Catalog {
     return t === 'array' || t === 'struct' || t === 'array<struct>';
   }
 
-  /** SCALAR event_property keys — usable directly as categorical dims / scalar filters. */
+  /** SCALAR event properties (the { property } leaf) — usable directly as categorical dims / scalar filters. */
   scalarEventProps(fact) {
     fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
   }
 
-  /** COMPLEX (array/struct) event_property keys — only usable via prepare stages. */
+  /** COMPLEX (array/struct) event properties (the { property } leaf) — only usable via prepare stages. */
   complexEventProps(fact) {
     fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => this.isComplexEventProp(k, fact));
@@ -601,24 +646,24 @@ export class Catalog {
   }
 
   /**
-   * Every attribute a metric query can group or filter by, addressed by WHERE IT LIVES — the
-   * only form the query tools accept: { model, attribute, via? }. `via` names the relationship
-   * when the attribute is reached through a join whose name differs from the model's identity
-   * (an owned key such as ad_funnel), and is omitted when the relationship IS the identity
-   * (user → users) or the attribute is the source's own. One hop only — that is what a
-   * structured reference can say.
+   * Every model column a metric query can group or filter by, addressed by WHERE IT LIVES — the
+   * ref { source, column, via? } (src/schema/refs.js). `via` names the relationship when the
+   * column is reached through a join whose name differs from the model's identity (an owned key
+   * such as ad_funnel), and is omitted when the relationship IS the identity (user → users) or the
+   * column is the source's own. One hop only — that is what a structured reference can say.
    */
   reachableAttributes() {
     const out = []; const seen = new Set();
-    const push = (model, attribute, via) => { const k = `${model}\u0000${attribute}\u0000${via || ''}`; if (!seen.has(k)) { seen.add(k); out.push({ model, attribute, ...(via ? { via } : {}) }); } };
+    const push = (source, column, via) => { const k = `${source}\u0000${column}\u0000${via || ''}`; if (!seen.has(k)) { seen.add(k); out.push({ source, column, ...(via ? { via } : {}) }); } };
     for (const fact of this.facts) {
       const m = this.models[fact];
-      for (const [ent, e] of Object.entries(m.entities || {})) {
-        if (e.type !== 'foreign') continue;
+      const foreign = Object.entries(m.entities || {}).filter(([ent, e]) => e.type === 'foreign' && this.primaryByEntity[ent]);
+      for (const [ent] of foreign) {
         const target = this.primaryByEntity[ent];
-        if (!target) continue;
         const identity = primaryEntityName(this.models[target]);
-        for (const dim of this.modelDimensionColumns(target)) push(target, dim, ent === identity ? undefined : ent);
+        // (`via` only where the fact reaches the model by several relationships: one needs no naming)
+        const several = foreign.filter(([other]) => this.primaryByEntity[other] === target).length > 1;
+        for (const dim of this.modelDimensionColumns(target)) push(target, dim, ent === identity || !several ? undefined : ent);
       }
     }
     for (const key of this.modelKeys()) {
@@ -630,8 +675,8 @@ export class Catalog {
 
   /**
    * Fields of `key` the schema marks as AGGREGATABLE amounts. Each is { name, expr, column?,
-   * type?, unit?, label?, description? } and carries NO aggregation — a task measure names one
-   * as its `field` and chooses the function itself.
+   * type?, unit?, label?, description? } and carries NO aggregation — a task measure reads one
+   * as a { column } argument of the aggregate it chooses.
    */
   aggregatableFields(key) {
     return Object.values(this.getModel(key).aggregatable || {});
@@ -667,6 +712,16 @@ export class Catalog {
     const out = {};
     for (const m of Object.values(this.models)) for (const [name, e] of Object.entries(m.entities || {})) if (e.variant_of) (out[e.variant_of] ||= new Set()).add(name);
     return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v].sort()]));
+  }
+
+  /** The join contract a model declares (src/catalog/joins.js), or null: only such a model is joinable. */
+  joinContract(key) {
+    return this.models[key]?.join || null;
+  }
+
+  /** The models a pipeline (and a semantic model) may join onto — those declaring a join contract. */
+  joinableModels() {
+    return this.modelKeys().filter((k) => this.models[k].join);
   }
 
   /** Entity names that appear on at least TWO models — the joins the schema sanctions. */

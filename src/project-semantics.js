@@ -1,5 +1,5 @@
 // THE PROJECT'S OWN SEMANTIC LAYER — the semantic models and metrics the dbt project (DBT_BASE_PROJECT)
-// declares itself, read once at start and queried with query_semantic_model like any context: no build
+// declares itself, read once at start and queried with query_model like any context: no build
 // step, since they are already defined and do not change while the server runs.
 //
 // At start the server copies the project into ONE internal context (PROJECT_STORE, never addressed by a

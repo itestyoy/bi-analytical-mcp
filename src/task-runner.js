@@ -19,7 +19,7 @@
 // side's tasks back is given (`sideOf`, `readers`). The engine and a feature reach it as `engine.tasks`.
 
 import { detached, withSignal, withProgress, isolatedTarget, currentSignal } from './request-context.js';
-import { ToolError, RESULT_GONE } from './validate.js';
+import { ToolError, RESULT_GONE, UNKNOWN_TASK } from './validate.js';
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { isPlainObject } from './engine/helpers.js';
 
@@ -35,8 +35,9 @@ export class TaskRunner {
    * @param readers  { <side>: the query tool that reads that side's tasks back }
    * @param onFailure (id, tool, ctx, input, error) — a task that ended in an error (the error log)
    */
-  constructor({ jobs, ctxs, sideOf, readers, onFailure = () => {} }) {
+  constructor({ jobs, ctxs, sideOf, readers, kindTools = {}, onFailure = () => {} }) {
     this.jobs = jobs;
+    this.kindTools = kindTools; // a kind of task a tool starts on two sides → the tool it is said as
     this.ctxs = ctxs;
     this.sideOf = sideOf;
     this.readers = readers;
@@ -70,15 +71,51 @@ export class TaskRunner {
    * how many failed) — a tool error, as the call that waited on it reports it.
    */
   static readAnswer(results, reader, extra = {}) {
+    // advice several results carry alike (a query's recommendations, said for each task of a batch) is said
+    // once, at the top beside the task ids it applies to. A WARNING stays with each result it is about: it
+    // says what a number there is (no measurement, partial), and is read beside that number.
+    let shared = [];
+    if (results.length > 1) {
+      const holders = new Map();
+      for (const r of results) {
+        if (!isPlainObject(r)) continue;
+        for (const key of ['recommendations']) {
+          for (const n of Array.isArray(r[key]) ? r[key] : []) {
+            if (typeof n !== 'string') continue;
+            if (!holders.has(n)) holders.set(n, { key, ids: [] });
+            if (!holders.get(n).ids.includes(r.task_id)) holders.get(n).ids.push(r.task_id);
+          }
+        }
+      }
+      const common = new Map([...holders].filter(([, h]) => h.ids.length > 1));
+      if (common.size) {
+        shared = [...common].map(([note, h]) => ({ recommendation: note, task_ids: h.ids }));
+        results = results.map((r) => {
+          if (!isPlainObject(r)) return r;
+          const out = { ...r };
+          for (const key of ['recommendations']) {
+            if (!Array.isArray(r[key])) continue;
+            const kept = r[key].filter((n) => !common.has(n));
+            if (kept.length) out[key] = kept; else delete out[key];
+          }
+          return out;
+        });
+      }
+    }
     const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
-    const failed = results.filter((r) => r.status === 'error' || r.ok === false);
-    const allFailed = failed.length === results.length;
+    // a task cancelled on purpose did what was asked of it: it is final, not a failure of the read
+    const cancelled = (r) => r.status === 'cancelled' || r.error?.code === 'cancelled';
+    const failed = results.filter((r) => (r.status === 'error' || r.ok === false) && !cancelled(r));
+    const allFailed = failed.length > 0 && failed.length === results.length;
     return {
       ok: !allFailed,
-      status: running.length ? 'running' : allFailed ? 'error' : 'done',
+      status: running.length ? 'running' : allFailed ? 'error' : results.every(cancelled) ? 'cancelled' : 'done',
       ...extra,
       ...(failed.length && !allFailed ? { failed: failed.length } : {}),
+      // (a task cancelled on purpose is counted apart: it did what was asked, it did not fail)
+      ...(results.length > 1 && results.some(cancelled) && !results.every(cancelled) ? { cancelled: results.filter(cancelled).length } : {}),
       ...(allFailed ? { error: results.length === 1 ? results[0].error : { stage: 'task', message: `all ${results.length} tasks failed — each one's error is under results` } } : {}),
+      ...(shared.length ? { shared_notes: shared } : {}),
       results,
       ...(running.length ? { next: `${running.length} still running — call ${reader}({ request: { task_ids: [${running.map((id) => `'${id}'`).join(', ')}] } }) for them${running.length < results.length ? '; the others are final above' : ''}` } : {}),
     };
@@ -143,6 +180,9 @@ export class TaskRunner {
    * drawn like any other). Returns { task_ids, context_id, read_with, next }.
    */
   startBatch(ctx, tool, queries, prepare) {
+    // the kind of task each query starts: one for the batch, or one per query (a metric query and a
+    // read of a stored table share a tool)
+    const kindOf = typeof tool === 'function' ? tool : () => tool;
     const works = queries.map((q, i) => {
       try { return prepare(q); } catch (e) {
         if (e instanceof ToolError) {
@@ -152,12 +192,12 @@ export class TaskRunner {
       }
     });
     const batch = { before: this.queue.get(ctx.id) || null };
-    const ids = works.map((work, i) => this.start(ctx, tool, work, { batch, input: { ...queries[i], context_id: ctx.id } }));
+    const ids = works.map((work, i) => this.start(ctx, kindOf(queries[i]), work, { batch, input: { ...queries[i], context_id: ctx.id } }));
     const all = Promise.allSettled(ids.map((id) => this.runs.get(id))).finally(() => {
       if (this.queue.get(ctx.id) === all) this.queue.delete(ctx.id);
     });
     this.queue.set(ctx.id, all);
-    const reader = this.readers[this.sideOf(tool)];
+    const reader = this.readers[this.sideOf(kindOf(queries[0]))];
     return {
       task_ids: ids,
       context_id: ctx.id,
@@ -170,6 +210,13 @@ export class TaskRunner {
   started(id, extra = {}) {
     const side = this.sideOf(this.jobs.get(id)?.tool);
     return { task_id: id, ...extra, read_with: this.readers[side], next: `${this.readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
+  }
+
+  /** The tool a task's kind is said as: a kind a tool starts on two sides (a metric query or a read; a
+   *  semantic layer's parse or a pipeline's build) by the tool that starts it; any other kind is a tool's
+   *  own name. */
+  toolOf(kind) {
+    return this.kindTools[kind] || kind;
   }
 
   /** The call that reads a task back: its side's query tool, with the task_id. */
@@ -193,11 +240,12 @@ export class TaskRunner {
   /** The task behind an id — or the one refusal of an id this server does not know. */
   known(id) {
     const job = this.jobs.get(id);
-    if (!job) throw new ToolError(`unknown task_id: ${id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+    if (!job) throw new ToolError(`unknown task_id: ${id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: UNKNOWN_TASK });
     return job;
   }
 
-  /** A known task of THIS side — a task of the other side is refused with the tool that reads it. */
+  /** A known task of THIS side — one of `side` (a side, or the sides one tool reads) — a task of another
+   *  side is refused with the tool that reads it. */
   forSide(id, side) {
     const job = this.known(id);
     const own = this.sideOf(job.tool);
@@ -206,7 +254,7 @@ export class TaskRunner {
     if (!own) throw new ToolError(job.tool
       ? `task ${job.id} was started by ${job.tool}, which this server does not serve now (its feature is off), so no tool reads it back`
       : `task ${job.id} records no tool that started it, so neither side can read it back — start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
-    if (own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_ids: ['${job.id}'] } })`, { stage: 'validate', field: 'task_id' });
+    if (![].concat(side).includes(own)) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_ids: ['${job.id}'] } })`, { stage: 'validate', field: 'task_id' });
     return job;
   }
 
@@ -224,7 +272,7 @@ export class TaskRunner {
       if (job.status !== 'running') {
         return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
       }
-      const reason = `cancelled by ${this.readers[side]}({ request: { task_ids, cancel: true } })`;
+      const reason = `cancelled by ${this.readers[this.sideOf(job.tool)]}({ request: { task_ids, cancel: true } })`;
       this.controls.get(id)?.abort(new Error(reason));
       this.jobs.cancel(id, reason);
       this.keep(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });
@@ -270,7 +318,7 @@ export class TaskRunner {
   status(id, waited = 0) {
     const job = this.jobs.get(id);
     const timing = this.results.get(id)?.timing;
-    const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}), ...(timing ? { timing } : {}) };
+    const head = { task_id: id, ...(job.tool ? { tool: this.toolOf(job.tool) } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}), ...(timing ? { timing } : {}) };
     if (job.status === 'running') {
       if (!this.jobs.isLive(id)) return { head, pending: { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } } };
       return { head, pending: { ok: true, ...head, status: 'running', waited_seconds: waited, ...this.progressOf(id, job), next: `still running — call ${this.readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` } };

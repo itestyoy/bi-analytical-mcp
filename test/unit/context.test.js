@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ContextManager, mergeCompiled, newContextId } from '../../src/context-manager.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 function tmpRoot() {
-  return mkdtempSync(join(tmpdir(), 'ctxmgr-'));
+  return tempDir('ctxmgr');
 }
 
 test('newContextId is 12 hex chars', () => {
@@ -64,7 +64,7 @@ test('time spine is dialect-aware', () => {
 });
 
 test('time spine is NOT duplicated when the base project already defines one', () => {
-  const base = mkdtempSync(join(tmpdir(), 'base-'));
+  const base = tempDir('base');
   mkdirSync(join(base, 'models'), { recursive: true });
   writeFileSync(join(base, 'models', 'metricflow_time_spine.sql'), 'select 1 as date_day');
   writeFileSync(join(base, 'dbt_project.yml'), 'name: x\n');

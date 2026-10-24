@@ -1,0 +1,159 @@
+// What the two files of THE RETENTIONEERING FEATURE'S integration tests stand on —
+// retentioneering.test.js (the analyses, the contexts, the starts from a pipeline's tasks) and
+// retentioneering-steps.test.js (an eventstream's steps, the specs a start takes): the fixture warehouse
+// seeded and run on the feature's own dbt environment (`retentioneering`: dbt 1.x + the library), an
+// engine with the feature on, the rows every expectation is counted from, and the users' paths
+// (`paths`: platform as a segment, sessions at 30-minute gaps) built once. Each file opens a world of
+// its own — its own warehouse file, project copy and engine — so the two run side by side. The fixture
+// warehouse is built by the feature's dbt once per run (buildWarehouse's fixture cache), and each file
+// gets a copy of it.
+
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { loadCatalog } from '../../src/catalog.js';
+import { ContextManager } from '../../src/context-manager.js';
+import { createDbt } from '../../src/dbt/index.js';
+import { Engine } from '../../src/engine.js';
+import { createRetentioneeringFeature } from '../../src/retentioneering/index.js';
+import { settle, one } from '../helpers/settle.js';
+import { dbtEnv } from '../helpers/dbt-env.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
+import { tempDir } from '../helpers/temp-dir.js';
+
+export const ENV = dbtEnv('retentioneering');
+export const opts = { timeout: 900000 };
+/** Skipped when the environment is not built (npm run dbt:env -- create retentioneering). */
+export const skip = (t) => { if (!ENV) { t.skip('dbt environment retentioneering not installed (npm run dbt:env -- create retentioneering)'); return true; } return false; };
+
+export const FUNNEL = ['tutorial', 'level_started', 'shop_opened', 'iap_purchase_completed'];
+
+/** A read of every row of every table of a task: one page as long as a read takes. */
+export const EVERY_ROW = { limit: 100000 };
+
+/** A pipeline's step that brings the user's platform: a join of the users model on its contract, at the
+ *  event's time (the version valid then). */
+export const usersJoin = (attrs) => ({ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs });
+export const USERS_PLATFORM = usersJoin([{ column: 'platform' }]);
+
+/** Each user's event names in path order, collapsed runs of one event into one. */
+export const collapsed = (list) => list.map((r) => r.e).filter((e, i, all) => i === 0 || e !== all[i - 1]);
+
+/** One table of an analysis — a read's page of it, or a drawn card's — as records. */
+export const table = (result, name) => {
+  const t = result.tables.find((x) => x.name === name);
+  assert.ok(t, `a table '${name}' (has ${result.tables.map((x) => x.name).join(', ')})`);
+  return t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]])));
+};
+
+/**
+ * A segment overview's (or a clustering's) sizes, level by level, from its read: its groups ({ name,
+ * size, … } under levels, or clusters). An analysis that failed, or a read without them, fails the test
+ * saying what it holds, under `label`.
+ */
+export const sizes = (overview, label = 'sizes') => {
+  assert.ok(overview, `${label}: no such analysis in the result`);
+  assert.equal(overview.error, undefined, `${label}: the analysis failed — ${JSON.stringify(overview.error)}`);
+  const groups = overview.levels ?? overview.clusters;
+  assert.ok(Array.isArray(groups) && groups.length, `${label}: no levels or clusters (has ${Object.keys(overview).join(', ')})`);
+  assert.ok(groups.every((g) => g && typeof g === 'object' && 'name' in g && 'size' in g), `${label}: a group without name and size — ${JSON.stringify(groups[0])}`);
+  return Object.fromEntries(groups.map((g) => [g.name, g.size]));
+};
+
+/**
+ * The world one test file runs in: the warehouse built, the engine, the rows, `paths` built (its
+ * build's read is `built`), and the users per platform (`perPlatform`, ordered by platform).
+ */
+export async function openWorld() {
+  const BASE = fixtureProject('dbt_project');
+  // seeded and run by the feature's own dbt (1.x), the one the engine below runs on
+  const wh = await buildWarehouse(BASE, { dbtBin: ENV.dbtBin });
+  const runner = createDbt({ environment: ENV, profilesDir: BASE, timeout: 600000 });
+  const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('rete-ctx'), timeSpineDialect: 'duckdb' });
+  const engine = settle(new Engine({
+    catalog, contextManager: ctxs, runner, dbPath: join(tempDir('rete-db'), 'x.sqlite'),
+    // a task holds 7 rows of a table (not 1000), so these few users' per-path tables are cut as a large
+    // eventstream's are: a page past them is read from the stored table, and every such read is proved
+    // by the numbers
+    features: [createRetentioneeringFeature({ runner, keptRows: 7 })], featureStatus: [{ id: 'retentioneering', available: true }],
+  }));
+  const close = async () => { try { engine.close(); } catch { /* noop */ } await wh.stop(); };
+  let rows; let built; let perPlatform;
+
+  /** A task's read, followed until it is done (one read waits at most 30 s; a build under load can take longer). */
+  const readDone = async (id, extra = {}) => {
+    for (;;) {
+      const r = await one(engine.query_retentioneering_model({ task_ids: [id], ...extra }));
+      if (r.status !== 'running') return r;
+    }
+  };
+  /** Each user's events in time order (ties by name, as the eventstream orders them). */
+  const paths = () => {
+    const by = new Map();
+    for (const r of rows) (by.get(r.u) || by.set(r.u, []).get(r.u)).push(r);
+    for (const list of by.values()) list.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : a.e.localeCompare(b.e)));
+    return by;
+  };
+  /** The analyses of one call over `eventstream`, read back — a page of each table (`page`: { offset,
+   *  limit }; EVERY_ROW for all of it). */
+  const analyze = async (ctx, eventstream, analyses, page = {}) => {
+    const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream, analyses });
+    const r = await readDone(q.task_id, page);
+    assert.equal(r.status, 'done', JSON.stringify(r.error));
+    return r.analyses;
+  };
+
+  /**
+   * An eventstream over rows a build_model pipeline prepared — the way a start reads anything but a
+   * source's own columns: the pipeline's `steps` over `source` (and its window) are materialized, and the
+   * eventstream starts from that build's task, its path the user unless `path` says, its event and time
+   * the source's own columns unless `columns` names others. → the start's answer ({ task_id, context_id }).
+   */
+  const startPrepared = async ({ steps, source = 'events', time_range, path, columns = {}, ...rest }) => {
+    const p = await engine.build_model({ action: 'start', name: `${rest.name}_rows`, source, steps, ...(time_range ? { time_range } : {}), materialize: true });
+    assert.ok(p.materialize?.task_id, `the rows are built: ${JSON.stringify(p.materialize)}`);
+    for (;;) {
+      const r = await one(engine.query_model({ task_ids: [p.materialize.task_id] }));
+      if (r.status === 'running') continue;
+      assert.equal(r.status, 'done', `the rows: ${JSON.stringify(r.error)}`);
+      break;
+    }
+    const m = catalog.getModel(source);
+    return engine.build_retentioneering_model({
+      ...rest, from_task: p.materialize.task_id, source,
+      path: path || ['player_id_of_internal'],
+      columns: { event: columns.event || catalog.eventNameColumn(source), time: columns.time || m.time.column },
+    });
+  };
+
+  try {
+    // the rows every expectation is counted from: each event, its user, its time — in path order
+    rows = (await wh.query('select player_id_of_internal as u, event_name as e, device_time as t from fct_analytics_events order by 1, 3, 2')).rows;
+    // the platform arrives by a join of the pipeline the eventstream reads — users is slowly changing, so
+    // at each event's time — and is carried as a segment under its column's name
+    const b = await startPrepared({ name: 'paths', steps: [USERS_PLATFORM], segments: ['platform'], sessions: { gap_minutes: 30 } });
+    built = await readDone(b.task_id);
+    assert.equal(built.status, 'done', `the users' paths: ${JSON.stringify(built.error)}`);
+    perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform order by platform')).rows
+      .map((r) => ({ platform: String(r.platform), n: Number(r.n) }));
+  } catch (e) {
+    // the engine's library check is a process of its own: a world that did not open lets go of it
+    await close();
+    throw e;
+  }
+
+  /** The context of `paths`, where the step tests fork it. */
+  const stepsContext = async () => built.context_id;
+  /** A fork of `paths` with these steps, materialized; its build's read. */
+  const shaped = async (name, steps) => {
+    const ctx = await stepsContext();
+    await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'paths', name, after: 0 });
+    const added = await engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: name, steps });
+    const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: name });
+    const read = await readDone(m.task_id);
+    assert.equal(read.status, 'done', JSON.stringify(read.error));
+    return { ctx, added, read };
+  };
+
+  return { engine, wh, rows, built, perPlatform, readDone, paths, analyze, stepsContext, shaped, startPrepared, close };
+}

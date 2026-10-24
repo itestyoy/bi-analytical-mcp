@@ -1,19 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine(tweak) {
   const catalog = loadCatalog(CATALOG, {});
   tweak?.(catalog);
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'bndl-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('bndl') }) }));
 }
 
 // The fixture catalog marks bundle_id as the app dimension (meta.mcp.dimension:{bundle:true}).
@@ -77,9 +75,9 @@ test('semantic_index({ property }) surfaces per-app bundle_coverage', async () =
   assert.equal(prop.bundle_coverage_summary.empty_apps, 1);
   assert.ok(prop.bundle_coverage_summary.populated.some((b) => b.bundle === 'com.omg.words'), 'lists every populated app');
   assert.ok(prop.recommendations.some((r) => /Always NULL for 1 of 2 app/i.test(r)), 'flags the empty count + how to drill');
-  // include_coverage:true returns the FULL per-app split (nothing lost, just on demand).
-  const full = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
-  assert.ok(Array.isArray(full.bundle_coverage), 'include_coverage returns the full per-app array');
+  // include: ['coverage'] returns the FULL per-app split (nothing lost, just on demand).
+  const full = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include: ['coverage'] });
+  assert.ok(Array.isArray(full.bundle_coverage), 'include: [coverage] returns the full per-app array');
   assert.equal(full.bundle_coverage.find((b) => b.bundle === 'com.omg.relax').non_null, 0, 'empty for relax');
 });
 
@@ -98,17 +96,18 @@ test('bundle is integrated as a helper across the index views', async () => {
   // overview: points at the { bundle } view in next_actions + recommendations.
   const ov = await e.semantic_index();
   assert.ok(ov.next_actions.some((a) => /bundle: '/.test(a.call) && /source: '/.test(a.call)), 'overview next_actions includes the bundle view, with its source');
-  assert.ok(ov.recommendations.some((r) => /semantic_index\(\{ request: \{ source: '[a-z_]+', bundle:/.test(r)), 'overview recommends the bundle view per source');
+  // (a recommendation that only repeats a next_actions call is left out: the call is said once)
+  assert.ok(!ov.recommendations.some((r) => ov.next_actions.some((a) => r.includes(a.call))), 'no recommendation repeats a next_actions call');
 
-  // { model } (events): surfaces the app/bundle column + a pointer.
-  const ev = await e.semantic_index({ model: 'events' });
+  // { source } (events): surfaces the app/bundle column + a pointer.
+  const ev = await e.semantic_index({ source: 'events' });
   assert.equal(ev.bundle_column, 'bundle_id');
   assert.ok(/bundle/i.test(ev.bundle_note));
-  assert.ok(ev.recommendations.some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');
+  assert.ok([...ev.recommendations, ...ev.next_actions.map((a) => a.call)].some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');
 
   // { event }: with >1 app, flags that a property may be empty for some apps.
   const evt = await e.semantic_index({ source: 'events', event: 'ad_finished' });
-  assert.ok(evt.recommendations.some((r) => /bundle/.test(r)), JSON.stringify(evt.recommendations));
+  assert.ok([...evt.recommendations, ...evt.next_actions.map((a) => `${a.call} ${a.why}`)].some((r) => /bundle/.test(r)), JSON.stringify(evt.recommendations));
 
   // { search }: a query matching an app routes to its bundle view.
   const s = await e.semantic_index({ search: 'relax' });

@@ -6,14 +6,16 @@
 // server announces like any other (src/surface-change.js).
 //
 // The core never names a feature: it walks `engine.features` at the few points a tool is defined,
-// dispatched, read back, drawn, guided and described. A feature is written against the engine's
+// dispatched, read back, drawn, guided, described and removed. A feature is written against the engine's
 // public surface — engine.tasks (src/task-runner.js), engine.host, engine.ctxs, engine.catalog,
 // engine.jobs — never its private `_` members. A feature module exports a DEFINITION:
 //
 //   { id, flag, resolve({ env, catalog, profilesDir, baseProjectDir }) → { feature } | { reason } }
 //
 // and the resolved `feature` is an object with (every key optional but `id` and `tools`):
-//   tools:   { <name>: { schema(catalog) → JSON Schema, run(engine, input) → result,
+//   tools:   { <name>: { schema(catalog, { project }) → JSON Schema (project: the dbt project's own
+//                        semantic layer, or null — what the one $defs.expr names beside the catalog),
+//                        run(engine, input) → result,
 //                        title, description, annotations (ToolAnnotations),
 //                        side (the task side this tool starts), reads (the side its read returns —
 //                        the tool that reads that side's tasks back), draws (true for the tool that
@@ -30,6 +32,11 @@
 //   overview(engine) → what semantic_index's overview says about it
 //   describeContext(engine, ctx) → what a context of this feature holds, for context({ action: describe }),
 //              with `brief` for its line in the listing — null for a context that is not the feature's
+//   deletes: { <what>: { form(catalog) → the closed form delete_context takes for it, `what` pinned to
+//              <what> (src/schema-kit.js form, tag ['what', <what>]), run(engine, input) → what was removed,
+//              answered as delete_context answers ({ removed, … }), `input` the form's fields without
+//              `what` } } — a kind of build a context of the feature holds, removed by delete_context
+//              as the core's are: one form of its union each, there only while the feature is on
 
 import { retentioneeringDefinition } from './retentioneering/index.js';
 import { defineTool } from './tools/define.js';
@@ -67,6 +74,22 @@ export function resolveFeatures({ env = process.env, catalog, profilesDir, baseP
     }
   }
   return { features, status };
+}
+
+/**
+ * What the resolved features add to delete_context — each a kind of build a feature's context holds:
+ * { what, form, run }, `form` one closed form of delete_context's union with `what` pinned to its key
+ * (checked here: a form that does not say which it is would overlap another, a defect found at start).
+ */
+export function featureDeletes(features = [], catalog = null) {
+  return features.flatMap((feature) => Object.entries(feature.deletes || {}).map(([what, d]) => {
+    const form = d.form(catalog);
+    if (form?.properties?.what?.const !== what || !(form.required || []).includes('what') || form.additionalProperties !== false) {
+      throw new Error(`feature '${feature.id}': its delete_context form '${what}' must be a closed form that requires what: "${what}"`);
+    }
+    if (typeof d.run !== 'function') throw new Error(`feature '${feature.id}': its delete_context form '${what}' has no run(engine, input)`);
+    return { what, form, run: d.run };
+  }));
 }
 
 /** The tool definitions the resolved features add (src/tools/define.js) — each like a core tool's. */

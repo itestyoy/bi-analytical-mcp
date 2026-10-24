@@ -1,15 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rankFuzzy } from '../../src/fuzzy.js';
 import { ValueIndex } from '../../src/value-index.js';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { CatalogSearch } from '../../src/search.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // ── rankFuzzy adapter (over Fuse.js) ──────────────────────────────────────────
 test('rankFuzzy: exact tier first (score 1), then fuzzy by score; gate + tiebreak', () => {
@@ -58,7 +57,7 @@ test('ValueIndex.searchValues: exact substring tier, then fuzzy fallback on a ty
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'fz-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('fz') }) }));
 }
 
 test('semantic_index({ search }) is fuzzy by default over property names', async () => {
@@ -96,14 +95,60 @@ test('semantic_index({ search, fuzzy: false }) restricts to exact substring', as
 
 test('semantic_index: fuzzy belongs to { search } and nowhere else', async () => {
   const e = engine();
-  // the { model } view does not take `fuzzy` — that is the SCHEMA's statement, not a check
-  await assert.rejects(() => e.semantic_index({ model: 'events', fuzzy: true }), /unexpected property 'fuzzy'/);
+  // the { source } view does not take `fuzzy` — that is the SCHEMA's statement, not a check
+  await assert.rejects(() => e.semantic_index({ source: 'events', fuzzy: true }), /unexpected property 'fuzzy'/);
+});
+
+// A value match says where the value lives in the words of the view it points at — the one ref's: a
+// column of its model ({ source, column }), or a property on that source's events ({ source, property })
+// — decided once, as each match is made, and spelled as the view that drills it.
+test('{ search }: a value is said to live in a column or a property, as the catalog has it', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const idx = new ValueIndex();
+  idx.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 10, values: [{ value: 'Germany', freq: 10 }] });
+  idx.upsertProperty('events', 'ad_type_of_event_data', { distinctCount: 1, totalCount: 7, values: [{ value: 'rewarded', freq: 7 }] });
+  const search = new CatalogSearch({ catalog, recipes: null, valueIndex: idx });
+  const attr = search.run({ search: 'Germany' });
+  assert.ok(attr.recommendations.some((r) => r.startsWith("Value 'Germany' lives in column 'country' of source 'users'") && r.includes("{ source: 'users', column: 'country' }")), JSON.stringify(attr.recommendations));
+  const prop = search.run({ search: 'rewarded' });
+  assert.ok(prop.recommendations.some((r) => r.startsWith("Value 'rewarded' lives in property 'ad_type_of_event_data' of source 'events'") && r.includes("{ source: 'events', property: 'ad_type_of_event_data' }")), JSON.stringify(prop.recommendations));
+  for (const m of attr.value_matches) assert.deepEqual(Object.keys(m).sort(), ['column', 'events', 'freq', 'match', 'score', 'source', 'type', 'value']);
+  for (const m of prop.value_matches) assert.deepEqual(Object.keys(m).sort(), ['events', 'freq', 'match', 'property', 'score', 'source', 'type', 'value']);
+  idx.close();
 });
 
 test('semantic_index({ search }) flags fuzzy-only results as did-you-mean', async () => {
   const e = engine();
   const out = await e.semantic_index({ search: 'tutoral' });
-  const anyExact = [...out.event_names, ...out.property_matches, ...out.dimension_matches, ...out.recipe_matches].some((m) => m.match === 'exact');
+  const anyExact = [...out.event_names, ...out.property_matches, ...out.column_matches, ...out.recipe_matches].some((m) => m.match === 'exact');
   assert.equal(anyExact, false);
   assert.ok(out.recommendations.some((r) => /closest matches by similarity/i.test(r)));
+  // a loose query lists the few recipes nearest the best, not every one its prose touches
+  assert.ok(out.recipe_matches.length <= 3, JSON.stringify(out.recipe_matches));
+  // and a loose match of any list is said only near the best match of all of them
+  const all = [...out.event_names, ...out.property_matches, ...out.column_matches, ...out.value_matches, ...out.recipe_matches];
+  const best = Math.max(...all.map((m) => m.score));
+  assert.ok(all.every((m) => m.score >= best - 0.15), JSON.stringify(all.map((m) => [m.event ?? m.property ?? m.column ?? m.id ?? m.value, m.score])));
+});
+
+test('semantic_index({ search }) with an exact name: that list keeps its exact matches, not every name its letters resemble', async () => {
+  const e = engine();
+  const out = await e.semantic_index({ search: 'revenue' });
+  const lists = [out.event_names, out.property_matches, out.column_matches, out.recipe_matches];
+  // (beside them, a few names whose description holds the word — mentioned, never a loose resemblance)
+  for (const list of lists) if (list.some((m) => m.match === 'exact')) assert.ok(list.every((m) => m.match === 'exact' || m.match === 'mentioned'), JSON.stringify(list));
+  // a price described as purchase revenue is found by the word in its description
+  assert.ok(out.property_matches.some((m) => m.property === 'price_in_usd_of_event_data' && m.match === 'mentioned'), JSON.stringify(out.property_matches));
+});
+
+// a word of a name mistyped scores by how close it is to that word, so the event it names comes before a
+// column whose description merely shares letters with it, and the first recommendation is that event's view
+test('a mistyped word of an event name ranks that event first', async () => {
+  const e = engine();
+  const r = await e.semantic_index({ search: 'purchse' });
+  const ev = r.event_names.find((x) => x.event === 'iap_purchase_completed');
+  assert.ok(ev, JSON.stringify(r.event_names));
+  const others = [...r.column_matches, ...r.property_matches].filter((m) => !/purchase/.test(m.column ?? m.property));
+  assert.ok(others.every((m) => m.score < ev.score), JSON.stringify(others.map((m) => [m.column ?? m.property, m.score])));
+  assert.ok(r.recommendations.find((t) => /^See what event 'iap_purchase/.test(t)) === r.recommendations.find((t) => /^(See what event|Drill into property|Column|Recipe)/.test(t)), JSON.stringify(r.recommendations));
 });

@@ -1,7 +1,7 @@
 // READING A TOOL SCHEMA IN A TEST — through the two things that stand between a test and a field: the
 // fold (src/schema/transport.js puts repeated subtrees behind `$ref` into `#/$defs`) and the forms (a
 // union is an `anyOf` of closed forms — src/schema-kit.js — so a field lives in the form that takes it,
-// not on the union). A test reads "the `stage` field of build_pipeline_model" instead of a walk.
+// not on the union). A test reads "the `stage` field of build_model" instead of a walk.
 
 /** A node as written, or what its `$ref` points at (followed until it is not a ref). */
 export function deref(doc, node, depth = 0) {
@@ -36,6 +36,14 @@ export function field(doc, node, name) {
     if (f?.properties && name in f.properties) return deref(doc, f.properties[name]);
   }
   return undefined;
+}
+
+/** What a union says of field `name` ONCE, beside its forms (src/pipeline/compute.js exprSchema: what
+ *  an expression's `args` hold, while each form says only how many) — or undefined where the union says
+ *  nothing of it there. */
+export function beside(doc, node, name) {
+  const n = deref(doc, node);
+  return n?.properties && name in n.properties ? deref(doc, n.properties[name]) : undefined;
 }
 
 /** Every field name any form of a node takes. */

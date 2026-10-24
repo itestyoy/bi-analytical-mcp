@@ -79,16 +79,22 @@ export function toLatestSpec(doc) {
 
   const common = (mt) => pick(mt, ['name', 'description', 'label', 'config']);
 
-  /** The simple metric a measure becomes when a cumulative / conversion metric names it. */
-  const metricForMeasure = (measureName) => {
-    if (measureAsMetric.has(measureName)) return measureAsMetric.get(measureName);
+  /**
+   * The simple metric a measure becomes when a cumulative / conversion metric names it — one that fills
+   * a missing value and joins the time spine where the reference says so (the latest spec carries those
+   * on the simple metric a cumulative one reads, not on the reference).
+   */
+  const metricForMeasure = (measureName, ref = {}) => {
+    const fill = pick(ref, ['fill_nulls_with', 'join_to_timespine']);
+    const key = Object.keys(fill).length ? `${measureName}\u0000${JSON.stringify(fill)}` : measureName;
+    if (measureAsMetric.has(key)) return measureAsMetric.get(key);
     const me = measures.get(measureName);
     if (!me) throw new Error(`metric references measure '${measureName}', which no semantic model declares`);
-    let name = measureName;
+    let name = Object.keys(fill).length ? `${measureName}_filled` : measureName;
     while (metricNames.has(name)) name = `${name}_m`;
     metricNames.add(name);
-    simpleByModel.get(measureOwner.get(measureName)).push({ name, type: 'simple', label: me.label || name, ...aggregationOf(me) });
-    measureAsMetric.set(measureName, name);
+    simpleByModel.get(measureOwner.get(measureName)).push({ name, type: 'simple', label: me.label || name, ...aggregationOf(me), ...fill });
+    measureAsMetric.set(key, name);
     return name;
   };
 
@@ -121,7 +127,7 @@ export function toLatestSpec(doc) {
       out.input_metrics = (tp.metrics || []).map((m) => pick(m, ['name', 'filter', 'alias', 'offset_window', 'offset_to_grain']));
     } else if (mt.type === 'cumulative') {
       const ref = typeof tp.measure === 'string' ? { name: tp.measure } : tp.measure || {};
-      const inner = metricForMeasure(ref.name);
+      const inner = metricForMeasure(ref.name, ref);
       out.input_metric = ref.filter ? { name: inner, filter: ref.filter } : inner;
       Object.assign(out, pick({ ...tp, ...(tp.cumulative_type_params || {}) }, ['window', 'grain_to_date', 'period_agg']));
     } else if (mt.type === 'conversion') {

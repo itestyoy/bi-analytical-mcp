@@ -2,8 +2,14 @@
 // numbers the caller brings (pre-aggregated per-group stats a pipeline computed). Pure: no warehouse,
 // no task, no state; the input is validated against the tool's schema by the engine before it gets here.
 
-import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
+import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean, mdeFromVariance } from './stats.js';
 import { ToolError } from './validate.js';
+
+/** The fewest conversions, and non-conversions, a group needs for a z-test's normal approximation to hold. */
+const SMALL_SAMPLE_OUTCOMES = 10;
+
+/** The fewest users a group needs for a test of means to read its p-value without assuming normal values. */
+const SMALL_SAMPLE_MEAN_USERS = 30;
 
 /** A mean-test group as { n, mean, stddev }: given so, as it is; given { n, sum, sum_squares }, computed (n − 1 in the variance). */
 function meanFromSums(g) {
@@ -14,6 +20,13 @@ function meanFromSums(g) {
   const { sum: _s, sum_squares: _q, ...rest } = g;
   return { ...rest, mean, stddev: Math.sqrt(variance) };
 }
+
+// A group's sums as the tool takes them (the mean test's { sum, sum_squares }, nested per value) and
+// as the statistics read them (src/stats.js) — translated here, at the edge, and nowhere else.
+/** A ratio group → the delta method's sums: Σnum, Σden, Σnum², Σden², Σnum·den. */
+const ratioSums = (g) => ({ n: g.n, sumNum: g.numerator.sum, sumDen: g.denominator.sum, sumNum2: g.numerator.sum_squares, sumDen2: g.denominator.sum_squares, sumNumDen: g.sum_products });
+/** A CUPED group → its sums of the tested value Y and the covariate X: ΣY, ΣY², ΣX, ΣX², ΣXY. */
+const cupedSums = (g, label) => ({ label, n: g.n, sumY: g.sum, sumY2: g.sum_squares, sumX: g.covariate.sum, sumX2: g.covariate.sum_squares, sumXY: g.sum_products });
 
 /**
  * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
@@ -34,15 +47,15 @@ export function abTest(input) {
   const alternative = input.alternative || 'two_sided';
   const correction = input.correction || 'holm';
   const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
-  const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`experiment analyze, metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
+  const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`experiment analyze, metric=${metric}: group '${g === control ? labelOf(g, -1) : labelOf(g, (input.variants || []).indexOf(g))}' is missing '${f}'`, { stage: 'validate', field: f }); };
 
   // Cross-field guard the schema cannot express: for a proportion, a group's success
   // count cannot exceed its sample size (a rate > 100% is impossible). Reject it instead
   // of silently returning control_rate > 1 and a meaningless lift.
   if (metric === 'proportion') {
-    for (const g of [control, ...(input.variants || [])]) {
+    for (const [i, g] of [control, ...(input.variants || [])].entries()) {
       if (g && g.conversions != null && g.conversions > g.n) {
-        throw new ToolError(`metric=proportion: conversions (${g.conversions}) cannot exceed n (${g.n}) for group '${g.label || '?'}' — a rate cannot exceed 100%`, { stage: 'validate', field: 'conversions' });
+        throw new ToolError(`metric=proportion: conversions (${g.conversions}) cannot exceed n (${g.n}) for group '${labelOf(g, i - 1)}' — a rate cannot exceed 100%`, { stage: 'validate', field: 'conversions' });
       }
     }
   }
@@ -55,16 +68,15 @@ export function abTest(input) {
 
   let results; const extra = {};
   if (metric === 'cuped') {
-    const suff = ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY'];
+    const suff = ['sum', 'sum_squares', 'covariate', 'sum_products'];
     need(control, suff); for (const v of input.variants) need(v, suff);
-    const pick = (g, label) => ({ label, n: g.n, sumY: g.sumY, sumY2: g.sumY2, sumX: g.sumX, sumX2: g.sumX2, sumXY: g.sumXY });
-    const groups = [pick(control, labelOf(control, -1)), ...input.variants.map((v, i) => pick(v, labelOf(v, i)))];
+    const groups = [cupedSums(control, labelOf(control, -1)), ...input.variants.map((v, i) => cupedSums(v, labelOf(v, i)))];
     const out = cupedTest({ groups, alternative, confidence });
     extra.theta = out.theta; results = out.results;
   } else if (metric === 'ratio') {
-    const suff = ['sumNum', 'sumDen', 'sumNum2', 'sumDen2', 'sumNumDen'];
+    const suff = ['numerator', 'denominator', 'sum_products'];
     need(control, suff); for (const v of input.variants) need(v, suff);
-    results = input.variants.map((v, i) => ({ variant: labelOf(v, i), ...ratioDeltaTest({ control, variant: v, alternative, confidence }) }));
+    results = input.variants.map((v, i) => ({ variant: labelOf(v, i), ...ratioDeltaTest({ control: ratioSums(control), variant: ratioSums(v), alternative, confidence }) }));
   } else {
     results = input.variants.map((v, i) => {
       let r; let delta; let variance;
@@ -73,10 +85,22 @@ export function abTest(input) {
         r = twoProportionZTest({ controlConversions: control.conversions, controlN: control.n, variantConversions: v.conversions, variantN: v.n, alternative, confidence });
         const p1 = control.conversions / control.n; const p2 = v.conversions / v.n;
         delta = p2 - p1; variance = p1 * (1 - p1) / control.n + p2 * (1 - p2) / v.n;
+        // the z-test reads each group's rate as normal, which holds only with enough of both outcomes
+        // (the usual rule: at least 10 conversions and 10 non-conversions per group); below that its
+        // p-value and interval are not to be trusted — said, not hidden.
+        if ([[control.n, p1], [v.n, p2]].some(([n, p]) => n * p < SMALL_SAMPLE_OUTCOMES || n * (1 - p) < SMALL_SAMPLE_OUTCOMES)) r = { ...r, small_sample: true };
       } else {
         need(control, ['mean', 'stddev']); need(v, ['mean', 'stddev']);
+        // a mean's spread is read from the sample: one user has none, and two groups with none leave
+        // nothing to test a difference against — Welch's t is not defined there, so no verdict is given
+        const one = [control, v].find((g) => g.n < 2);
+        if (one) throw new ToolError(`group '${labelOf(one, one === control ? -1 : i)}' has ${one.n} user(s): a test of means needs at least 2 in each group to read its spread — collect more users first`, { stage: 'validate', field: one === control ? 'control.n' : `variants[${i}].n` });
+        if (!(control.stddev > 0) && !(v.stddev > 0)) throw new ToolError(`'${labelOf(control, -1)}' and '${labelOf(v, i)}' both have stddev 0: with no spread there is nothing to test a difference of means against — check the stddev you computed (the sample's, over each user's value)`, { stage: 'validate', field: 'stddev' });
         r = welchTTest({ controlMean: control.mean, controlStddev: control.stddev, controlN: control.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
         delta = v.mean - control.mean; variance = (control.stddev ** 2) / control.n + (v.stddev ** 2) / v.n;
+        // a t-test's p-value leans on each group's mean being near normal: below ~30 users a skewed
+        // value (revenue, sessions) can read significant by chance — said, not hidden
+        if (Math.min(control.n, v.n) < SMALL_SAMPLE_MEAN_USERS) r = { ...r, small_sample: true };
       }
       // the smallest effect this sample could detect (power 0.8 at the test's own α, the smaller
       // group's n) — what an inconclusive result could have seen, never a power computed from the
@@ -86,7 +110,9 @@ export function abTest(input) {
       const base = metric === 'proportion' ? control.conversions / control.n : control.mean;
       const detectable = metric === 'proportion'
         ? (base > 0 && base < 1 ? mdeProportion({ baseline: base, n: nMin, alpha, power: 0.8, alternative }) : null)
-        : (control.stddev > 0 ? mdeMean({ stddev: control.stddev, n: nMin, alpha, power: 0.8, alternative }) : null);
+        // (a test of means reads both groups' spreads — Welch's — so the effect it can see does too)
+        : metric === 'mean' && variance > 0 ? mdeFromVariance({ variance, alpha, power: 0.8, alternative })
+          : (control.stddev > 0 ? mdeMean({ stddev: control.stddev, n: nMin, alpha, power: 0.8, alternative }) : null);
       r = { ...r, detectable_lift: detectable, detectable_relative_lift: detectable !== null && base ? detectable / Math.abs(base) : null };
       // sequential: an ALWAYS-VALID p (mixture SPRT) that stays honest when the
       // experiment is checked repeatedly while running — use it for live peeking;
@@ -100,9 +126,15 @@ export function abTest(input) {
     });
   }
 
+  // a ratio's delta method and CUPED's adjusted means are read as normal too: below ~30 users a group's
+  // sums say little about their spread — said, not hidden, as a mean's
+  if (metric === 'ratio' || metric === 'cuped') {
+    results = results.map((r, i) => (Math.min(control.n, input.variants[i].n) < SMALL_SAMPLE_MEAN_USERS ? { ...r, small_sample: true } : r));
+  }
+
   // Correct the p-values across the variant family (FWER via Holm, or FDR via BH)
   // so several arms don't inflate false positives; raw `significant` is kept too.
-  // family_p_values: p-values of OTHER metrics in the same experiment readout —
+  // family_p_values: p-values of other metrics in the same experiment readout —
   // included in the family so a 10-metric scorecard doesn't fish significance.
   const familyExtra = (input.family_p_values || []).filter((p) => Number.isFinite(p));
   if (correction !== 'none' && results.length > 0) {
@@ -115,20 +147,33 @@ export function abTest(input) {
   results = results.map((r) => {
     const sig = !!(r.significant_adjusted ?? r.significant);
     const lift = r.absolute_lift ?? 0;
-    return { ...r, outcome: !sig || lift === 0 ? 'no_difference' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
+    // (a group too small to read gives no verdict: its p-value stands as computed, its significance is not
+    // read — null — and its outcome is inconclusive)
+    const unread = r.small_sample ? Object.fromEntries(['significant', 'significant_adjusted', 'significant_sequential'].filter((k) => k in r).map((k) => [k, null])) : {};
+    return { ...r, ...unread, outcome: !sig || lift === 0 || r.small_sample ? 'inconclusive' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
   });
-  const worse = results.filter((r) => r.outcome === 'worse').map((r) => r.variant);
+  const thin = results.filter((r) => r.small_sample).map((r) => r.variant);
+  // a verdict on a group too small to read is not stated as one: the small-sample warning speaks for it
+  const worse = results.filter((r) => r.outcome === 'worse' && !r.small_sample).map((r) => r.variant);
   const anySig = results.some((r) => (r.significant_adjusted ?? r.significant));
   const split = input.expected_ratio ? srmTest({ groups: groupsIn.map((g, i) => ({ label: labelOf(g, i - 1), n: g.n })), ratios: input.expected_ratio }) : null;
   const recommendations = [
     ...(split?.srm_detected ? [`Sample ratio mismatch (p = ${split.p_value.toExponential(2)}): the groups are not the split that was designed, so randomization or logging is broken and none of these lifts can be trusted until the cause is found.`] : []),
-    `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
-    ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
+    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: ${metric === 'proportion' ? `a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group` : `${metric === 'ratio' ? 'the delta method' : metric === 'cuped' ? 'CUPED' : 'a test of means'} needs about ${SMALL_SAMPLE_MEAN_USERS} users in each group`}, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, so its significance is not read (null) and its outcome is inconclusive. Collect more users before deciding.`] : []),
+    // the adjustment only differs from the raw verdict where there is a family: several variants or other metrics
+    ...(results.length > 1 || familyExtra.length ? [`Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`] : []),
+    // peeking inflates false positives: said where a positive was found, not with every answer
+    ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : anySig ? ['If the experiment is still RUNNING, a fixed-horizon p-value read before the planned sample size overstates significance — pass sequential:true for an always-valid p.'] : []),
     ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),
-    ...(anySig ? [] : ['No significant lift: that is inconclusive, not proof of no effect — detectable_lift says how large an effect this sample could have seen.']),
-    ...(split ? [] : ['Pass expected_ratio (control first) to check the split in this same call — a sample ratio mismatch invalidates every lift.']),
+    // (not said beside a small group's low p-value: there the small-sample note says why no verdict is read)
+    ...(anySig || results.some((r) => r.small_sample && r.p_value < 1 - confidence) ? [] : [`No significant lift: that is inconclusive, not proof of no effect${results.some((r) => r.detectable_lift != null) ? ' — detectable_lift says how large an effect this sample could have seen' : ''}.`]),
+    ...(split ? [] : ['If these groups come from a randomized split, pass expected_ratio (control first) to check it in this same call — a sample ratio mismatch invalidates every lift.']),
   ];
-  return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, recommendations };
+  // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio
+  const intervals = results.some((r) => Array.isArray(r.relative_lift_ci))
+    ? { intervals_note: `confidence_interval: of variant − control, in the metric's unit${metric === 'proportion' ? ' (cut to [−1, 1])' : ''}; relative_lift_ci: of variant / control − 1, from the log of the ratio, so asymmetric and never below −100%${results.some((r) => r.control_rate === 1) ? ' (a control converting every user: the same as the absolute one)' : ''}. Read significance from significant (p_value against the confidence)${thin.length ? ` — null where small_sample: there a p_value, however low, is not read` : ''}.` }
+    : {};
+  return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, ...intervals, recommendations };
 }
 
 /**
@@ -142,7 +187,7 @@ export function srmCheck(input) {
 
 /**
  * Power / sample-size planning (no warehouse). Given a baseline (proportion) or
- * stddev (mean) plus a target effect, returns the required sample size PER GROUP;
+ * stddev (mean) plus a target effect, returns the required sample size per group;
  * given a sample size, returns the minimum detectable effect (MDE). Use it to size
  * a test up front and to tell "no effect" apart from "underpowered".
  */

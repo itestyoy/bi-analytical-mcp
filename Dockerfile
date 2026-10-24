@@ -5,8 +5,12 @@
 FROM node:22-slim
 
 # Python for the dbt/MetricFlow environments (Debian bookworm's 3.11; dbt v2 needs >= 3.11).
+# tini is the container's PID 1 (ENTRYPOINT below): every dbt / Python run leaves a process of its
+# own behind it, which the kernel hands to PID 1 when it ends — and Node, waiting only for the
+# processes it started, never reaps it, so a server run as PID 1 collected a zombie per dbt call
+# (1,687 in three days). Node as PID 1 also ignores SIGTERM, so a `docker stop` waited for SIGKILL.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-venv git \
+  && apt-get install -y --no-install-recommends python3 python3-venv git tini \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -43,8 +47,8 @@ RUN npm ci --omit=dev || npm install --omit=dev
 # volumes + env in docker-compose. Only infra defaults live here.
 #
 # `python/` is SERVER CODE, not project data: the static gate the python pipeline stage runs
-# before submitting a model (python/ast_gate.py) and the script that asks MetricFlow what a metric
-# can be grouped by (python/mf_group_bys.py). Nothing imports them, so an image built from src/ alone looks fine and
+# before submitting a model (python/ast_gate.py) and MetricFlow kept warm, which runs every metric
+# query and lists what a metric can be grouped by (python/mf_server.py). Nothing imports them, so an image built from src/ alone looks fine and
 # then fails at the first call that shells out to one. src/runtime-assets.js declares the set and
 # test/unit/runtime-assets.test.js checks that this COPY covers it.
 COPY src ./src
@@ -62,4 +66,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "src/server.js"]

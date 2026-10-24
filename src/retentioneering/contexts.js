@@ -3,8 +3,8 @@
 // path columns a build's spec declares.
 
 import { ToolError } from '../validate.js';
-import { ES_COLUMNS } from './eventstream.js';
-import { BUILD } from './names.js';
+import { BUILD, ES_COLUMNS } from './names.js';
+import { currentEventstreams } from './earlier.js';
 
 export function contextFor(engine, input) {
   if (!input.context_id) {
@@ -15,11 +15,13 @@ export function contextFor(engine, input) {
   return pathContext(engine, input.context_id);
 }
 
-/** A path-analysis context the call names. */
+/** A path-analysis context the call names — the starts it holds read in today's spelling from here on
+ *  (src/retentioneering/earlier.js), whatever version stored them. */
 export function pathContext(engine, id) {
   if (!id) throw new ToolError('context_id is needed: the context the eventstream was built in', { stage: 'validate', field: 'context_id' });
   const ctx = engine.host.context(id);
   if (!ctx.state.retentioneering) throw new ToolError(`context '${id}' is not a path-analysis context — build an eventstream with ${BUILD} first (without context_id to start one)`, { stage: 'validate', field: 'context_id' });
+  currentEventstreams(ctx.state.retentioneering, engine.catalog);
   return ctx;
 }
 

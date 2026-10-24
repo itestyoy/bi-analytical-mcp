@@ -8,78 +8,15 @@
 // boundaries inside MetricFlow-generated SQL is out of scope.)
 
 import { ToolError } from './validate.js';
+import { localToUtc, momentMs, hasOffset } from './moment.js';
+
+// (the moment's own reading lives in a leaf module, ./moment.js: these are re-exported for the window's callers)
+export { localToUtc, momentMs };
 
 /** True if `tz` is a valid IANA timezone name. */
 export function isValidTimezone(tz) {
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
 }
-
-/** Offset (ms) of timezone `tz` vs UTC at the given UTC instant (whole seconds: a zone's offset has none). */
-function tzOffsetMs(tz, atUtc) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  });
-  const p = Object.fromEntries(dtf.formatToParts(atUtc).map((x) => [x.type, x.value]));
-  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
-  // the parts carry no milliseconds, so neither may the instant they are compared with
-  return asUtc - Math.floor(atUtc.getTime() / 1000) * 1000;
-}
-
-// 'YYYY-MM-DD[( |T)HH:mm[:ss[.fff]]][Z|±hh[:]mm]' — the one spelling of a moment every window takes
-const MOMENT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
-
-/**
- * A moment, read strictly: { ms, offset } — its components taken literally as UTC (ms), and its own
- * offset when it carries one (minutes east of UTC; null for a wall-clock reading) — or null when it is
- * no moment at all: a day the month does not have, an hour past 23, a minute past 59 are refused, never
- * rolled over into the next day.
- */
-function parseMoment(value) {
-  const m = MOMENT_RE.exec(String(value));
-  if (!m) return null;
-  const [y, mo, d, h = 0, mi = 0, sec = 0] = [m[1], m[2], m[3], m[4], m[5], m[6]].map((x) => (x === undefined ? undefined : +x));
-  const ms = m[7] ? Math.floor(Number(`0.${m[7]}`) * 1000) : 0;
-  const t = Date.UTC(y, mo - 1, d, h, mi, sec, ms);
-  const back = new Date(t);
-  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d || back.getUTCHours() !== h || back.getUTCMinutes() !== mi || back.getUTCSeconds() !== sec) return null;
-  let offset = null;
-  if (m[8]) {
-    if (m[8] === 'Z') offset = 0;
-    else {
-      const [, sign, oh, om] = /^([+-])(\d{2}):?(\d{2})$/.exec(m[8]);
-      if (+oh > 23 || +om > 59) return null;
-      offset = (sign === '-' ? -1 : 1) * (+oh * 60 + +om);
-    }
-  }
-  return { ms: t, offset };
-}
-
-const fmtUtc = (ms) => {
-  const d = new Date(ms);
-  const pad = (n, w = 2) => String(n).padStart(w, '0');
-  const frac = d.getUTCMilliseconds() ? `.${pad(d.getUTCMilliseconds(), 3)}` : '';
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${frac}`;
-};
-
-/**
- * A moment as the UTC instant 'YYYY-MM-DD HH:mm:ss[.fff]' the warehouse stores: one carrying its own
- * offset (Z, ±hh:mm) is that instant whatever the zone; a wall-clock one is read in `tz` (two passes
- * of the offset lookup settle DST edges) — or, with no `tz`, as UTC already. Null when it is no moment.
- */
-export function localToUtc(value, tz) {
-  const p = parseMoment(value);
-  if (!p) return null;
-  if (p.offset !== null) return fmtUtc(p.ms - p.offset * 60000);
-  if (!tz) return fmtUtc(p.ms);
-  const naive = p.ms;
-  let guess = naive - tzOffsetMs(tz, new Date(naive));
-  guess = naive - tzOffsetMs(tz, new Date(guess)); // second pass settles DST edges
-  return fmtUtc(guess);
-}
-
-/** Whether a moment carries its own offset (Z, ±hh:mm): an instant, not a wall-clock reading. */
-const hasOffset = (v) => parseMoment(v)?.offset != null;
 
 export const isDateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
@@ -109,17 +46,21 @@ export function partitionDays({ start = null, endExclusive = null, end = null } 
   return { from, until };
 }
 
+/** A column compared with a constant, as the one expression grammar writes a condition
+ *  (src/pipeline/compute.js): what a where stage takes, and what a scan writes through the same writer. */
+const bound = (column, op, value) => ({ fn: op, args: [{ column }, { value }] });
+
 /**
  * The conditions on a model's partition column for a window on its time axis — [] when the model
  * has none, or when it partitions by the time axis itself (the window already bounds it). An event
  * lies in the partition of its own day, or up to `partition_late_days` days later.
- * @returns {{ column, op: 'gte'|'lt', value }[]}
+ * @returns the conditions, each { fn: 'gte' | 'lt', args: [{ column }, { value }] }
  */
 export function partitionConditions(model, bounds) {
   const part = model?.partition_column;
   if (!part || part === model.time?.column) return [];
   const { from, until } = partitionDays(bounds, model.partition_late_days || 0);
-  return [...(from ? [{ column: part, op: 'gte', value: from }] : []), ...(until ? [{ column: part, op: 'lt', value: until }] : [])];
+  return [...(from ? [bound(part, 'gte', from)] : []), ...(until ? [bound(part, 'lt', until)] : [])];
 }
 
 /**
@@ -137,9 +78,12 @@ export function resolveTimeRange(tr) {
   // scan the whole history and report it as the window asked for
   const at = (v, which) => {
     const utc = localToUtc(v, timezone);
-    if (utc == null) throw new ToolError(`time_range.${which}: '${v}' is not a date or a date-time (YYYY-MM-DD, or YYYY-MM-DD HH:mm[:ss[.fff]] with an optional Z or ±hh:mm)`, { stage: 'validate', field: `time_range.${which}` });
+    if (utc == null) throw new ToolError(`time_range.${which}: '${v}' is not a date or a date-time (YYYY-MM-DD, or YYYY-MM-DD HH:mm[:ss[.fff]] with an optional Z or ±hh[:mm])`, { stage: 'validate', field: `time_range.${which}` });
     return utc;
   };
+  // a window that ends before it starts holds no moment: refused, never read as an empty result
+  // (a date-only end is its whole day: the window holds a moment while start is before the next day)
+  if (start && end && (isDateOnly(end) ? at(start, 'start') >= at(nextDay(end), 'end') : at(start, 'start') > at(end, 'end'))) throw new ToolError(`time_range ends before it starts (start '${start}', end '${end}') — swap them`, { stage: 'validate', field: 'time_range' });
   if (!timezone) {
     // warehouse-native (UTC): a wall-clock bound stands as written, an instant with an offset of its own
     // is written as the UTC instant it is — so the partition day taken from it is that instant's day
@@ -162,8 +106,10 @@ export function resolveTimeRange(tr) {
 /**
  * The conditions a {start, end, timezone} window puts on a model's time axis — and on its partition
  * column when it partitions by another (`partition: false` leaves that out, for a relation that no
- * longer carries it): the ONE rule every stage, build and funnel filter applies. The timezone is
- * checked by the caller (isValidTimezone), which knows how to refuse. → { column, op, value }[] | null
+ * longer carries it): the ONE rule every stage, build and funnel filter applies, written in the one
+ * expression grammar ({ fn: 'gte' | 'lt' | 'lte', args: [{ column }, { value }] }) — a where stage's
+ * conditions as they are. The timezone is checked by the caller (isValidTimezone), which knows how to
+ * refuse. → the conditions | null
  */
 export function timeRangeConditions(model, tr, { partition = true } = {}) {
   if (!tr || !(tr.start || tr.end)) return null;
@@ -171,9 +117,9 @@ export function timeRangeConditions(model, tr, { partition = true } = {}) {
   if (!timeCol) return null;
   const r = resolveTimeRange(tr);
   const conditions = [];
-  if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
-  if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
-  else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
+  if (r.start) conditions.push(bound(timeCol, 'gte', r.start));
+  if (r.endExclusive) conditions.push(bound(timeCol, 'lt', r.endExclusive));
+  else if (r.end) conditions.push(bound(timeCol, 'lte', r.end));
   // a source partitioned by ANOTHER column (the day of the event time, next to it) is pruned only by a
   // condition on that column; the time axis above stays the exact bound
   if (partition) conditions.push(...partitionConditions(model, { start: r.start, endExclusive: r.endExclusive, end: r.endExclusive ? null : r.end }));
@@ -185,11 +131,12 @@ export function timeRangeConditions(model, tr, { partition = true } = {}) {
  * - no window at all → full-history scan warning;
  * - window reaching into today → the trailing period is incomplete.
  */
-export function timeRangeWarnings(tr, now = new Date()) {
+export function timeRangeWarnings(tr, now = new Date(), { reads = [] } = {}) {
   const warnings = [];
   const today = now.toISOString().slice(0, 10);
   if (!tr || (!tr.start && !tr.end)) {
-    warnings.push('No time_range: the query scans the WHOLE events history. Bound it with time_range {start, end} to prune partitions and keep results comparable.');
+    // (named by what the query reads: the sources of its metrics)
+    warnings.push(`No time_range: the query scans the WHOLE history of ${reads.length ? reads.join(', ') : 'what it reads'}. Bound it with time_range {start, end} to prune partitions and keep results comparable.`);
   } else if (!tr.end || String(tr.end).slice(0, 10) >= today) {
     warnings.push(`The window includes the current incomplete period (today is ${today}): trailing buckets are partial. For period comparisons set end to the last complete day.`);
   }

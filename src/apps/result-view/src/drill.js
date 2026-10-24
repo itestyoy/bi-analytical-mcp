@@ -106,7 +106,8 @@ export async function drillInto(chart, filters, step) {
   chartLoading.hidden = false;
   let got;
   try {
-    got = payloadOf(await readResult({ ...d.source, transform: view.transform, limit: DRILL_ROWS }));
+    // the path taken and the level opened: the server makes the view from the card as it was drawn
+    got = payloadOf(await readResult({ ...d.source, path, level: step.level.column, mode: step.mode, limit: DRILL_ROWS }));
   } catch (e) {
     log.error('drilling down failed', e);
     got = { ok: false, error: { message: e?.message } };

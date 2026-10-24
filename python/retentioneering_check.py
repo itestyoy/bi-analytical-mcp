@@ -45,7 +45,7 @@ from retentioneering_model import Output, charted_of, eventstream_of, stream_col
 PLAIN_ERRORS = {"ValueError", "KeyError", "TypeError"}
 # A column name a table in either warehouse takes as it is
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# The fixed column names of an eventstream (src/retentioneering/eventstream.js ES_COLUMNS)
+# The fixed column names of an eventstream (src/retentioneering/names.js ES_COLUMNS)
 COLUMNS = {"user": "user_id", "event": "event", "time": "event_time"}
 # How many events one stand-in path carries at most: every event is still on some path, since there are
 # at least as many paths as events

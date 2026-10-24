@@ -12,52 +12,51 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = () => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
-  contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'descr-')) }),
+  contextManager: new ContextManager({ workspaceRoot: tempDir('descr') }),
 }));
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }] };
 
 test('a draft keeps its description, reports it, and hands it to the fork', async () => {
   const e = engine();
   const note = 'revenue per player for the payer-share question';
-  const start = await e.build_pipeline_model({ action: 'start', name: 'lbl', source: 'events', description: note });
+  const start = await e.build_model({ action: 'start', name: 'lbl', source: 'events', description: note });
   assert.equal(start.description, note, 'the start response echoes what it recorded');
-  await e.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage: AGG });
+  await e.build_model({ action: 'add_steps', context_id: start.context_id, steps: [AGG] });
 
-  const described = await e.context({ action: 'describe', context_id: start.draft_id });
+  const described = await e.context({ action: 'describe', context_id: start.context_id });
   assert.equal(described.draft?.description, note);
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === start.draft_id);
+  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === start.context_id);
   assert.equal(listed.description, note, 'a listing says why the context exists, not only what is in it');
 
   // a fork inherits the parent's note (it is the same question, one variant on)…
-  const fork = await e.build_pipeline_model({ action: 'fork', draft_id: start.draft_id });
-  assert.equal(e.ctxs.get(fork.draft_id).state.draft.description, note);
+  const fork = await e.build_model({ action: 'fork', context_id: start.context_id, name: 'lbl_fork' });
+  assert.equal(e.ctxs.get(fork.context_id).state.draft.description, note);
   // …and can say what makes it different instead
-  const fork2 = await e.build_pipeline_model({ action: 'fork', draft_id: start.draft_id, description: 'same, but payers only' });
-  assert.equal(e.ctxs.get(fork2.draft_id).state.draft.description, 'same, but payers only');
+  const fork2 = await e.build_model({ action: 'fork', context_id: start.context_id, name: 'lbl_payers', description: 'same, but payers only' });
+  assert.equal(e.ctxs.get(fork2.context_id).state.draft.description, 'same, but payers only');
 });
 
 test('the description belongs to the draft, not to every action on it', async () => {
   const e = engine();
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'lbl2', source: 'events', description: 'x' });
-  // add_step / materialize describe a STEP, not the pipeline: a note there would have nowhere to go
+  const { context_id } = await e.build_model({ action: 'start', name: 'lbl2', source: 'events', description: 'x' });
+  // add_steps / materialize describe a STEP, not the pipeline: a note there would have nowhere to go
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id, stage: AGG, description: 'nope' }),
+    () => e.build_model({ action: 'add_steps', context_id, steps: [AGG], description: 'nope' }),
     /invalid input|description/i,
   );
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'materialize', draft_id, description: 'nope' }),
+    () => e.build_model({ action: 'materialize', context_id, description: 'nope' }),
     /invalid input|description/i,
   );
 });
@@ -75,41 +74,24 @@ test('_buildPipeline records its description in the context', async () => {
   assert.equal(listed.description, 'payer revenue, one-off table for the weekly readout');
 });
 
-test('a governed task keeps its description per task name', async () => {
+test('a governed task keeps its description', async () => {
   const e = engine();
-  const out = await e.build_semantic_model({
+  const out = await declare(e, {
     name: 'rev_task', description: 'revenue + payers for the monetization readout',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
-    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   const described = await e.context({ action: 'describe', context_id: out.context_id });
   assert.deepEqual(described.task_notes, { rev_task: 'revenue + payers for the monetization readout' });
 
-  // a SECOND task in the same context keeps its own note, and neither overwrites the other
-  await e.build_semantic_model({ action: 'update',
-    context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['new_session'] }, measures: [{ name: 'sessions', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'sessions', type: 'simple', measure: { name: 'sessions' } }],
-  }).catch(async (e2) => {
-    // build_semantic_model action update may require the task to exist; creating a second task is the same path
-    assert.match(String(e2.message), /./);
-    await e.build_semantic_model({
-      context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
-      semantic_models: [{ from: 'events', event_scope: { event_name: ['new_session'] }, measures: [{ name: 'sessions', agg: 'count', field: '*' }] }],
-      metrics: [{ name: 'sessions', type: 'simple', measure: { name: 'sessions' } }],
-    });
-  });
-  const again = await e.context({ action: 'describe', context_id: out.context_id });
-  assert.equal(again.task_notes.rev_task, 'revenue + payers for the monetization readout');
-  assert.equal(again.task_notes.sessions_task, 'session counts for the same readout');
 });
 
 test('no description means no empty field in the response', async () => {
   const e = engine();
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'plain', source: 'events' });
-  const described = await e.context({ action: 'describe', context_id: draft_id });
+  const { context_id } = await e.build_model({ action: 'start', name: 'plain', source: 'events' });
+  const described = await e.context({ action: 'describe', context_id });
   assert.ok(!('description' in (described.draft || {})), 'nothing is invented for a draft that said nothing');
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === draft_id);
+  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === context_id);
   assert.ok(!('description' in listed));
   assert.ok(!('task_notes' in listed));
 });
@@ -119,7 +101,7 @@ test('no description means no empty field in the response', async () => {
 test('context list pages the contexts, most recently used first, and search narrows them', async () => {
   const e = engine();
   const ids = [];
-  for (let i = 0; i < 5; i += 1) ids.push((await e.build_pipeline_model({ action: 'start', name: `pg${i}`, source: 'events', description: i === 2 ? 'the payer funnel' : `draft ${i}` })).draft_id);
+  for (let i = 0; i < 5; i += 1) ids.push((await e.build_model({ action: 'start', name: `pg${i}`, source: 'events', description: i === 2 ? 'the payer funnel' : `draft ${i}` })).context_id);
   e.ctxs.touch(ids[1]); // used last
   const first = await e.context({ action: 'list', limit: 2 });
   assert.equal(first.total, 5);
@@ -139,7 +121,7 @@ test('context list pages the contexts, most recently used first, and search narr
 test('status lists the latest tasks first, of every side', async () => {
   const e = engine();
   const ids = [];
-  for (let i = 0; i < 12; i += 1) { ids.push(e.jobs.create({ tool: i % 2 ? 'query_pipeline_model' : 'query_retentioneering_model' })); await new Promise((r) => { setTimeout(r, 2); }); }
+  for (let i = 0; i < 12; i += 1) { ids.push(e.jobs.create({ tool: i % 2 ? 'query_model' : 'query_retentioneering_model' })); await new Promise((r) => { setTimeout(r, 2); }); }
   const st = await e.semantic_index({ status: true });
   assert.equal(st.tasks.total, 12);
   assert.deepEqual(st.tasks.recent.map((t) => t.task_id), ids.slice(-10).reverse(), 'the newest ten, newest first');

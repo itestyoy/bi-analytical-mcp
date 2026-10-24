@@ -2,28 +2,35 @@
 
 Each pattern: when to use it, the tool sequence, and the gotcha to check. Always
 **clarify** (window/project/segment) and **discover** (`semantic_index`) first, and check
-its recipe list (overview) + `semantic_index({ recipe: id })` — a recipe often carries the
+its recipe list (overview) + `semantic_index({ request: { recipe: "<id>" } })` — a recipe often carries the
 ready payload + the reusable technique (`hack`). Report the tier (governed metric › pipeline) + freshness + Confluence link.
 
 ---
 ## 1. Trends (DAU/WAU/MAU, sessions, event volume)
 Governed metric path. Define once, query by time grain.
-1. `build_semantic_model` — measure = `count_distinct(player)` over the relevant event;
-   or use the governed *Cumulative Sessions* / *Session Duration* definitions.
-2. `query_semantic_model` — `group_by: [{ time: "metric_time", grain: "day" }]`; for a
-   series `order_by: [{ key: "metric_time" }]` (alias resolves to the grained token).
+1. `build_model` with a `semantic_model` step — a measure `{ name, expr: { fn: "count_distinct", args: [{ column: <player key> }] } }`,
+   scoped to the relevant event by a `case` the measure folds
+   (`args: [{ fn: "case", cases: [{ when: [<the event>], then: { column: <player key> } }] }]`), or by a
+   where step before it; or use the governed *Cumulative Sessions* / *Session Duration* definitions.
+2. `query_model` — `steps: [{ stage: "metrics", metrics: [<name>], group_by: [{ time: "metric_time", grain: "day" }] }]`;
+   for a series an order_by step after it, `{ stage: "order_by", keys: [{ key: "metric_time_day" }] }`
+   (a key is a result column's name — the time axis at a day is the column `metric_time_day`).
 - **Gotcha:** "last week/month" = last **complete** period; DAU ≤ MAU; distinct players,
   not rows. Sessions follow AppsFlyer logic ([Cumulative Sessions](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4503207971)).
 
 ## 2. Progression funnel / conversion (events-only)
 Use a pipeline with a `match_recognize` stage.
-1. `build_pipeline_model { action: "start", name, source: "events" }`.
-2. `add_step` a `match_recognize` stage: `partition_by: ["<player key>"]`, ordered `steps`
+1. `build_model({ request: { action: "start", name, source: "events" } })`.
+2. `add_steps` with `steps: [{ stage: "match_recognize", … }]`: `partition_by: ["<player key>"]`, the stage's own ordered `steps`
    (each = event + an `event_data` value), e.g. `level_started → level_completed (result=win)`
-   or a tutorial chain. Add `between_steps` if repeats may occur.
-3. (optional) `add_step` a downstream `join` (users) / `aggregate` to slice conversion by a
+   or a tutorial chain. `between_steps` defaults to `"any"` (each step the next later occurrence;
+   repeats in between are allowed); set `"gap"` when a step's event in between — a repeat too — must
+   break the match (only events that are no step may come between).
+3. (optional) `add_steps` with a downstream `join` (users) / `aggregate` stage to slice conversion by a
    player attribute (country/platform).
-4. `materialize`, then `query_pipeline_model` ({ task_id }) — read `reached_*` / `completed` / `furthest_step_name`.
+4. `materialize` (it returns a `task_id`), then read the rows with
+   `query_model({ request: { task_ids: ["<task_id>"] } })` — `reached_*` / `completed` /
+   `furthest_step_name`.
 - **Governed sibling:** *Game Completion Rate* = completed ÷ started ×100%
   ([def](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4502290434)) — prefer it for the
   headline rate; use the funnel for step-by-step drop-off.
@@ -41,8 +48,8 @@ Use a pipeline with a `match_recognize` stage.
 ## 4. Monetization — IAP
 1. Revenue/buyers from `iap_purchase_completed`; segment by *Inapp Placement* (`location`
    in `event_data`) / *Product Category*.
-2. Metric via `build_semantic_model` (sum revenue, `count_distinct` payers) →
-   `query_semantic_model`; or a pipeline for bespoke cuts.
+2. Metric via `build_model`'s `semantic_model` step (sum revenue, `count_distinct` payers) →
+   `query_model`; or a pipeline for bespoke cuts.
 - **Gotcha:** reconcile to AppsFlyer by `order_id`/`transaction_id` — in-event amount ≠
   reconciled revenue; state which. Subscriptions have a sequence number
   ([dim](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4748345359)).
@@ -58,7 +65,7 @@ Use a pipeline with a `match_recognize` stage.
 1. Flows from `currency_income` / `currency_outcome`; dimensions *Source Type*, *Source
    Name*, *Resource Currency*.
 2. Use governed *Resource Income/Outcome* (+ "in Coins", Cumulative, per Player) and
-   *Resources Balance* / *Resource Return Ratio*; reproduce with `build_semantic_model`
+   *Resources Balance* / *Resource Return Ratio*; reproduce with a `build_model` `semantic_model` step
    (sum amounts, group by source) or a pipeline.
 - **Gotcha:** income vs outcome are different events; "in Coins" applies a conversion; "per
   Player" divides by distinct players. ([Income](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4207280165) · [Outcome](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4207018040))
@@ -70,16 +77,16 @@ Process + naming conventions: **Product Analytics** space
 1. **Compute per-variant aggregates first** with a pipeline: join `experiments` (variant_group),
    window events to the assignment period, aggregate per `variant_group` (n + the metric's
    stat fields).
-2. **Guardrail:** `experiment({ action: check_split, groups })` — if `srm_detected` (p < 0.001), the split is
+2. **Guardrail:** `experiment({ request: { action: "check_split", groups } })` — if `srm_detected` (p < 0.001), the split is
    broken → STOP, the test is invalid.
-3. **Significance:** `experiment({ action: analyze })`:
+3. **Significance:** `experiment({ request: { action: "analyze", … } })`:
    - conversion → `metric: "proportion"` (n + conversions);
    - revenue/ARPU → `metric: "mean"` (n + mean + stddev);
    - per-attempt ratios (e.g. wins/attempts randomized by player) → `metric: "ratio"` (the 5 sums);
    - variance reduction with a pre-period covariate → `metric: "cuped"` (the 5 sums).
    Read `lift` (with relative-lift CI), `p_value`, CI, `significant`, and the
    multiplicity-adjusted p-value across variants.
-4. **Planning / power:** `experiment({ action: plan })` (give `mde` → n per group, or `n` → MDE; needs
+4. **Planning / power:** `experiment({ request: { action: "plan", … } })` (give `mde` → n per group, or `n` → MDE; needs
    `baseline` for proportion / `stddev` for mean).
 - **Gotcha:** always SRM before lift; pick the analysis unit (per-player vs per-attempt) —
   use `ratio` when the analysis unit is finer than the randomization unit; exclude the

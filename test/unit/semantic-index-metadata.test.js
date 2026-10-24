@@ -1,19 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { compileDeclaration } from '../../src/compile.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data tests: these assert the CATALOG METADATA CONTRACT — units,
 // event semantics, partition hints and error fields are structured catalog facts
 // surfaced to the AI (not generated SQL/YAML), so the discovery layer is honest.
 const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url).pathname, { dialect: 'duckdb' });
-const engine = () => settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dm-')) }) }));
+const engine = () => settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('dm') }) }));
 
 test('overview surfaces event_semantics + partition_column for the events fact', async () => {
   const out = await engine().semantic_index({});
@@ -24,8 +22,8 @@ test('overview surfaces event_semantics + partition_column for the events fact',
   assert.equal(ev.partition_column, 'event_date');
 });
 
-test('semantic_index({ model: events }) carries the static partition/cost hint', async () => {
-  const out = await engine().semantic_index({ model: 'events' });
+test('semantic_index({ source: events }) carries the static partition/cost hint', async () => {
+  const out = await engine().semantic_index({ source: 'events' });
   assert.equal(out.partition_column, 'event_date'); // static — no live runner needed
   assert.ok(typeof out.cost_hint === 'string' && out.cost_hint.length > 0);
   assert.deepEqual(out.event_semantics.session_end_event, 'end_session');
@@ -54,37 +52,45 @@ test('event drill-down rows carry the unit per property', async () => {
 
 // Compile errors carry the INPUT FIELD that caused them (ToolError.field via e.field).
 test('compile errors name the offending field', () => {
-  const declWith = (metrics) => ({ name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics });
+  const declWith = (metrics) => ({ name: 't', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics });
   try {
-    compileDeclaration(catalog, declWith([{ name: 'm', type: 'simple', measure: { name: 'nope' } }]));
+    compileDeclaration(catalog, declWith([{ name: 'm', type: 'simple', measure: 'nope' }]));
     assert.fail('expected unknown-measure error');
   } catch (e) {
     assert.match(e.message, /unknown measure 'nope'/);
-    assert.match(e.message, /t_n/); // lists what IS declared
+    assert.match(e.message, /Declared in this call: n\b/); // lists what IS declared
     assert.equal(e.field, 'metrics.measure');
   }
   try {
-    compileDeclaration(catalog, { name: 't', use_base_models: ['nope'] });
+    compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'nope' }] });
     assert.fail('expected unknown-model error');
   } catch (e) {
     assert.match(e.message, /unknown model 'nope'/);
     assert.match(e.message, /users/); // lists the known models
-    assert.equal(e.field, 'use_base_models');
+    assert.equal(e.field, 'semantic_models.source');
   }
   try {
-    compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', agg: 'sum', field: 'complete_time_of_event_data' }] }] });
+    compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ property: 'complete_time_of_event_data' }] } }] }] });
     assert.fail('expected cast-required error');
   } catch (e) {
-    assert.match(e.message, /cast/);
-    assert.equal(e.field, 'measures.cast');
+    // a text property summed is read as a number first: the refusal writes the cast as the argument it is
+    assert.match(e.message, /is string, and sum folds numbers — read it as one: \{ fn: "sum", args: \[\{ fn: "cast"/);
+    assert.equal(e.field, 'measures.expr');
   }
+  // …and with that cast it compiles
+  assert.ok(compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }] }] }));
 });
 
 test('overview carries join_note + value_index_status; payload-less event is not a dead end', async () => {
   const e = engine();
   const out = await e.semantic_index({});
-  assert.ok(/model: 'users', attribute:/.test(out.join_note), 'join_note shows the structured attribute reference');
-  assert.ok(out.join_note.includes("use_base_models"), 'join_note names the declaration');
+  assert.ok(/\{ source: 'users', column: '\w+' \}/.test(out.join_note), 'join_note shows the one ref of a model column');
+  assert.ok(out.join_note.includes("{ source: 'users', on: { … } }"), 'join_note names the join that loads the model');
+  // what a metric query can group by, spelled as it groups: { source, column, via? } — the one ref
+  assert.ok(out.groupable_columns.some((g) => g.source === 'users' && g.column === 'country'), JSON.stringify(out.groupable_columns));
+  assert.equal(out.groupable_attributes, undefined, 'one name for the list');
+  // a project that declares no semantic models of its own says so: no context is named after one
+  assert.equal(out.project_semantic_layer?.available, false, JSON.stringify(out.project_semantic_layer));
   assert.equal(out.value_index_status.ready, false); // no indexer ran in this unit engine
   assert.equal(typeof out.value_index_status.indexed_properties, 'number');
   // Applicability is DATA-DERIVED: seed coverage so every event property is observed on some event

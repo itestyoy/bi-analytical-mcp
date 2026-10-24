@@ -1,17 +1,108 @@
-// dbt 1.x — the `dbt` CLI (dbt-core) for parse / run / show / seed / run-operation, and MetricFlow's
-// `mf` CLI for metric queries (it reads target/semantic_manifest.json, which `dbt parse` writes).
-// Each context runs in its own overlay project dir, so target/ is naturally isolated. NOT
-// `dbt sl query` (that is dbt platform/remote and incompatible with local per-context isolation).
+// dbt 1.x — the `dbt` CLI (dbt-core) for parse / run / show / seed / run-operation, and MetricFlow for
+// metric queries: `mf query`, run by MetricFlow kept warm (src/dbt/metricflow-server.js — the CLI's own
+// command in a long-lived process on the MetricFlow environment, so a query does not pay MetricFlow's
+// start), over target/semantic_manifest.json, which `dbt parse` writes. Each context runs in its own
+// overlay project dir, so target/ is naturally isolated. NOT `dbt sl query` (that is dbt
+// platform/remote and incompatible with local per-context isolation).
 
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { inIsolatedTarget } from '../request-context.js';
-import { runProcess, runWithInput } from './process.js';
-import { assetPath, missingAssetMessage } from '../runtime-assets.js';
+import { runProcess, runWarm } from './process.js';
+import { metricflowServer, mfOutcome } from './metricflow-server.js';
+import { assetPath } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
 import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
+import yaml from 'js-yaml';
+
+const CUMULATIVE_FLAG = 'require_nested_cumulative_type_params';
+
+/**
+ * dbt_project.yml's text with `flags.require_nested_cumulative_type_params` set to false, and nothing
+ * else changed: the value of the key's line replaced, the key put first into the top-level `flags:`
+ * mapping (block or flow), or a `flags:` block appended. The TEXT is edited, never re-dumped — dbt
+ * reads the file as YAML 1.1 (yes/no are booleans, a date stays a date) and a YAML 1.2 dump would
+ * change those values. The edit is held to the text it came from: loaded, the two must be the same
+ * document but for that flag being false, or the text is returned as it was. Idempotent.
+ */
+export function withCumulativeWindowFlag(text) {
+  // duplicate keys are taken as dbt's loader takes them: the last one wins
+  const load = (t) => yaml.load(t, { json: true });
+  let before;
+  try { before = load(text); } catch { return text; }
+  if (before == null) before = {};
+  if (typeof before !== 'object' || Array.isArray(before)) return text;
+  if (before.flags != null && (typeof before.flags !== 'object' || Array.isArray(before.flags))) return text;
+  if (before.flags?.[CUMULATIVE_FLAG] === false) return text;
+  const has = !!before.flags && Object.hasOwn(before.flags, CUMULATIVE_FLAG);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split('\n');
+  const top = lines.findIndex((l) => /^(["']?)flags\1[ \t]*:(?=[ \t\r]|$)/.test(l));
+  let next = null;
+  if (top < 0) {
+    if (before.flags !== undefined) return text;
+    next = `${text}${text === '' || text.endsWith('\n') ? '' : eol}flags:${eol}  ${CUMULATIVE_FLAG}: false${eol}`;
+  } else {
+    const rest = lines[top].slice(lines[top].indexOf(':') + 1).replace(/\r$/, '');
+    const value = rest.replace(/(^|[ \t])#.*$/, '').trim();
+    if (value.startsWith('{')) {
+      // a flow mapping, on this line or over the next: the key's value replaced, or the key put first
+      const at = lines.slice(0, top).join('\n').length + (top ? 1 : 0) + lines[top].indexOf('{');
+      const head = text.slice(0, at + 1);
+      const tail = text.slice(at + 1);
+      if (has) next = head + tail.replace(new RegExp(`((["']?)${CUMULATIVE_FLAG}\\2[ \\t]*:[ \\t]*)[^,}\\s#]+`), '$1false');
+      else next = /^\s*}/.test(tail) ? `${head} ${CUMULATIVE_FLAG}: false ${tail.trimStart()}` : `${head} ${CUMULATIVE_FLAG}: false,${tail}`;
+    } else if (value === '') {
+      // a block mapping: its lines run to the next line at the left margin that is not a comment
+      let end = top + 1;
+      while (end < lines.length && !/^[^\s#]/.test(lines[end])) end++;
+      const child = lines.slice(top + 1, end).find((l) => /^[ \t]+[^\s#]/.test(l));
+      const indent = child ? child.match(/^[ \t]+/)[0] : '  ';
+      const cr = lines[top].endsWith('\r') ? '\r' : '';
+      const keyLine = new RegExp(`^(${indent}(["']?)${CUMULATIVE_FLAG}\\2[ \\t]*:)([ \\t]*)([^#\\r]*?)([ \\t]*(?:#.*)?\\r?)$`);
+      const out = [...lines];
+      if (has) {
+        const i = out.findIndex((l, k) => k > top && k < end && keyLine.test(l));
+        if (i < 0) return text;
+        out[i] = out[i].replace(keyLine, (_, key, _q, sp, _v, tail) => `${key}${sp || ' '}false${tail}`);
+      } else out.splice(top + 1, 0, `${indent}${CUMULATIVE_FLAG}: false${cr}`);
+      next = out.join('\n');
+    } else if (/^(?:~|null|Null|NULL)$/.test(value)) {
+      // `flags: ~` — an empty mapping written as null: the null taken off, the key the block's one line
+      const out = [...lines];
+      const cr = lines[top].endsWith('\r') ? '\r' : '';
+      out[top] = lines[top].replace(/:([ \t]*)(?:~|null|Null|NULL)/, ':$1');
+      out.splice(top + 1, 0, `  ${CUMULATIVE_FLAG}: false${cr}`);
+      next = out.join('\n');
+    } else return text;
+  }
+  try {
+    const after = load(next);
+    const want = { ...before, flags: { ...(before.flags || {}), [CUMULATIVE_FLAG]: false } };
+    return isDeepStrictEqual(after, want) ? next : text;
+  } catch { return text; }
+}
+
+/**
+ * dbt 1.12's parse of the LATEST spec writes a cumulative metric's window twice — into its
+ * cumulative_type_params and into the deprecated type_params.window — and its own validation then
+ * refuses the metric for the deprecated one (the `require_nested_cumulative_type_params` behavior
+ * flag, on by default): no cumulative metric with a window parses. The flag is read from
+ * dbt_project.yml alone, so the copy a context parses carries it off — whatever the project set,
+ * since the semantic YAML that copy parses is the server's (off, the deprecated field is a warning).
+ * Written only into the directory the parse runs in — a context's own copy of the project.
+ */
+function allowLatestCumulativeWindow(projectDir) {
+  const file = join(projectDir, 'dbt_project.yml');
+  try {
+    const text = readFileSync(file, 'utf8');
+    const next = withCumulativeWindowFlag(text);
+    if (next !== text) writeFileSync(file, next);
+  } catch { /* a project dbt cannot read is the parse's to report */ }
+}
 
 /**
  * The one correction a semantic manifest parsed from the LATEST spec needs: a percentile is written
@@ -60,7 +151,12 @@ export class DbtV1 {
   pythonModelsOn(_adapter) { return true; }
 
   _env(projectDir) {
-    const env = { DBT_PROJECT_DIR: projectDir };
+    // No bytecode cache: dbt-duckdb runs a Python model by writing it to a temp file and importing it,
+    // and CPython would cache its bytecode in a __pycache__ beside it, which dbt-duckdb never removes
+    // (the process's own temporary directory, src/dbt/process.js, goes after it; this spares the
+    // write). The environments' own modules were compiled when pip installed them, so imports cost
+    // nothing more.
+    const env = { DBT_PROJECT_DIR: projectDir, PYTHONDONTWRITEBYTECODE: '1' };
     if (this.profilesDir) env.DBT_PROFILES_DIR = this.profilesDir;
     return env;
   }
@@ -75,8 +171,37 @@ export class DbtV1 {
   }
 
   /**
+   * The Python of the MetricFlow environment, that MetricFlow is kept warm on: the one this client was
+   * given (`pythonBin` — named, or its environment's, createDbt), else the one beside its `mf`.
+   */
+  get metricflowPython() {
+    if (this.pythonBin) return this.pythonBin;
+    const beside = this.mfBin ? join(dirname(this.mfBin), 'python') : null;
+    if (beside && existsSync(beside)) return beside;
+    return this.environment?.pythonBin || null;
+  }
+
+  /**
+   * A request to MetricFlow kept warm (src/dbt/metricflow-server.js) about `projectDir`: run in that
+   * directory with the environment a process there gets, under the warehouse's turn and the call's
+   * cancellation (src/dbt/process.js runWarm). `label` is the command it stands for.
+   */
+  _metricflow(projectDir, label, request) {
+    const python = this.metricflowPython;
+    const env = { ...process.env, ...this._env(projectDir) };
+    const ask = (signal) => metricflowServer(python).request({ ...request, cwd: projectDir, env }, { signal, timeout: this.timeout });
+    return runWarm(label[0], label.slice(1), ask, { turn: this.warehouse(projectDir).turn });
+  }
+
+  /** `mf <args>` in `projectDir`, as the CLI runs it — by MetricFlow kept warm → { ok, code, stdout, stderr, error? }. */
+  async _mf(projectDir, args) {
+    return mfOutcome(await this._metricflow(projectDir, [this.mfBin || 'mf', ...args], { op: 'mf', argv: args }));
+  }
+
+  /**
    * A dbt command other than parse. Run as one of several concurrent tasks on a context (a batch of
-   * queries, src/request-context.js isolatedTarget), it writes its artifacts (manifest, run results,
+   * queries, src/request-context.js isolatedTarget) — or as a dbt v2 show, which would leave files of
+   * its own in target/ on every call (src/dbt/v2.js) — it writes its artifacts (manifest, run results,
    * the partial-parse cache) to a target directory of its own — seeded with the context's
    * partial-parse cache so it still parses incrementally — and that directory is removed after.
    * The context's own target/ (whose semantic manifest MetricFlow reads) is left untouched.
@@ -94,6 +219,7 @@ export class DbtV1 {
   }
 
   async parse(projectDir) {
+    if (this.semanticSpec === 'latest') allowLatestCumulativeWindow(projectDir);
     const r = await this._proc(this.dbtBin, projectDir, ['parse']);
     const file = join(projectDir, ...SEMANTIC_MANIFEST);
     if (r.ok && this.semanticSpec === 'latest') restorePercentiles(file);
@@ -129,22 +255,15 @@ export class DbtV1 {
   /**
    * What each of `metrics` can be grouped by, as MetricFlow itself lists it over `projectDir`'s parsed
    * semantic manifest (its `list_group_bys`: each dimension with its semantic model and entity path,
-   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through
-   * python/mf_group_bys.py, in the MetricFlow environment. The `mf` CLI prints only names.
+   * each entity, metric_time with its grain) — asked of MetricFlow kept warm (python/mf_server.py), in
+   * the MetricFlow environment. The `mf` CLI prints only names.
    * → { ok, group_bys: { <metric>: [item] } } | { ok: false, error }
    */
   async groupBys(projectDir, metrics) {
-    const python = this.pythonBin || this.environment?.pythonBin;
-    if (!python) return { ok: false, error: 'no MetricFlow Python to ask: the dbt environment names no MetricFlow environment (MF_ENV)' };
-    const script = assetPath('mfGroupBys');
-    if (!script) return { ok: false, error: missingAssetMessage('mfGroupBys') };
-    const request = { id: 'group_bys', op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics };
-    const r = await runWithInput(python, [script], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
-    const line = (r.stdout || '').split('\n').find((l) => l.trim().startsWith('{'));
-    let out = null;
-    try { out = line ? JSON.parse(line) : null; } catch { /* said below */ }
+    const label = [this.metricflowPython || 'python', assetPath('mfServer') || 'mf_server.py', 'group_bys'];
+    const out = await this._metricflow(projectDir, label, { op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics });
     if (out?.ok) return { ok: true, group_bys: out.group_bys || {} };
-    return { ok: false, error: out?.error || r.error || (r.stderr || '').trim().split('\n').slice(-3).join(' ') || 'MetricFlow could not list the group-by items' };
+    return { ok: false, error: out?.error || 'MetricFlow could not list the group-by items' };
   }
 
   /** Build models (a generated pipeline model, a stored query result) via `dbt run --select`. */
@@ -211,26 +330,33 @@ export class DbtV1 {
     return args;
   }
 
-  /** A metric query through MetricFlow (`mf query`), or its compiled SQL/plan with `explain`. */
+  /** A metric query through MetricFlow (`mf query`, kept warm), or its compiled SQL/plan with `explain`. */
   async query(projectDir, opts) {
     if (opts.explain) {
       const args = this.buildQueryArgs({ ...opts, explain: true, plan: opts.plan });
-      const r = await this._proc(this.mfBin, projectDir, args);
+      const r = await this._mf(projectDir, args);
       return { ok: r.ok, command: `mf ${args.join(' ')}`, sql: extractSql(r.stdout), ...(opts.plan ? { plan: extractPlan(r.stdout) } : {}), stdout: r.stdout, stderr: r.stderr };
     }
     const tmpDir = mkdtempSync(join(tmpdir(), 'mfq-'));
     const csvFile = join(tmpDir, 'out.csv');
     const args = this.buildQueryArgs({ ...opts, csvFile });
     try {
-      const r = await this._proc(this.mfBin, projectDir, args);
+      const r = await this._mf(projectDir, args);
       let columns = [];
       let rows = [];
       if (r.ok && existsSync(csvFile)) ({ columns, rows } = parseCsv(readFileSync(csvFile, 'utf8')));
       // a CSV carries no types: a metric's column is a number, as the warehouse computed it (a
       // dimension's values stay as written — "1.0.0" or "007" is not a number)
       const metricCols = new Set(opts.metrics || []);
+      // A metric is a number or missing, never text: an empty field is a NULL however it was written —
+      // Python's csv writer quotes a row's only field when it is empty ("" — so the row is not a blank
+      // line), which a query of one metric and no group_by returns for a NULL
       for (const row of rows) {
-        for (const c of metricCols) if (typeof row[c] === 'string' && row[c].trim() !== '' && Number.isFinite(Number(row[c]))) row[c] = Number(row[c]);
+        for (const c of metricCols) {
+          if (typeof row[c] !== 'string') continue;
+          if (row[c].trim() === '') row[c] = null;
+          else if (Number.isFinite(Number(row[c]))) row[c] = Number(row[c]);
+        }
       }
       return { ok: r.ok, command: `mf ${args.join(' ')}`, columns, rows, stdout: r.stdout, stderr: r.stderr };
     } finally {

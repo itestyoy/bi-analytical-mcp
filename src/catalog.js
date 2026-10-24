@@ -324,6 +324,11 @@ export class Catalog {
     return primaryEntityName(this.getModel(key));
   }
 
+  /** The columns every question over `key` should filter (meta.mcp.required_filter): a stream, a test flag. */
+  requiredFilters(key) {
+    return this.models[key]?.required_filters || [];
+  }
+
   /** True when queries over `source` must carry a time window (partition-pruning guardrail). */
   requireTimeRangeFor(source) {
     return !!(this._requireTimeRangeAll ?? this.models[source]?.require_time_range);

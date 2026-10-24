@@ -163,7 +163,10 @@ export const semanticPreviewMethods = {
       }
       // what this metric's query takes in group_by (and where), spelled as it takes it
       // (one metric asked: what it is made of comes with it, each said so)
-      return { ...m, ...(inputOf ? { input_of: input.metric } : {}), definition: def, group_by: cut };
+      // (a task's layer names an events source's time axis by MetricFlow's own name: said as its column)
+      const timeCol = (sm) => (project ? null : this._catalogOf(ctx).models[sm]?.time?.column);
+      const spoken = (d) => (d?.agg_time_dimension === EVENT_TIME_DIM && timeCol(d.semantic_model) ? { ...d, agg_time_dimension: timeCol(d.semantic_model) } : d);
+      return { ...spoken(m), ...(inputOf ? { input_of: input.metric } : {}), definition: spoken(def), group_by: cut };
     });
     const first = (input.metric && scope.metrics.find((m) => m.name === input.metric)) || scope.metrics.find((m) => !declared || declared.has(m.name)) || scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
@@ -174,6 +177,13 @@ export const semanticPreviewMethods = {
     const firstCumulative = first && (layer.definition(first.name)?.window || layer.definition(first.name)?.grain_to_date || layer.definition(first.name)?.period_agg !== undefined || (ctx.state.metrics || []).find((x) => x.name === first.name)?.type === 'cumulative');
     const firstCut = first && !firstCumulative && (project ? (firstItem ? refOf(firstItem) : null) : groupable?.find(plain) || groupable?.[0] || null);
     const errors = shown.filter((i) => i.severity === 'error').length;
+    const columnOf = (smName, n) => {
+      const model = project ? null : cat.models[smName];
+      return model && n === EVENT_TIME_DIM && model.time?.column ? model.time.column : model && n === PARTITION_DIM && model.partition_column ? model.partition_column : n;
+    };
+    const uniqueBy = (list) => list.filter((d, i) => list.findIndex((x) => x.name === d.name) === i);
+    // the columns the models the first metric folds ask every question to filter: in its example, as where steps
+    const firstRequired = first && !project ? this._metricModels(ctx, first.name).flatMap((src) => (cat.requiredFilters?.(src) || []).map((column) => ({ source: src, column }))) : [];
     return {
       context_id: ctx.id,
       layer: project ? 'project' : 'task',
@@ -188,16 +198,20 @@ export const semanticPreviewMethods = {
       // the server's, not the caller's — the entity is said by its name and type, the column of a plain key kept)
       // (a column's meaning is the catalog's — semantic_index says it —, so a dimension is said by its name, type
       // and label; one metric's describe lists what it is cut by under its group_by, and a model's columns by count)
-      semantic_models: scope.semanticModels.map(({ measures, entities, dimensions, ...sm }) => ({
+      // (a task's layer names an events source's time and partition columns by MetricFlow's own names: said
+      // as the source's columns, as a query names them — once, where the column is also a dimension)
+      // (a model's meaning is the catalog's too: its description is semantic_index's, not repeated here)
+      semantic_models: scope.semanticModels.map(({ measures, entities, dimensions, description: _desc, ...sm }) => ({
         ...sm,
-        ...(dimensions ? (input.metric ? { dimension_count: dimensions.length } : { dimensions: dimensions.map(({ description: _d, ...d }) => d) }) : {}),
+        ...(sm.agg_time_dimension ? { agg_time_dimension: columnOf(sm.name, sm.agg_time_dimension) } : {}),
+        ...(dimensions ? (input.metric ? { dimension_count: dimensions.length } : { dimensions: uniqueBy(dimensions.map(({ description: _d, ...d }) => ({ ...d, name: columnOf(sm.name, d.name) }))) }) : {}),
         ...(entities ? { entities: entities.map(({ expr, ...e }) => ({ ...e, ...(expr && expr !== e.name && !/[()|]/.test(expr) ? { expr } : {}) })) } : {}),
         ...(measures?.length ? { measures } : {}),
       })),
       metrics,
       // what a query of THIS context names a cut by
       ...(project || input.metric ? {} : { groupable }),
-      ...(first ? { query_with: `query_model(${JSON.stringify({ request: { context_id: ctx.id, steps: [{ stage: 'metrics', metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }] }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
+      ...(first ? { query_with: `query_model(${JSON.stringify({ request: { context_id: ctx.id, steps: [...(firstRequired.length ? [{ stage: 'where', conditions: firstRequired.map((r) => ({ fn: 'eq', args: [r, { value: '<value>' }] })) }] : []), { stage: 'metrics', metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }] }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
       validate_with: `context(${JSON.stringify({ request: { action: 'describe', context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } } })})`,
     };
   },

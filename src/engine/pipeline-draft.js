@@ -12,6 +12,11 @@ import { physicalColumnType } from '../catalog/column-types.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { sayOnce } from './pipeline-warnings.js';
 
+/** What a build makes: its table (table / view), or — a build that is its semantic_model step alone — no
+ *  table, only the semantic layer over its source. */
+const materializesAs = (draft) => (draft.semantic && !draft.stages.length ? 'semantic_layer' : draft.materialized);
+const LAYER_ONLY_NOTE = 'No table: the build is a semantic layer over its source, queried by a metrics step (query_model). A read of rows (query_model without a metrics step) needs a table — a pipeline step before the semantic_model step makes one.';
+
 /** The comparisons of a column with constants that bound a scan of it (require_time_range). */
 const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
 
@@ -479,6 +484,8 @@ export const pipelineDraftMethods = {
     // the start's own hints are for a draft with no steps, so with steps added only the one to build them
     // is still said — and not when this call builds them itself (its `next` says what comes after)
     const { steps: _none, recommendations: _hints, ...head } = resp;
+    // (a build that is its semantic_model step alone makes no table: what it holds is queried by a metrics step)
+    if (layerOnly) Object.assign(head, { materializes_as: materializesAs(ctx.state.draft), materializes_note: LAYER_ONLY_NOTE });
     if (head.warnings && rest.warnings) rest.warnings = [...head.warnings, ...rest.warnings];
     return this._draftThenBuild(ctx, ctx.state.draft, input, { ...head, ...rest, next: added.next || resp.next, ...(input.materialize ? {} : { recommendations: [buildHint] }) });
   },
@@ -636,7 +643,7 @@ export const pipelineDraftMethods = {
     try { cols = this._draftColumns(ctx.state.draft, physSet); } catch (e) { broken = e.message; }
     const resp = {
       context_id: ctx.id, action: 'fork', forked_from: input.context_id, name, source: ctx.state.draft.source,
-      materializes_as: ctx.state.draft.materialized, copied_steps: after, step_index: after,
+      materializes_as: materializesAs(ctx.state.draft), copied_steps: after, step_index: after,
       // the caller has the steps it forked; every one of them with include: ["steps"] (or preview)
       ...(included(input).steps ? { steps: this._draftSteps(ctx.state.draft, physSet) } : { steps_count: after }),
       column_count: cols.length,
@@ -832,7 +839,7 @@ export const pipelineDraftMethods = {
   async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
     const physSet = await this.probe.grounding(draft.source, draft.stages);
-    const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materializes_as: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
+    const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materializes_as: materializesAs(draft), ...(materializesAs(draft) === 'semantic_layer' ? { materializes_note: LAYER_ONLY_NOTE } : {}), dialect, steps: this._draftSteps(draft, physSet) };
     // the semantic_model step: the layer it declares, as it would be written (src/yaml-render.js) — over the
     // source, or beside the SQL of the table it stands on
     const layer = draft.semantic ? await this._semanticLayerOf(ctx, draft, draft.semantic) : null;

@@ -256,3 +256,59 @@ test('a source whose identity has no key column validates whole: every column it
   assert.deepEqual([sm?.checked, sm?.ok, sm?.failed], [true, true, undefined], JSON.stringify(sm));
   assert.ok(checked.ran.metrics.find((m) => m.metric === 'cost').value > 0, 'the metric reads rows in the window');
 });
+
+// A column the schema marks required_filter (a variant of the fixture: acquisition's media_source) is
+// one every question over the model should filter: a metric or a build over its rows that compares it
+// nowhere is warned (and still answered — all of its values together), and one that filters it — a
+// where step, or a case in the measure — is not. The numbers are the fixture's (SEED_DATA §11).
+test('a required_filter column: an answer over all its values is warned, a filtered one is not — 17.50 vs applovin 8.25', opts, async (t) => {
+  if (skip(t)) return;
+  const doc = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+  const acq = doc.models.find((m) => mcp(m).role === 'acquisition');
+  acq.columns.find((c) => c.name === 'media_source').config = { meta: { mcp: { required_filter: true } } };
+  const at = join(tempDir('mcpit-reqfilter'), 'catalog.yml');
+  writeFileSync(at, yaml.dump(doc));
+  const e = settle(new Engine({ catalog: loadCatalog(at, { profilesDir: BASE, projectDir: BASE }), contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('mcpit-reqfilter-ws'), timeSpineDialect: 'duckdb' }), runner: backend }));
+  const warned = (r) => (r.warnings || []).some((w) => w.includes('required_filter') && w.includes("'media_source'"));
+  const applovin = { fn: 'eq', args: [{ column: 'media_source' }, { value: 'applovin' }] };
+  const out = await declare(e, {
+    name: 'reqf',
+    semantic_models: [{ source: 'acquisition', measures: [
+      { name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } },
+      { name: 'applovin_cost', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [applovin], then: { column: 'cost' } }] }] } },
+    ] }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'applovin_cost', type: 'simple', measure: 'applovin_cost' }],
+  });
+  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
+  const all = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
+  assert.equal(all.ok, true, JSON.stringify(all.error));
+  assert.ok(near(num(all.rows[0].cost), 17.5), `cost=${all.rows[0].cost}`);
+  assert.ok(warned(all), `cost folds every media_source: ${JSON.stringify(all.warnings)}`);
+  const own = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['applovin_cost'] }] });
+  assert.ok(near(num(own.rows[0].applovin_cost), 8.25), `applovin_cost=${own.rows[0].applovin_cost}`);
+  assert.ok(!warned(own), `a measure whose case compares the column folds the rows it names: ${JSON.stringify(own.warnings)}`);
+  const one = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost', 'applovin_cost'] }] });
+  assert.equal(one.ok, true, JSON.stringify(one.error));
+  assert.ok(near(num(one.rows[0].cost), 8.25) && near(num(one.rows[0].applovin_cost), 8.25), JSON.stringify(one.rows));
+  assert.ok(!warned(one), JSON.stringify(one.warnings));
+
+  const plain = await declare(e, { name: 'reqf_plain', semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }], metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }] });
+  const unfiltered = await e.query_model({ context_id: plain.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
+  assert.ok(near(num(unfiltered.rows[0].cost), 17.5), `cost=${unfiltered.rows[0].cost}`);
+  assert.ok(warned(unfiltered), `an answer over every media_source is warned: ${JSON.stringify(unfiltered.warnings)}`);
+  const filtered = await e.query_model({ context_id: plain.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost'] }] });
+  assert.ok(near(num(filtered.rows[0].cost), 8.25), `cost=${filtered.rows[0].cost}`);
+  assert.ok(!warned(filtered), JSON.stringify(filtered.warnings));
+
+  // a build over the model's rows: warned without a where on the column, not with one
+  const build = async (name, steps) => {
+    const s = await e.build_model({ action: 'start', name, source: 'acquisition' });
+    await e.build_model({ action: 'add_steps', context_id: s.context_id, steps });
+    return e.build_model({ action: 'materialize', context_id: s.context_id });
+  };
+  const sum = { stage: 'aggregate', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] };
+  const b1 = await build('reqf_all', [sum]);
+  assert.ok(near(num(b1.rows[0].cost), 17.5) && warned(b1), JSON.stringify({ rows: b1.rows, warnings: b1.warnings }));
+  const b2 = await build('reqf_one', [{ stage: 'where', conditions: [applovin] }, sum]);
+  assert.ok(near(num(b2.rows[0].cost), 8.25) && !warned(b2), JSON.stringify({ rows: b2.rows, warnings: b2.warnings }));
+});

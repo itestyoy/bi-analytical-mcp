@@ -14,7 +14,7 @@ export const mcpOf = (node) => node?.config?.meta?.mcp;
 // The keys an MCP block may carry — what this loader reads, on a model and on a column. Any other key
 // is refused at load: read past, a mistyped or retired key would leave its declaration unapplied.
 const MODEL_KEYS = ['role', 'primary_entity', 'known_events', 'measures', 'entities', 'join', 'event_semantics', 'partition_column', 'partition_late_days', 'require_time_range'];
-const COLUMN_KEYS = ['entity', 'is_time', 'granularity', 'is_event_name', 'is_event_data', 'properties', 'property', 'array', 'measure', 'unit', 'dimension', 'index'];
+const COLUMN_KEYS = ['entity', 'is_time', 'granularity', 'is_event_name', 'is_event_data', 'properties', 'property', 'array', 'measure', 'unit', 'dimension', 'index', 'required_filter'];
 
 function refuseUnknownKeys(mcp, allowed, where) {
   const unknown = Object.keys(mcp || {}).filter((k) => !allowed.includes(k));
@@ -119,6 +119,12 @@ export function dbtSchemaToCatalog(doc) {
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.data_type) dataTypes[col.name] = String(col.data_type); // the warehouse type as declared — the semantic layer reads a time column by it
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
+      // meta.mcp.required_filter: true — the authors' word that every question over this model names
+      // which of this column's values it is about (a stream, a test flag): a read that does not is warned
+      if (cm.required_filter !== undefined) {
+        if (cm.required_filter !== true) throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.required_filter must be true (every query over the model should filter this column), or left out`);
+        (m.required_filters ||= []).push(col.name);
+      }
       if (cm.entity) {
         // A column-level entity is the single-column case of the same declaration.
         const ent = normalizeEntityKey(cm.entity.name, { type: cm.entity.type, key: col.name }, { model: model.name });

@@ -210,6 +210,8 @@ export const pipelineMaterializeMethods = {
           pipeline: { source: draft.source, time_range: draft.base ? undefined : (draft.time_range || undefined), stages },
           from_checkpoint: from,
           model_name: modelName,
+          // (what the build declares over its table — a semantic layer's where and measures — filters it too)
+          ...(draft.semantic ? { declared: draft.semantic } : {}),
         }, { taskId: id });
       } finally {
         if (draft.building?.task_id === id) delete draft.building;
@@ -331,7 +333,7 @@ export const pipelineMaterializeMethods = {
       };
       // The same per-stage judgements the incremental builder makes: a dry run is exactly where a
       // silently-wrong stage should be pointed out, BEFORE anything is built.
-      const dryWarnings = this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from });
+      const dryWarnings = this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from, declared: input.declared || null });
       if (dryWarnings.length) resp.warnings = dryWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
@@ -435,7 +437,7 @@ export const pipelineMaterializeMethods = {
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
         // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
         // reaches the caller as plausible numbers.
-        ...this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from }),
+        ...this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from, declared: input.declared || null }),
         ...((this.runner && rows.length === 0 && sampled)
           ? [`0 rows after a sample of about ${Math.round(sampled.share * 100)}% of the rows: it keeps each row at random, so of a few rows it can keep none — leave the sample out on a small table, or check the steps without it.`]
           : []),

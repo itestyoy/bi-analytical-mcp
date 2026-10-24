@@ -194,7 +194,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   Do NOT special-case a measure, a column name or a role in `src/` — if a new source
   needs something, it becomes a schema key that every source can use. Two opt-outs
   go with it: `meta.mcp.dimension: false` (a real column that is not a groupable
-  attribute) and `meta.mcp.index: false` (groupable, not profiled by the value index).
+  attribute) and `meta.mcp.index: false` (groupable, not profiled by the value index). A column may
+  carry `meta.mcp.required_filter: true`: every question over its model says which of its values it is
+  about (a stream, a test flag), and an answer that compares it nowhere — no where step on it, no case
+  in the measures it reads — is warned, never refused (`requiredFilterWarnings`,
+  src/engine/pipeline-warnings.js: a build over the model, a metric folding it).
 - An events source is EXTENDED, never duplicated: a new source reuses the same
   machinery — the catalog accessors (`eventNames/eventProps/eventNameFor/propertyFor`),
   the indexer worklist and the value-index API all take the source as an argument.

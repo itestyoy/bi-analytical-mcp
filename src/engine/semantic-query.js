@@ -1052,6 +1052,15 @@ export const semanticQueryMethods = {
       });
       filterWarnings = this.advisor.guardFilterValues(specs); // throws on a case/typo/absent mismatch
     }
+    // a column the catalog marks required_filter on a model a metric folds, compared neither by the query's
+    // where steps nor by the measures that metric reads (a case in each: the rows it folds)
+    const declaredMeasures = new Map((ctx.state.draft?.semantic?.measures || []).map((me) => [me.name, me]));
+    const unfiltered = new Set(metrics.flatMap((name) => {
+      const def = ctx.state.metrics.find((x) => x.name === name);
+      const reads = [...measureRefs(def, ctx.state.metrics)].map((n) => declaredMeasures.get(n)).filter(Boolean);
+      return this._metricModels(ctx, name).flatMap((src) => this.advisor.requiredFilterWarnings(src, [conditions, reads]));
+    }));
+    filterWarnings.push(...unfiltered);
     // the steps after the query, over its result's columns: checked here, before anything runs (a
     // reference a where there names is the result's column when a group_by item gave it one —
     // metric_time named without a grain, the column of each grain the metrics step groups it by)
@@ -1217,7 +1226,7 @@ export const semanticQueryMethods = {
         recs.push('An average (or a median) of the per-bucket values folds the buckets that have a value: a bucket with no data is left out, not counted as 0 — for an average over every bucket of the window, divide the sum by the number of buckets.');
       }
       if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
-        recs.push('count_distinct is NOT additive across time buckets — a step after the metrics step folds the per-bucket values, and their sum counts a user once per bucket. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+        recs.push('A sum of per-bucket distinct counts counts a user once per bucket it appears in: user-days (as an ARPDAU denominator wants), not the distinct users of the period. For those, query the period without the time grain, or use HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge), which re-aggregate across buckets and segments.');
       }
       // a slowly-changing model's attribute: a user whose version changed inside the window is counted
       // under each version's value, so the groups' distinct counts add up to more than the whole

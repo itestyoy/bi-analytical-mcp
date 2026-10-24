@@ -8,7 +8,7 @@
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef } from '../pipeline.js';
-import { exprCalls, exprColumns, isWindowCall, comparisonOf, eachCondition } from '../pipeline/compute.js';
+import { exprCalls, exprColumns, isWindowCall, comparisonOf, eachCondition, comparedColumns } from '../pipeline/compute.js';
 
 /** The aggregates that count distinct values — not additive across groups a key can fall into twice. */
 const DISTINCT_FNS = new Set(['count_distinct', 'approx_count_distinct', 'hll_init']);
@@ -53,14 +53,33 @@ export class PipelineAdvisor {
    * _buildPipeline is exactly where a silently-wrong join does the most damage, because
    * nobody stepped through it.
    */
-  stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
+  stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false, declared = null } = {}) {
     const draft = { source, stages, timeRange, startsFromTable };
-    return sayOnce(stages.flatMap((st, i) => [
-      ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
-      ...this.pythonPreparationWarnings(st, draft, i),
-      ...this.globalWindowWarnings(st),
-      ...this.offsetMaturityWarnings(st, stages.slice(0, i)),
-    ]));
+    return sayOnce([
+      ...(startsFromTable ? [] : this.requiredFilterWarnings(source, [stages, declared])),
+      ...stages.flatMap((st, i) => [
+        ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
+        ...this.pythonPreparationWarnings(st, draft, i),
+        ...this.globalWindowWarnings(st),
+        ...this.offsetMaturityWarnings(st, stages.slice(0, i)),
+      ]),
+    ]);
+  }
+
+  /**
+   * A COLUMN THE CATALOG MARKS required_filter (a stream, a test flag: meta.mcp.required_filter) that no
+   * condition over `source`'s rows compares — in `declared`, anything that holds conditions (steps,
+   * measures, a query's where steps): its rows then hold every value of it. Said, never refused: a
+   * question may really be about all of them.
+   */
+  requiredFilterWarnings(source, declared) {
+    const required = this.catalog.requiredFilters?.(source) || [];
+    if (!required.length) return [];
+    const compared = comparedColumns(declared);
+    const missing = required.filter((c) => !compared.has(c) && !compared.has(`${source}.${c}`));
+    if (!missing.length) return [];
+    const names = missing.map((c) => `'${c}'`).join(' and ');
+    return [`'${source}' marks ${names} required_filter — every question over it says which value${missing.length > 1 ? 's' : ''} it is about — and no condition here compares ${missing.length > 1 ? 'them' : 'it'}: these rows hold all of ${missing.length > 1 ? 'their' : 'its'} values together (the column's description says what they are). Filter ${missing.length > 1 ? 'each' : 'it'} — a where step, before the metrics step in a metric query, or a case in each measure — or say in the answer why every value belongs. semantic_index({ request: { source: '${source}', column: '${missing[0]}' } }) lists its values.`];
   }
 
   /**
@@ -340,6 +359,10 @@ export class PipelineAdvisor {
     const scopedBundles = new Set((bundleCol ? scopedValues(draft.stages, bundleCol) || [] : []).map(String));
     if (!scopedBundles.size && !scopedEvents.size) return []; // nothing concrete scoped → _eventScopeWarnings covers it
     const fmt = (arr) => arr.slice(0, 4).join(', ') + (arr.length > 4 ? ', …' : '');
+    // a step that names the events itself (a case on the event column, a condition on it) reads the field
+    // where it says: a scoped event the field is empty on is no surprise there — only a field empty on
+    // every scoped one still is
+    const namesEvents = s.includes(`"column":"${evCol}"`);
     const warns = [];
     for (const p of used) {
       if (scopedBundles.size && scopedEvents.size) {
@@ -351,7 +374,7 @@ export class PipelineAdvisor {
         }
         const total = scopedBundles.size * scopedEvents.size;
         if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ request: { source: '${fact}', bundle: '${[...scopedBundles][0]}' } }) or semantic_index({ request: { source: '${fact}', property: '${p}' } }).bundle_coverage / event_coverage.`);
-        else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
+        else if (empty.length && !namesEvents) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
       } else if (scopedBundles.size) {
         const byB = new Map(this.valueIndex.bundleCoverage(fact, p).map((x) => [x.bundle, x]));
         const empty = [...scopedBundles].filter((b) => byB.get(b) && byB.get(b).non_null === 0);
@@ -361,7 +384,7 @@ export class PipelineAdvisor {
         const byE = new Map(this.valueIndex.coverage(fact, p).map((x) => [x.event_name, x]));
         const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
         if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`);
-        else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
+        else if (empty.length && !namesEvents) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
       }
     }
     return warns.slice(0, 3);

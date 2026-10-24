@@ -201,7 +201,6 @@ export const STAGES = {
     keepsSourceRows: true,
     // offered only where some model declares a join contract (and has an attribute to bring)
     available: (catalog) => catalog.joinableModels().length > 0,
-    recommend: () => ['Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.'],
     schema: (catalog) => {
       // ONE CLOSED FORM PER JOINABLE MODEL — a model whose schema declares a join contract
       // (meta.mcp.join, src/catalog/joins.js): `source` pinned, `on` naming exactly the contract's parts
@@ -315,7 +314,6 @@ export const STAGES = {
   },
   aggregate: {
     recommend: (available, p = {}) => [
-      `Aggregated: the output is now group_by keys + measures (${listSome(available)}); add order_by/limit or materialize.`,
       // Comparing two groups? The stats live in a tool — don't hand-roll a t-test: the experiment
       // tool's analyze is a GENERAL two-sample significance test (not only randomized experiments).
       // Said only where the stage computes what a test reads per group (a spread), not after every rollup.

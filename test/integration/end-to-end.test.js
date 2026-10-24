@@ -191,9 +191,9 @@ test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 
   // prefer HLL sketches; the same series read as it is carries no such warning.
   const day = { time: 'metric_time', grain: 'day' };
   const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }] });
-  assert.ok(!byDay.recommendations.some((x) => /not additive/i.test(x)), `a series read as it is: ${JSON.stringify(byDay.recommendations)}`);
+  assert.ok(!byDay.recommendations.some((x) => /once per bucket/i.test(x)), `a series read as it is: ${JSON.stringify(byDay.recommendations)}`);
   const summed = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }, { stage: 'aggregate', measures: [{ name: 'payer_days', expr: { fn: 'sum', args: [{ metric: 'payers' }] } }] }] });
-  assert.ok(summed.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time refolded should warn + suggest HLL: ${JSON.stringify(summed.recommendations)}`);
+  assert.ok(summed.recommendations.some((x) => /once per bucket/i.test(x) && /HLL/i.test(x)), `distinct-by-time refolded should warn + suggest HLL: ${JSON.stringify(summed.recommendations)}`);
 });
 
 test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {

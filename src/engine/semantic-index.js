@@ -219,6 +219,7 @@ export const semanticIndexMethods = {
     // compute/group_by/order_by/match_recognize). `time` above is the default order axis.
     // It is silently grounded to the physical table below — only real columns appear.
     out.columns = c.modelColumns(k);
+    if (c.requiredFilters(k).length) out.required_filters = c.requiredFilters(k);
     const apps = c.isFact(k) && c.bundleColumn(k) ? this.valueIndex.bundles(k) : []; // the apps seen in THIS source, once
     if (c.isFact(k)) {
       out.kind = 'events_fact';
@@ -752,6 +753,11 @@ export const semanticIndexMethods = {
     // Each events source lists its OWN event names — they are never merged into one list,
     // because two sources may legitimately carry the same event name.
     event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
+    // the columns a model asks every question to filter (meta.mcp.required_filter): a stream, a test flag
+    ...((() => {
+      const req = c.modelKeys().filter((k) => c.requiredFilters(k).length);
+      return req.length ? { required_filters: Object.fromEntries(req.map((k) => [k, c.requiredFilters(k)])), required_filters_note: 'Every question over one of these models says which value of each listed column it is about (its description says what the values are): a where step on it, or a case in each measure. An answer that does not is warned.' } : {};
+    })()),
     // Every column a metric query can group/filter by, addressed by where it lives — the ref
     // { source, column, via? } — and the join is resolved from the schema, never spelled.
     // (a validity window's bounds are how a version is matched, not an attribute to cut by)

@@ -27,11 +27,11 @@ export { MAX_WAIT_SECONDS, transportSchema };
 /**
  * THE INPUT CONTRACTS OF THE ENGINE'S OWN METHODS — not tools. A tool hands its input to one of these
  * methods, and the method holds it to the exact contract named `<tool>.<mode>` below — experiment's
- * analyze / check_split / plan, delete_context's three targets, context's describe, a pipeline built
+ * analyze / check_split / plan, context's delete targets and describe, a pipeline built
  * in one call. They are validated, never listed or called by a client: every tool is listed and called
  * by its one name.
  */
-export const METHOD_CONTRACTS = new Set(['build_model.pipeline', 'delete_context.context', 'delete_context.pipeline_model', 'delete_context.semantic_model', 'context.describe', 'experiment.analyze', 'experiment.check_split', 'experiment.plan']);
+export const METHOD_CONTRACTS = new Set(['build_model.pipeline', 'context.delete', 'context.delete_pipeline_model', 'context.delete_semantic_model', 'context.describe', 'experiment.analyze', 'experiment.check_split', 'experiment.plan']);
 
 /**
  * WHAT EACH TOOL'S DEFINITIONS HOLD — the places of the tool, by kind: where its expressions stand
@@ -57,7 +57,7 @@ export const TOOL_PLACES = {
 };
 
 /**
- * `deletes`: the forms the features this deployment runs add to delete_context (src/features.js
+ * `deletes`: the forms the features this deployment runs add to the context delete (src/features.js
  * featureDeletes) — each a kind of build a feature's context holds; none when no feature is on.
  */
 export function buildSchemas(catalog, { project = null, projectContexts = [], deletes = [] } = {}) {
@@ -196,11 +196,9 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     anyOf: queryModes({ context_id: queryContextId, fields: queryFields }, batchOf({ type: 'object', additionalProperties: false, properties: queryFields }, 'queries'), readPaging),
   };
 
-  // context reads (list, describe), delete_context removes (the context, its pipeline model, or a
-  // semantic model's additions). Strict per-action fields.
-  // THE CONTEXTS, READ — list them, or describe one. Nothing here changes anything, so the tool is
-  // read-only as a whole; removing what a context holds is delete_context, a tool of its own, because
-  // a client asks before a destructive call and should not have to ask before a listing.
+  // THE CONTEXTS — list them, describe one, or delete one or part of what it holds (the context, its
+  // pipeline model, a semantic model's additions, or a kind of build a feature's context holds).
+  // Strict per-action fields.
   // describe: one context in depth — and, where it holds a semantic layer, that layer as dbt parsed it
   // (one of the project's own semantic models, or a build's): its semantic models, each metric's
   // definition and its group_by, the declaration's own mistakes; validate checks it on the warehouse
@@ -217,18 +215,6 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     form({ title: 'describe a context', required: ['action', 'context_id'], properties: pick(describeFields, ['action', 'context_id', 'semantic_model', 'metric', 'validate']) }),
     form({ title: 'validate a context over a window', required: ['action', 'context_id', 'validate', 'time_range'], properties: { ...pick(describeFields, ['action', 'context_id', 'semantic_model', 'metric', 'time_range']), validate: { const: true, description: describeFields.validate.description } } }),
   ];
-  const contextTool = {
-    type: 'object',
-    description: 'list | describe the contexts.',
-    anyOf: [
-      form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: 'list: most recently used first.', properties: {
-        limit: { type: 'integer', minimum: 1, maximum: 100, description: `Default ${CONTEXT_PAGE}.` },
-        offset: { type: 'integer', minimum: 0 },
-        search: { type: 'string', minLength: 1 },
-      } }),
-      ...describeForms,
-    ],
-  };
   // WHAT A CONTEXT HOLDS, REMOVED — the whole context, its pipeline model, or one model's task additions.
   const deleteId = { type: 'string', pattern: CTX, description: 'A context a build returned.' };
   const deleteForms = {
@@ -237,17 +223,24 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     semantic_model: form({ title: 'one model of the semantic layer', tag: ['what', 'semantic_model'], tagDescription: 'semantic_model: one model of the layer.', required: ['context_id', 'semantic_model'], properties: { context_id: deleteId, semantic_model: { type: 'string', enum: modelKeys }, cascade: { type: 'boolean', description: 'Also remove the metrics that depend on it.' } } }),
   };
   // …and a kind of build a feature's context holds, in the form the feature writes for it (src/features.js)
-  for (const d of deletes) if (deleteForms[d.what]) throw new Error(`delete_context: a feature's form '${d.what}' collides with the core's`);
-  const deleteContext = {
+  for (const d of deletes) if (deleteForms[d.what]) throw new Error(`context delete: a feature's form '${d.what}' collides with the core's`);
+  const contextTool = {
     type: 'object',
-    description: 'Remove a context, or part of what it holds. It cannot be undone.',
-    anyOf: [...Object.values(deleteForms), ...deletes.map((d) => d.form)],
+    description: 'list | describe | delete the contexts.',
+    anyOf: [
+      form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: 'list: most recently used first.', properties: {
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: `Default ${CONTEXT_PAGE}.` },
+        offset: { type: 'integer', minimum: 0 },
+        search: { type: 'string', minLength: 1 },
+      } }),
+      ...describeForms,
+      ...[...Object.values(deleteForms), ...deletes.map((d) => d.form)].map(asDelete),
+    ],
   };
 
   const tools = {
     build_model: withStageDefs(buildModel, catalog, project, TOOL_PLACES.build_model),
     context: contextTool,
-    delete_context: deleteContext,
     query_model: query,
     display_model_result: {
       type: 'object', additionalProperties: false, required: ['task_id'],
@@ -269,14 +262,6 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
       },
     },
     semantic_index: semanticIndexSchema(catalog, { project, places: TOOL_PLACES.semantic_index.ref }),
-    time: {
-      type: 'object', additionalProperties: false, required: ['seconds'],
-      description: `Wait for \`seconds\` (at most ${MAX_WAIT_SECONDS}), then return.`,
-      properties: {
-        seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `Seconds to wait, at most ${MAX_WAIT_SECONDS}.` },
-        reason: { type: 'string', description: 'Echoed back.' },
-      },
-    },
     explore_errors: (() => {
       const errorFields = {
         id: { type: 'integer', minimum: 1, description: 'One error in full, with what reproduces it.' },
@@ -312,9 +297,9 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     'build_model.pipeline': withStageDefs(registerModel, catalog, project, TOOL_PLACES.build_model),
     // what the tool's form takes, its tag left out — the method is handed the form's fields, so a field
     // added to the form reaches the method's contract with it
-    'delete_context.context': untagged(deleteForms.context, 'what', 'Tear down an entire isolated context (delete its files + artifacts).'),
-    'delete_context.pipeline_model': untagged(deleteForms.pipeline_model, 'what', 'Delete the pipeline model of a context (remove its view + semantic model) and re-parse.'),
-    'delete_context.semantic_model': untagged(deleteForms.semantic_model, 'what', 'Remove one model from a context\'s semantic layer.'),
+    'context.delete': untagged(deleteForms.context, 'what', 'Tear down an entire isolated context (delete its files + artifacts).'),
+    'context.delete_pipeline_model': untagged(deleteForms.pipeline_model, 'what', 'Delete the pipeline model of a context (remove its view + semantic model) and re-parse.'),
+    'context.delete_semantic_model': untagged(deleteForms.semantic_model, 'what', 'Remove one model from a context\'s semantic layer.'),
     'context.describe': { type: 'object', anyOf: describeForms.map((f) => ({ title: f.title, ...untagged(f, 'action', f.title) })) },
     'experiment.analyze': analyzeContract(),
     'experiment.check_split': checkSplitContract(),
@@ -327,6 +312,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // leave: identical subtrees become one `$defs` entry the sites point at. Authoring is unchanged,
   // validation is unchanged (ajv resolves the ref), and the client is handed each list once.
   return Object.fromEntries(Object.entries({ ...tools, ...contracts }).map(([name, schema]) => [name, transportSchema(schema)]));
+}
+
+/** A delete form of the context tool: the form a target takes, under action: "delete". */
+function asDelete(f) {
+  return { ...f, title: `delete ${f.title}`, required: ['action', ...(f.required || [])], properties: { action: { const: 'delete' }, ...f.properties } };
 }
 
 /** A form of a tool without its tag — the contract of the method that form hands its fields to. */

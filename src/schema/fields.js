@@ -177,10 +177,10 @@ export const SEMANTIC_MODEL_STEP = {
   },
 };
 
-// The ceiling on the pacing timer (`time`). A wait happens INSIDE a tool call, so it is bounded by
+// The ceiling on a read's wait ({ task_ids }). A wait happens INSIDE a tool call, so it is bounded by
 // the same thing a build's grace is bounded by: the client's own timeout, which this server neither
-// knows nor can raise. Asking for more than this is refused by the schema (the timer's `seconds` and a
-// read's `wait_seconds` alike), so a wait is never cut short behind the caller's back.
+// knows nor can raise. Asking for more than this is refused by the schema (a read's `wait_seconds`),
+// so a wait is never cut short behind the caller's back.
 export const MAX_WAIT_SECONDS = 30;
 /** How many rows a read of a task ({ task_ids }) hands back unless it asks for another number: its offset and limit are row numbers of the task's result, the rest is a next_offset away. */
 export const READ_PAGE = 50;

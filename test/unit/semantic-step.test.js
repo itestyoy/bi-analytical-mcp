@@ -149,20 +149,20 @@ test('a pivot value without a name becomes the column <on>_<value>', async () =>
   assert.deepEqual(out.step_effects[0].columns_added.map((c) => c.name), ['event_name_tutorial', 'event_name_level_started', 'shop']);
 });
 
-// a layer not built yet is its step: delete_context removes a model from the step as from a built layer —
+// a layer not built yet is its step: a context delete removes a model from the step as from a built layer —
 // its measures (`source`) and its join, and with cascade the metrics that read them
-test('delete_context semantic_model on a layer not built yet edits its step', async () => {
+test('a context delete of a semantic_model on a layer not built yet edits its step', async () => {
   const e = engine();
   const SPEND = { name: 'spend', source: 'acquisition', expr: { fn: 'sum', args: [{ column: 'cost' }] } };
   // (and a metric on the governed measure the catalog fixes on acquisition: it goes with the model too)
   const metrics = [...N, { name: 'spend', type: 'simple', measure: 'spend' }, { name: 'per_row', type: 'derived', expr: { fn: 'div', args: [{ metric: 'spend' }, { metric: 'rows' }] } }, { name: 'gov', type: 'simple', measure: 'total_spend' }];
   const s = await start(e, [step({ measures: [COUNT, SPEND], metrics, join: [USERS] })]);
-  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'acquisition' }), /metrics depend on this model's measures: spend, per_row, gov — add cascade: true/);
-  const out = await e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'acquisition', cascade: true });
+  await assert.rejects(() => e.context({ action: 'delete', what: 'semantic_model', context_id: s.context_id, semantic_model: 'acquisition' }), /metrics depend on this model's measures: spend, per_row, gov — add cascade: true/);
+  const out = await e.context({ action: 'delete', what: 'semantic_model', context_id: s.context_id, semantic_model: 'acquisition', cascade: true });
   assert.deepEqual([out.removed, out.metrics_remaining, out.metrics_removed], [true, ['rows'], ['spend', 'per_row', 'gov']]);
-  const joined = await e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'users' });
+  const joined = await e.context({ action: 'delete', what: 'semantic_model', context_id: s.context_id, semantic_model: 'users' });
   assert.deepEqual([joined.removed, joined.metrics_remaining], [true, ['rows']]);
   const st = e.ctxs.get(s.context_id).state.draft.semantic;
   assert.deepEqual([st.measures.map((m) => m.name), st.join], [['rows'], undefined]);
-  assert.equal((await e.delete_context({ what: 'semantic_model', context_id: s.context_id, semantic_model: 'crashlytics' })).removed, false);
+  assert.equal((await e.context({ action: 'delete', what: 'semantic_model', context_id: s.context_id, semantic_model: 'crashlytics' })).removed, false);
 });

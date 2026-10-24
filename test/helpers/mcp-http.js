@@ -2,7 +2,7 @@
 // serves it (src/server.js createApp: the SDK v2 handler), reached the way a client reaches it:
 // through the OFFICIAL client (@modelcontextprotocol/client) in either protocol revision, or with
 // raw requests where a test is about the wire itself. No warehouse — the tools these tests call
-// (time, experiment, semantic_index) compute in-process.
+// (experiment, semantic_index, the test feature's wait) compute in-process.
 
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -24,12 +24,13 @@ export const SKILLS_CAPS = { extensions: { 'io.modelcontextprotocol/skills': {} 
 /** A client that declares it renders MCP Apps (the extension, with the view's MIME type). */
 export const APPS_CAPS = { extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } };
 
-export function makeEngine({ recipes = true } = {}) {
+export function makeEngine({ recipes = true, features = [] } = {}) {
   const catalog = loadCatalog(CATALOG, {});
   return new Engine({ resultCards: true,
     catalog,
     recipes: recipes ? loadRecipes(assetPath('systemRecipes'), '', { dialect: catalog.dialect, python: false }) : undefined,
     contextManager: new ContextManager({ workspaceRoot: tempDir('mcp-http') }),
+    features,
   });
 }
 

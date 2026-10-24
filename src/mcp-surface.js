@@ -79,7 +79,7 @@ WHERE THE DETAIL IS
 - semantic_index({ request: { recipe: "<id>" } }): one warehouse-proven payload in full; the overview lists the ids, and a real question usually combines two or three.
 - semantic_index({ request: { guide: "python" } }): the frame rules for a python stage, where the overview's python_models says it is available; the SQL stages before it prepare the table it reads.
 - memory: record a vague phrase you tracked down to a real field, or a gotcha, linked to the catalog entities it concerns; it resurfaces on their semantic_index views and in semantic_index({ request: { search } }).
-- context({ request: { action } }): list or describe a workspace (context_id) and the models in it; delete_context removes one.`;
+- context({ request: { action } }): list, describe or delete a workspace (context_id) and the models in it.`;
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).

@@ -1,6 +1,6 @@
 // WHAT A TOOL ANSWERS, WHERE THE ANSWER HAS ONE SHAPE — the tool's `outputSchema` (MCP: a tool that
 // declares one carries its answer as `structuredContent` too, conforming to it). Declared only for the
-// tools whose answer is the same few fields every time and that draw nothing: a timer, the contexts,
+// tools whose answer is the same few fields every time and that draw nothing: the contexts,
 // the memory, the error log, and a build that only starts a task. A tool that answers with the rows of
 // a result (the query tools, a pipeline build) declares none: the rows would be carried twice — once in
 // the text the model reads, once in structuredContent — and their columns are the query's own. A tool
@@ -22,18 +22,8 @@ const list = (items = {}) => ({ type: 'array', items });
 const shape = (description, required, properties) => ({ type: 'object', description, required, properties });
 
 export const OUTPUTS = {
-  time: shape('How long the timer waited.', ['ok', 'waited_seconds', 'cap_seconds', 'started_at', 'finished_at'], {
-    ok: { const: true },
-    waited_seconds: num,
-    cap_seconds: num,
-    cancelled: bool,
-    started_at: str,
-    finished_at: str,
-    reason: str,
-  }),
-
-  // list: { contexts }; describe: one context in depth — one object, no union: what each mode answers is optional
-  context: shape('A page of the contexts (list: `contexts`, `total`, `next_offset`), or one in depth (describe: `context_id` and what it holds).', [], {
+  // list: { contexts }; describe: one context in depth; delete: what was removed — one object, no union: what each mode answers is optional
+  context: shape('A page of the contexts (list: `contexts`, `total`, `next_offset`), one in depth (describe: `context_id` and what it holds), or what was removed (delete: `removed`).', [], {
     contexts: list(obj),
     total: num,
     offset: num,
@@ -51,11 +41,7 @@ export const OUTPUTS = {
     metrics: list(),
     groupable: list(),
     files: list(str),
-  }),
-
-  delete_context: shape('What was removed.', ['removed'], {
     removed: bool,
-    context_id: str,
     reason: str,
     model: str,
     semantic_model: str,

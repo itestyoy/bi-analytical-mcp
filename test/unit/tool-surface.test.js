@@ -92,8 +92,8 @@ test('experiment tool: plan / check_split / analyze dispatch + strict fields', (
   );
 });
 
-// context reads the contexts; delete_context removes them — each validated strictly.
-test('context lists and describes, delete_context removes — and a read never removes', async () => {
+// context lists, describes and deletes the contexts — each action validated strictly.
+test('context lists, describes and deletes — and a read never removes', async () => {
   const e = engine();
   // start a draft to create a context.
   const s = await e.build_model({ action: 'start', name: 'ctxtool', source: 'events' });
@@ -105,13 +105,12 @@ test('context lists and describes, delete_context removes — and a read never r
   await assert.rejects(() => e.context({ action: 'describe' }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'list', context_id: s.context_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
-  // context only reads: an action that would remove is not one of its actions
-  await assert.rejects(() => e.context({ action: 'drop', context_id: s.context_id }), /must be one of: list, describe/);
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.context_id }), /must be one of: list, describe, delete/);
   assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.context_id), 'a read removed nothing');
-  // delete_context: semantic_model needs its model; context forbids the model's fields
-  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.context_id }), /invalid input/);
-  await assert.rejects(() => e.delete_context({ context_id: s.context_id, cascade: true }), /invalid input/);
-  await e.delete_context({ context_id: s.context_id });
+  // delete: semantic_model needs its model; context forbids the model's fields
+  await assert.rejects(() => e.context({ action: 'delete', what: 'semantic_model', context_id: s.context_id }), /invalid input/);
+  await assert.rejects(() => e.context({ action: 'delete', context_id: s.context_id, cascade: true }), /invalid input/);
+  await e.context({ action: 'delete', context_id: s.context_id });
   const after = await e.context({ action: 'list' });
   assert.ok(!after.contexts.some((c) => c.context_id === s.context_id), 'dropped context is gone');
 });

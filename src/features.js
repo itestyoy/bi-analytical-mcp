@@ -32,10 +32,10 @@
 //   overview(engine) → what semantic_index's overview says about it
 //   describeContext(engine, ctx) → what a context of this feature holds, for context({ action: describe }),
 //              with `brief` for its line in the listing — null for a context that is not the feature's
-//   deletes: { <what>: { form(catalog) → the closed form delete_context takes for it, `what` pinned to
+//   deletes: { <what>: { form(catalog) → the closed form a context delete takes for it, `what` pinned to
 //              <what> (src/schema-kit.js form, tag ['what', <what>]), run(engine, input) → what was removed,
-//              answered as delete_context answers ({ removed, … }), `input` the form's fields without
-//              `what` } } — a kind of build a context of the feature holds, removed by delete_context
+//              answered as a context delete answers ({ removed, … }), `input` the form's fields without
+//              `what` } } — a kind of build a context of the feature holds, removed by a context delete
 //              as the core's are: one form of its union each, there only while the feature is on
 
 import { retentioneeringDefinition } from './retentioneering/index.js';
@@ -77,17 +77,17 @@ export function resolveFeatures({ env = process.env, catalog, profilesDir, baseP
 }
 
 /**
- * What the resolved features add to delete_context — each a kind of build a feature's context holds:
- * { what, form, run }, `form` one closed form of delete_context's union with `what` pinned to its key
+ * What the resolved features add to the context delete — each a kind of build a feature's context holds:
+ * { what, form, run }, `form` one closed form of the context delete union with `what` pinned to its key
  * (checked here: a form that does not say which it is would overlap another, a defect found at start).
  */
 export function featureDeletes(features = [], catalog = null) {
   return features.flatMap((feature) => Object.entries(feature.deletes || {}).map(([what, d]) => {
     const form = d.form(catalog);
     if (form?.properties?.what?.const !== what || !(form.required || []).includes('what') || form.additionalProperties !== false) {
-      throw new Error(`feature '${feature.id}': its delete_context form '${what}' must be a closed form that requires what: "${what}"`);
+      throw new Error(`feature '${feature.id}': its context delete form '${what}' must be a closed form that requires what: "${what}"`);
     }
-    if (typeof d.run !== 'function') throw new Error(`feature '${feature.id}': its delete_context form '${what}' has no run(engine, input)`);
+    if (typeof d.run !== 'function') throw new Error(`feature '${feature.id}': its context delete form '${what}' has no run(engine, input)`);
     return { what, form, run: d.run };
   }));
 }

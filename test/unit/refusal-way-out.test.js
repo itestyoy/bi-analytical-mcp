@@ -41,7 +41,7 @@ test('an id that names no context says how to list those that exist', async () =
     engine.query_model({ context_id: 'nope12345678', steps: [{ stage: 'limit', limit: 1 }] }),
     /unknown context_id: nope12345678\. No context has that id .*context\(\{ request: \{ action: 'list' \} \}\)/,
   );
-  const r = await engine.delete_context({ context_id: 'zzzzzzzzzzzz' });
+  const r = await engine.context({ action: 'delete', context_id: 'zzzzzzzzzzzz' });
   assert.equal(r.removed, false);
   assert.match(r.reason, /no context has this id/);
 });

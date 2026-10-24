@@ -65,7 +65,7 @@ test('a batch of queries with one bad item is refused at that item, not as a sin
 
 test('a field only one form takes, with a wrong value, is refused as that form, not as unknown to the default one', () => {
   const e = engine();
-  const msg = refusal(e, 'delete_context', { context_id: 'abc123', semantic_model: 12345 });
+  const msg = refusal(e, 'context', { action: 'delete', context_id: 'abc123', semantic_model: 12345 });
   assert.match(msg, /`semantic_model` must be string/);
   assert.match(msg, /missing required property 'what'/);
   assert.doesNotMatch(msg, /unexpected property 'semantic_model'/);

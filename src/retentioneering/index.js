@@ -121,7 +121,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
         },
       },
     },
-    // what a path-analysis context holds besides itself, removed by delete_context in this form (src/features.js)
+    // what a path-analysis context holds besides itself, removed by a context delete in this form (src/features.js)
     deletes: {
       eventstream: { form: () => deleteSchema(), run: (engine, input) => deleteEventstream(engine, feature, input) },
     },
@@ -176,7 +176,7 @@ function describePathContext(ctx) {
     ...(state.description ? { description: state.description } : {}),
     eventstreams,
     brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, ...(e.description ? { description: e.description } : {}), source: e.source, steps_count: e.steps.length, materialized_through: e.materialized_through })) },
-    continue_with: `${BUILD}({ request: { action: 'preview' | 'add_steps' | 'materialize' | 'fork', context_id: '${ctx.id}', eventstream } }) shapes an eventstream; ${QUERY}({ request: { context_id: '${ctx.id}', eventstream, analyses } }) runs analyses over it; delete_context({ request: { what: 'eventstream', context_id: '${ctx.id}', eventstream } }) removes one.`,
+    continue_with: `${BUILD}({ request: { action: 'preview' | 'add_steps' | 'materialize' | 'fork', context_id: '${ctx.id}', eventstream } }) shapes an eventstream; ${QUERY}({ request: { context_id: '${ctx.id}', eventstream, analyses } }) runs analyses over it; context({ request: { action: 'delete', what: 'eventstream', context_id: '${ctx.id}', eventstream } }) removes one.`,
   };
 }
 

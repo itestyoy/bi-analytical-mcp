@@ -85,21 +85,11 @@ export const CORE_TOOLS = [
   defineTool({
     name: 'context',
     output: OUTPUTS.context,
-    title: 'Read Contexts',
-    description: 'Read the contexts build_model creates: action:"list" — a page of them, most recent first (offset, search); action:"describe" — one context: its steps, tasks and, where it holds a semantic layer, that layer as dbt parsed it (status, issues, semantic models, each metric with its meta and its group_by as query_model takes it). Use it before querying a metric you do not know; metric / semantic_model narrow it. validate: true checks the layer on the warehouse instead (a task, read with query_model). To remove something, use delete_context.',
-    // list / describe read the contexts (validate starts a task that compiles and runs metrics, writing
-    // nothing); removing is delete_context
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    run: (engine, input) => engine.context(input),
-  }),
-  defineTool({
-    name: 'delete_context',
-    output: OUTPUTS.delete_context,
-    title: 'Delete Context',
-    description: 'Remove a context build_model created, or part of it: what:"context" (default) the whole context; what:"pipeline_model" its pipeline model; what:"semantic_model" one model\'s additions (cascade also removes the metrics on them). Cannot be undone. A context another draft reads from is kept unless force is set. The dbt project\'s own semantic models cannot be removed.',
-    // removes a context or what it holds: done once, then there is nothing left to remove
+    title: 'Manage Contexts',
+    description: 'The contexts build_model creates: action:"list" — a page of them, most recent first (offset, search); action:"describe" — one context: its steps, tasks and, where it holds a semantic layer, that layer as dbt parsed it (status, issues, semantic models, each metric with its meta and its group_by as query_model takes it). Use it before querying a metric you do not know; metric / semantic_model narrow it. validate: true checks the layer on the warehouse instead (a task, read with query_model). action:"delete" removes a context (what:"context", the default), its pipeline model (what:"pipeline_model") or one model\'s additions (what:"semantic_model", cascade also removes the metrics on them); it cannot be undone, a context another draft reads from is kept unless force is set, and the dbt project\'s own semantic models cannot be removed.',
+    // list / describe read; delete removes a context or what it holds — done once, then there is nothing left to remove
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    run: (engine, input) => engine.delete_context(input),
+    run: (engine, input) => engine.context(input),
   }),
   defineTool({
     name: 'memory',
@@ -127,14 +117,6 @@ export const CORE_TOOLS = [
     // reads the error log; writes nothing
     annotations: { readOnlyHint: true, idempotentHint: true },
     run: (engine, input) => engine.explore_errors(input),
-  }),
-  defineTool({
-    name: 'time',
-    output: OUTPUTS.time,
-    title: 'Timer',
-    description: `Wait for \`seconds\` (at most ${MAX_WAIT_SECONDS}) and return; it touches no data. To wait for a task, read it with query_model({ request: { task_ids } }) instead.`,
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    run: (engine, input) => engine.time(input),
   }),
 ];
 

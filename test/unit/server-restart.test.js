@@ -13,17 +13,20 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { makeEngine } from '../helpers/mcp-http.js';
+import { waitFeature } from '../helpers/wait-feature.js';
 import { createApp } from '../../src/server.js';
 import { createServices } from '../../src/mcp-surface.js';
 
 async function serveOn(port) {
-  const engine = makeEngine();
+  const wait = waitFeature();
+  const engine = makeEngine({ features: [wait] });
   const services = createServices(engine);
   const app = createApp(engine, { services });
   const server = createServer(app);
   await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
   return {
     engine,
+    wait,
     port: server.address().port,
     async stop() { await app.locals.close(); await new Promise((r) => { server.closeAllConnections?.(); server.close(r); }); services.close(); engine.close?.(); },
   };
@@ -34,7 +37,7 @@ test('a client connected before a restart keeps working after it, with no new ha
   const url = new URL(`http://127.0.0.1:${first.port}/mcp`);
   const client = new Client({ name: 'survivor', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(url));
-  assert.equal(JSON.parse((await client.callTool({ name: 'time', arguments: { request: { seconds: 0 } } })).content[0].text).ok, true);
+  assert.equal(JSON.parse((await client.callTool({ name: 'wait', arguments: { request: { seconds: 0 } } })).content[0].text).waited_seconds, 0);
 
   await first.stop(); // the deploy
   // (the old process closed its sockets; give the client's connection pool the moment it takes to
@@ -81,17 +84,14 @@ test('in a 2025 session the client\'s cancel stops the call, and no extension is
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${srv.port}/mcp`)));
     assert.ok(!/RESULT CARDS/.test(client.getInstructions() || ''), 'the Apps extension is 2026-07-28\'s');
-    const real = srv.engine.time.bind(srv.engine);
-    let outcome;
-    srv.engine.time = async (input) => { outcome = await real(input); return outcome; };
     const ctl = new AbortController();
-    const call = client.callTool({ name: 'time', arguments: { request: { seconds: 6 } } }, { signal: ctl.signal }).catch(() => null);
+    const call = client.callTool({ name: 'wait', arguments: { request: { seconds: 6 } } }, { signal: ctl.signal }).catch(() => null);
     await new Promise((r) => setTimeout(r, 300));
     ctl.abort();
     await call;
     const t0 = Date.now();
-    while (!outcome && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
-    assert.equal(outcome?.cancelled, true, 'notifications/cancelled reached the call in its session');
-    assert.ok(outcome.waited_seconds < 5, `the work stopped (waited ${outcome.waited_seconds}s)`);
+    while (!srv.wait.last && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(srv.wait.last?.cancelled, true, 'notifications/cancelled reached the call in its session');
+    assert.ok(srv.wait.last.waited_seconds < 5, `the work stopped (waited ${srv.wait.last.waited_seconds}s)`);
   } finally { await client.close().catch(() => {}); await srv.stop(); }
 });

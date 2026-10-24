@@ -616,29 +616,29 @@ test('a read of several path-analysis tasks says how long it waited for them', a
   e.close();
 });
 
-// delete_context has one form per kind of build a context holds: the feature contributes the eventstream's
+// the context delete has one form per kind of build a context holds: the feature contributes the eventstream's
 // through the feature registry (src/features.js deletes) — off, the form does not exist. It removes the
 // eventstream's name and nothing else of the context; its tables stay until the context is dropped.
 // Context lifecycle; no warehouse.
-test('delete_context removes one eventstream in the feature\'s own form, which exists only with the feature on', async () => {
+test('a context delete removes one eventstream in the feature\'s own form, which exists only with the feature on', async () => {
   const e = on();
   const { contextFor } = await import('../../src/retentioneering/contexts.js');
   const ctx = contextFor(e, {});
   const es = (name) => ({ spec: { name, source: 'events' }, base: { model: `rete_${name}`, shape: { events: ['a'], paths: ['user_id'], segments: {}, columns: [] } }, steps: [], checkpoint: null });
   ctx.state.retentioneering.eventstreams = { es: es('es'), other: es('other') };
-  const out = await e.delete_context({ what: 'eventstream', context_id: ctx.id, eventstream: 'es' });
+  const out = await e.context({ action: 'delete', what: 'eventstream', context_id: ctx.id, eventstream: 'es' });
   assert.deepEqual([out.removed, out.context_id, out.eventstream], [true, ctx.id, 'es']);
   assert.deepEqual(Object.keys(ctx.state.retentioneering.eventstreams), ['other'], 'the others are kept');
   assert.ok(e.ctxs.get(ctx.id), 'and so is the context');
-  await assert.rejects(Promise.resolve().then(() => e.delete_context({ what: 'eventstream', context_id: ctx.id, eventstream: 'nope' })), (err) => err.field === 'eventstream' && /no eventstream 'nope'.*it holds other/.test(err.message));
-  await assert.rejects(Promise.resolve().then(() => e.delete_context({ what: 'eventstream', context_id: ctx.id })), /invalid input: .*missing required property 'eventstream'/);
+  await assert.rejects(Promise.resolve().then(() => e.context({ action: 'delete', what: 'eventstream', context_id: ctx.id, eventstream: 'nope' })), (err) => err.field === 'eventstream' && /no eventstream 'nope'.*it holds other/.test(err.message));
+  await assert.rejects(Promise.resolve().then(() => e.context({ action: 'delete', what: 'eventstream', context_id: ctx.id })), /invalid input: .*missing required property 'eventstream'/);
   const plain = (await e.build_model({ action: 'start', name: 'plain', source: 'events' })).context_id;
-  await assert.rejects(Promise.resolve().then(() => e.delete_context({ what: 'eventstream', context_id: plain, eventstream: 'es' })), (err) => err.field === 'context_id' && /is not a path-analysis context/.test(err.message));
-  assert.equal(e.schemas.delete_context.anyOf.map((b) => deref(e.schemas.delete_context, b)).filter((f) => pinned(e.schemas.delete_context, f, 'what').includes('eventstream')).length, 1);
+  await assert.rejects(Promise.resolve().then(() => e.context({ action: 'delete', what: 'eventstream', context_id: plain, eventstream: 'es' })), (err) => err.field === 'context_id' && /is not a path-analysis context/.test(err.message));
+  assert.equal(e.schemas.context.anyOf.map((b) => deref(e.schemas.context, b)).filter((f) => pinned(e.schemas.context, f, 'what').includes('eventstream')).length, 1);
   // off: no such form, and `what` is one of the core's
   const offEngine = engine();
-  assert.ok(!offEngine.schemas.delete_context.anyOf.map((b) => deref(offEngine.schemas.delete_context, b)).some((f) => pinned(offEngine.schemas.delete_context, f, 'what').includes('eventstream')));
-  await assert.rejects(Promise.resolve().then(() => offEngine.delete_context({ what: 'eventstream', context_id: ctx.id, eventstream: 'other' })), /`what` must be one of: context, pipeline_model, semantic_model/);
+  assert.ok(!offEngine.schemas.context.anyOf.map((b) => deref(offEngine.schemas.context, b)).some((f) => pinned(offEngine.schemas.context, f, 'what').includes('eventstream')));
+  await assert.rejects(Promise.resolve().then(() => offEngine.context({ action: 'delete', what: 'eventstream', context_id: ctx.id, eventstream: 'other' })), /`what` must be one of: context, pipeline_model, semantic_model/);
   e.close(); offEngine.close?.();
 });
 

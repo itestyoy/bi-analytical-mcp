@@ -8,12 +8,13 @@
 // (a query tool with { task_id }, display_model_result) is followed to its end, so the protocol task's result is the
 // rows, not "still running"; a call that STARTS work returns its task_id at once, as always.
 //
-// The long call is the `time` tool (a pure timer, cancellable); the followed task is a stub engine
+// The long call is the test feature's `wait` tool (test/helpers/wait-feature.js, cancellable); the followed task is a stub engine
 // whose task is done after two waits. The data assertions are on what comes back.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startServer, TASK_CAPS } from '../helpers/mcp-http.js';
+import { startServer, makeEngine, TASK_CAPS } from '../helpers/mcp-http.js';
+import { waitFeature } from '../helpers/wait-feature.js';
 import { runToCompletion } from '../../src/mcp-surface.js';
 import { TaskRunner } from '../../src/task-runner.js';
 
@@ -30,12 +31,13 @@ async function pollUntil(s, taskId, done) {
 }
 
 test('a quick call answers inline even with tasks declared; a long one becomes a task and completes with its result', async () => {
-  const s = await startServer();
+  const wait = waitFeature();
+  const s = await startServer({ engine: makeEngine({ features: [wait] }) });
   try {
-    const quick = await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 0 } } }, { caps: TASK_CAPS });
+    const quick = await s.modern('tools/call', { name: 'wait', arguments: { request: { seconds: 0 } } }, { caps: TASK_CAPS });
     assert.equal(quick.body.result.resultType, 'complete');
 
-    const t = (await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 1 } } }, { caps: TASK_CAPS })).body.result;
+    const t = (await s.modern('tools/call', { name: 'wait', arguments: { request: { seconds: 1 } } }, { caps: TASK_CAPS })).body.result;
     assert.equal(t.resultType, 'task');
     assert.equal(t.status, 'working');
     assert.match(t.taskId, /^[0-9a-f-]{36}$/, 'an unguessable id');
@@ -52,13 +54,14 @@ test('a quick call answers inline even with tasks declared; a long one becomes a
 });
 
 test('no task without the extension: the call answers inline, tasks/* are -32021, a legacy client is never given one', async () => {
-  const s = await startServer();
+  const wait = waitFeature();
+  const s = await startServer({ engine: makeEngine({ features: [wait] }) });
   try {
-    const r = await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 1 } } });
+    const r = await s.modern('tools/call', { name: 'wait', arguments: { request: { seconds: 1 } } });
     assert.equal(r.body.result.resultType, 'complete');
     assert.equal(payload(r.body.result).waited_seconds, 1);
     const legacy = await s.client({ era: 'legacy', capabilities: { extensions: TASK_CAPS.extensions } });
-    assert.equal(payload(await legacy.callTool({ name: 'time', arguments: { request: { seconds: 1 } } })).waited_seconds, 1, 'the extension is not defined before 2026-07-28');
+    assert.equal(payload(await legacy.callTool({ name: 'wait', arguments: { request: { seconds: 1 } } })).waited_seconds, 1, 'the extension is not defined before 2026-07-28');
 
     const g = await s.modern('tasks/get', { taskId: 'whatever' });
     assert.equal(g.status, 400);
@@ -73,12 +76,10 @@ test('no task without the extension: the call answers inline, tasks/* are -32021
 });
 
 test('tasks/cancel is an ack, the task ends cancelled, and the work itself stops; tasks/update is an ack', async () => {
-  const s = await startServer();
-  const real = s.engine.time.bind(s.engine);
-  let outcome;
-  s.engine.time = async (input) => { outcome = await real(input); return outcome; };
+  const wait = waitFeature();
+  const s = await startServer({ engine: makeEngine({ features: [wait] }) });
   try {
-    const t = (await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 20 } } }, { caps: TASK_CAPS })).body.result;
+    const t = (await s.modern('tools/call', { name: 'wait', arguments: { request: { seconds: 20 } } }, { caps: TASK_CAPS })).body.result;
     const upd = await s.modern('tasks/update', { taskId: t.taskId, inputResponses: {} }, { caps: TASK_CAPS });
     assert.equal(upd.status, 200);
     const ack = await s.modern('tasks/cancel', { taskId: t.taskId }, { caps: TASK_CAPS });
@@ -86,11 +87,11 @@ test('tasks/cancel is an ack, the task ends cancelled, and the work itself stops
     assert.deepEqual(Object.keys(ack.body.result).sort(), ['_meta', 'resultType']);
     assert.equal((await pollUntil(s, t.taskId, (x) => x.status !== 'working')).status, 'cancelled');
     const t0 = Date.now();
-    while (!outcome && Date.now() - t0 < 5000) await sleep(50);
-    assert.equal(outcome?.cancelled, true, 'the timer stopped instead of running its 20 seconds');
+    while (!wait.last && Date.now() - t0 < 5000) await sleep(50);
+    assert.equal(wait.last?.cancelled, true, 'the timer stopped instead of running its 20 seconds');
     await sleep(200);
     assert.equal((await pollUntil(s, t.taskId, () => true)).status, 'cancelled', 'terminal states never change');
-  } finally { s.engine.time = real; await s.stop(); }
+  } finally { await s.stop(); }
 });
 
 /** A stub engine whose task `t1` is done after `after` waits, with these rows. */

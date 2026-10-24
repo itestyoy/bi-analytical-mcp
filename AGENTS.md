@@ -290,9 +290,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   src/tools/core.js, a feature's in its own module, all in the engine's one registry (`engine.tools`),
   and the surface reads nothing else — no table of titles, hints or hidden names beside it; a core
   tool's input schema is built with the others from the catalog (src/schema.js) under its name, and
-  test/unit/tool-definitions.test.js holds the two to each other. A tool that only reads is never
-  merged with one that removes (`context` lists and describes; `delete_context` removes): a client asks
-  before a destructive call, and must not have to before a read. Do NOT hand-roll wire
+  test/unit/tool-definitions.test.js holds the two to each other. `context` lists, describes AND
+  deletes (`action: "delete"`, `what` the target) — one tool for the contexts, marked destructive, to
+  keep the tool list short. Do NOT hand-roll wire
   behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
   is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
 - EVERY TOOL TAKES ONE FIELD, `request`, AND ITS SCHEMA IS NEVER CUT (HARD RULE). What a client is
@@ -304,7 +304,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   old names: every tool is listed and called by its one name (no alias, no unlisted tool). What a tool
   hands its input to is a private engine METHOD (`_analyzeExperiment`, `_buildPipeline`, `_dropContext` …)
   with an input contract named `<tool>.<mode>` (`experiment.analyze`, `build_model.pipeline`,
-  `delete_context.context` …; `METHOD_CONTRACTS`, src/schema.js), validated and never offered. A tool's
+  `context.delete` …; `METHOD_CONTRACTS`, src/schema.js), validated and never offered. A tool's
   modes are an `anyOf` of CLOSED forms (`form` in src/schema-kit.js: a pinned `const`/`enum` tag or
   distinct required keys, `additionalProperties: false`), pairwise disjoint so the anyOf means oneOf —
   a field a mode does not read is refused, not ignored; a union of VALUES (a pattern, an enum, a type)
@@ -598,7 +598,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `structuredContent` is carried by a display_model_result that drew (`drawn: true`) or an
   experiment called with `card: true`, only when `buildViewModel(...).kind !== 'none'` — and by every
   successful answer of a tool that declares an `outputSchema` (`output` on its definition,
-  src/schema/outputs.js: time, context, delete_context, memory, explore_errors —
+  src/schema/outputs.js: context, memory, explore_errors —
   an answer of one shape, from a tool with no view, since a host draws a card for every answer that
   carries structuredContent). A tool that answers with a result's rows (the query tool, a pipeline
   build) declares none: the rows would be carried twice. Every other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
@@ -609,7 +609,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   only when asked with `card: true` on analyze (a card offered to an Apps client alone: `card: true`
   from any other is refused, `false` — no card — is what it gets anyway). A stored result is
   built on by a pipeline started from its task (`build_model({ action: 'start', name,
-  from_task })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
+  from_task })`); there is no timer tool — a read of a task waits itself. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment
   through tasks or display_model_result. The one sanctioned exception is a FEATURE's side (below):
   it has the same three roles — its builder, its query tool that starts AND reads back its own tasks
@@ -628,7 +628,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   it is without it. The core never names a feature: engine, surface, apps, guide, skills and
   overview each walk `engine.features` at ONE point (its tools become definitions in the same registry
   as the core's, a guide name + triggers, a skill, an instructions line, an overview entry, a form of
-  delete_context — `deletes`, collected by `featureDeletes`). Do NOT add an
+  the context delete — `deletes`, collected by `featureDeletes`). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
 - RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
   PIPELINE — `start` declares the eventstream: the rows of an events source (its own columns, within a
@@ -657,8 +657,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   inlined; the caller's input is data, never code), on its own dbt environment (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
   retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/) —
   display_retentioneering_result takes `{ task_id, display: { analysis, title?, edge_weight? } }`, as
-  display_model_result takes `{ task_id, display }`; delete_context removes one eventstream in the
-  feature's own form `{ what: "eventstream", context_id, eventstream }`, its tables kept until the
+  display_model_result takes `{ task_id, display }`; context removes one eventstream in the
+  feature's own delete form `{ action: "delete", what: "eventstream", context_id, eventstream }`, its tables kept until the
   context is dropped. It is
   deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds and a fixed
   one for a draw the caller left unseeded, ties in code-point order — never the locale's), and

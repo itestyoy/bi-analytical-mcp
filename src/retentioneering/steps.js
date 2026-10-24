@@ -2,7 +2,7 @@
 // columns, segments with their levels, custom columns); the library's steps, each checked by the
 // library itself on stand-ins of that shape as it is added, edited, inserted or deleted; preview and
 // fork; materialize, which runs the steps not yet run in one dbt Python model; and an eventstream
-// removed (delete_context, in the feature's form).
+// removed (a context delete, in the feature's form).
 
 import yaml from 'js-yaml';
 import { dbtFailure } from '../dbt/index.js';
@@ -324,7 +324,7 @@ export function fork(engine, ctx, input) {
 }
 
 /**
- * An eventstream removed from its context — delete_context({ what: "eventstream", context_id, eventstream })
+ * An eventstream removed from its context — context({ action: "delete", what: "eventstream", context_id, eventstream })
  * — the context and its other eventstreams kept. Only its name goes: its tables stay in the context (a
  * fork made from it reads the same base table, and the tasks that built and read it still read back)
  * until the context is dropped, and a build of it still in flight finishes into no eventstream. Done with
@@ -339,7 +339,7 @@ export function deleteEventstream(engine, feature, input) {
     const left = Object.keys(ctx.state.retentioneering.eventstreams);
     return {
       removed: true, context_id: ctx.id, eventstream: name,
-      note: `eventstream '${name}' is removed; its tables stay until the context is dropped (delete_context({ request: { context_id: '${ctx.id}' } })), so the tasks that built and read it still read back. ${left.length ? `The context holds ${left.join(', ')}.` : `The context holds no eventstream now: ${BUILD}({ request: { context_id: '${ctx.id}', name, source, … } }) starts one.`}`,
+      note: `eventstream '${name}' is removed; its tables stay until the context is dropped (context({ request: { action: 'delete', context_id: '${ctx.id}' } })), so the tasks that built and read it still read back. ${left.length ? `The context holds ${left.join(', ')}.` : `The context holds no eventstream now: ${BUILD}({ request: { context_id: '${ctx.id}', name, source, … } }) starts one.`}`,
     };
   });
 }

@@ -152,11 +152,11 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
   assert.equal(step.steps_recomputed, 1);
 
   // Dropping the owner would take that table with it → refused, naming the consumer.
-  await assert.rejects(() => e.delete_context({ context_id }), new RegExp(`${fork.context_id}.*${c1.model}`));
+  await assert.rejects(() => e.context({ action: 'delete', context_id }), new RegExp(`${fork.context_id}.*${c1.model}`));
   assert.ok(e.ctxs.has(context_id), 'nothing was dropped');
   // Forced: the fork's inherited checkpoint is retired, so it recomputes from the source.
   // (the answer says what went: the context, its pipeline, the tasks whose results went with it)
-  const dropped = await e.delete_context({ context_id, force: true });
+  const dropped = await e.context({ action: 'delete', context_id, force: true });
   assert.deepEqual([dropped.removed, dropped.context_id, dropped.held], [true, context_id, ['its pipeline']]);
   assert.deepEqual(draftOf(e, fork.context_id).checkpoints, []);
 });
@@ -278,7 +278,7 @@ test('a new draft in the same context never reuses a model name', async () => {
 });
 
 // The idle-context GC used to drop a checkpoint owner without consulting the consumers —
-// bypassing the refusal that delete_context makes for exactly that reason.
+// bypassing the refusal that a context delete makes for exactly that reason.
 test('the idle GC does not reclaim a context whose prefix a fork reads', async () => {
   const e = engine();
   const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });

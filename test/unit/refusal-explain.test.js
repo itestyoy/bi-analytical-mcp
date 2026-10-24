@@ -19,8 +19,8 @@ test('a mode left unnamed is refused as the mode the fields belong to, with the 
   assert.match(edit, /edit a step/);
   assert.match(edit, /missing required property 'action'/);
   assert.doesNotMatch(edit, /unexpected property 'step'/);
-  const del = refusal(e, 'delete_context', { context_id: 'abc123', semantic_model: 'events' });
-  assert.match(del, /one model of the semantic layer/);
+  const del = refusal(e, 'context', { action: 'delete', context_id: 'abc123', semantic_model: 'events' });
+  assert.match(del, /one model of the layer/);
   assert.match(del, /missing required property 'what'/);
 });
 

@@ -16,7 +16,7 @@
 //                    plan: the conversion recipe's data proof (model-results.test.js runs the
 //                    others).
 //   6. RECIPES     — semantic_index overview list + semantic_index({ recipe: id }).
-//   7. TEARDOWN    — delete_context({ what: semantic_model | pipeline_model | context }), then
+//   7. TEARDOWN    — context({ action: delete, what: semantic_model | pipeline_model | context }), then
 //                    context({list}) shows the dropped context gone.
 //
 // DATA-ONLY: every substantive assertion is on a returned VALUE/COUNT (grounded in
@@ -308,15 +308,15 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
 // ───────────────────────── 7. TEARDOWN ─────────────────────────
 test('7. context: delete models + drop contexts; list shows them gone', opts, async (t) => {
   if (skip(t)) return;
-  // delete the semantic task's model additions (delete_context with what: 'semantic_model')
-  const dsm = await engine.delete_context({ what: 'semantic_model', context_id: S.semCtx, semantic_model: 'events', cascade: true });
+  // delete the semantic task's model additions (a context delete with what: 'semantic_model')
+  const dsm = await engine.context({ action: 'delete', what: 'semantic_model', context_id: S.semCtx, semantic_model: 'events', cascade: true });
   assert.equal(dsm.removed, true);
   // delete the A/B pipeline model definition (context delete_model action)
-  const dnm = await engine.delete_context({ what: 'pipeline_model', context_id: S.abCtx });
+  const dnm = await engine.context({ action: 'delete', what: 'pipeline_model', context_id: S.abCtx });
   assert.equal(dnm.removed, true);
 
   for (const id of [S.semCtx, S.pipeCtx, S.abCtx]) {
-    const d = await engine.delete_context({ context_id: id });
+    const d = await engine.context({ action: 'delete', context_id: id });
     assert.equal(d.removed, true, `dropped ${id}`);
   }
   const remaining = (await engine.context({ action: 'list' })).contexts;

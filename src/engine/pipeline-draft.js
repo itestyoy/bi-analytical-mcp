@@ -774,10 +774,12 @@ export const pipelineDraftMethods = {
         // (said once per materialized prefix: the steps after it read it until an edit at or before it)
         ...(plan.checkpoint && draft.told_prefix !== plan.checkpoint.model ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from ${origin}.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from ${plan.checkpoint ? `the prefix still materialized, steps 1..${plan.checkpoint.at} (${plan.checkpoint.model})` : origin}.`] : []),
-        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, this._columnsAfter(draft, physSet, stepIndex, after), { building })] : []),
+        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.offsetMaturityWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, this._columnsAfter(draft, physSet, stepIndex, after), { building })] : []),
       ],
     };
     if (plan.checkpoint) draft.told_prefix = plan.checkpoint.model;
+    // what a step's answer said of it is not said again by the build of the draft (the latest few kept)
+    draft.said = [...new Set([...(draft.said || []), ...resp.recommendations])].slice(-30);
     // how to preview is said on the draft's first step, not on every one after it
     if (draft.told_preview) resp.recommendations = resp.recommendations.filter((r) => !r.startsWith('Preview the SQL anytime'));
     else if (resp.recommendations.some((r) => r.startsWith('Preview the SQL anytime'))) draft.told_preview = true;

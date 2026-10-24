@@ -280,7 +280,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     explore_errors: (() => {
       const errorFields = {
         id: { type: 'integer', minimum: 1, description: 'One error in full, with what reproduces it: the call\'s arguments, the state of the context it worked on, the code of each generated model the error names, and the runtime.' },
-        time_range: timeRange('Only the errors kept within this window, by the moment each was kept.'),
+        time_range: timeRange('Only the errors kept within this window, by the moment each was kept.', { timezone: 'Optional IANA timezone (e.g. "Europe/Berlin"): start and end are read as wall-clock time there. Omit to read them as UTC.' }),
         source: { enum: ERROR_SOURCES, description: 'Where it happened: tool — a call refused or failed; task — warehouse work that ended in an error; startup — what a start could not serve.' },
         severity: { enum: ['error', 'warning'], description: 'error — something failed; warning — something was left out and served without it (a join the project declares that no reference can name, a feature that cannot run here).' },
         tool: { type: 'string', pattern: '^[a-z][a-z0-9_]*$', description: 'Only the errors of this tool (for a task: the tool that started it).' },

@@ -89,7 +89,9 @@ export const semanticQueryMethods = {
   _groupableSplit(ctx) {
     const c = this._catalogOf(ctx);
     // (a column of a build's own table is named by its semantic model: it is no model of the catalog)
-    const all = [...c.reachableAttributes()].map((r) => (r.source !== undefined && c.models[r.source]?.built ? { semantic_model: [r.source], dimension: r.column } : r));
+    // (a validity window's bounds are how a version is matched, not an attribute to cut by: not listed)
+    const all = [...c.reachableAttributes()].filter((r) => !(r.source !== undefined && c.models[r.source]?.dimensions?.[r.column]?.validity))
+      .map((r) => (r.source !== undefined && c.models[r.source]?.built ? { semantic_model: [r.source], dimension: r.column } : r));
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
         const ref = this._taskDimRef(model, d, c);
@@ -1122,8 +1124,11 @@ export const semanticQueryMethods = {
           outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. Its last 7 days: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
         } else if (!endDay || endDay > freshDay) {
           // (a cumulative metric is not empty there: it repeats the total it had when the data ended)
-          const carried = [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })].length;
-          recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : `the latest row of ${factsRead[0]}`})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}${carried ? '; a cumulative metric there repeats the total it had when the data ended — no new data' : ''}.`);
+          const windowed = this._windowedMetrics(ctx.state.metrics || [], metrics).length;
+          const allTime = this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true }).length;
+          recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : `the latest row of ${factsRead[0]}`})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
+          // (said apart, so the note above is one text in every query of a batch and is said once there)
+          if (allTime || windowed) recs.push(`Past ${freshDay} ${[allTime ? 'a cumulative metric repeats the total it had when the data ended' : null, windowed ? 'a windowed one falls to 0 as its window leaves the data' : null].filter(Boolean).join(', and ')} — no new data.`);
         }
       }
       // A window that holds no rows of the sources at all (before the data begins, a gap, past its end) gives

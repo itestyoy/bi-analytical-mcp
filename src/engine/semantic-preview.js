@@ -130,11 +130,9 @@ export const semanticPreviewMethods = {
     const declared = project ? null : new Set((ctx.state.metrics || []).map((m) => m.name));
     // (what a metric reads that is no declared metric of a task's context is its measure: said as one)
     const asMeasure = (def) => (declared && def?.input?.metric && !declared.has(def.input.metric) ? { ...def, input: { measure: def.input.metric } } : def);
-    const metrics = scope.metrics.map((m) => {
+    // (its definition names it as `input: { measure }` already: no entry of its own beside the metric)
+    const metrics = scope.metrics.filter((m) => !(declared && input.metric && m.name !== input.metric && !declared.has(m.name))).map((m) => {
       const def = asMeasure(layer.definition(m.name) || {});
-      if (declared && input.metric && m.name !== input.metric && !declared.has(m.name)) {
-        return { name: m.name, kind: 'measure', input_of: input.metric, definition: def, note: `a measure '${input.metric}' reads — no metric of its own: query '${input.metric}'` };
-      }
       const items = groupBys?.[m.name] || [];
       const t = timeItem(items);
       const time = t ? { metric_time: { grain: t.grain || 'day' } } : {};

@@ -59,7 +59,23 @@ export class PipelineAdvisor {
       ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
       ...this.pythonPreparationWarnings(st, draft, i),
       ...this.globalWindowWarnings(st),
+      ...this.offsetMaturityWarnings(st),
     ]));
+  }
+
+  /**
+   * AN OFFSET FROM AN ANCHOR (date_diff of two moments: day N since install, weeks since a first
+   * purchase) is only measured where the data reaches it: an anchor late in the data has not lived to
+   * day N yet, so a count of it there is 0 or missing — no measurement — and a curve or a cohort grid
+   * read over every anchor bends down at its end. Said where such a column is made.
+   */
+  offsetMaturityWarnings(stage) {
+    if (stage?.stage !== 'compute') return [];
+    const diff = exprCalls(stage.expr).find((c) => c.fn === 'date_diff');
+    if (!diff) return [];
+    const [from] = (diff.args || []).map((a) => a?.column ?? a?.property).filter(Boolean);
+    const unit = diff.unit || 'day';
+    return [`'${stage.name}' counts ${unit}s from ${from ? `'${from}'` : 'its first moment'}: an anchor late in the data has not reached a large value yet, so there its count is 0 or missing — no measurement. Read a value N only over anchors early enough to reach it: a where on ${from ? `'${from}'` : 'the anchor'} ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).`];
   }
 
   /**
@@ -270,10 +286,16 @@ export class PipelineAdvisor {
       }
       stage = { ...stage, steps: [], capture: [] };
     }
+    // a row-wise stage (a compute, an unnest) reads the field where it is and NULL elsewhere — that is
+    // its value there, not a mistake (an unnest drops those rows itself); what can mislead is a stage that
+    // FOLDS rows over it, or keeps rows by it
+    if (stage?.stage === 'compute' || stage?.stage === 'unnest') return [];
     const s = JSON.stringify(stage);
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
+    // (a field every event of the source carries reads NULL on none of them)
+    const allEvents = c.eventNames(fact);
     // a stage that names the events itself (a case on the event column, a condition on it) says which
     // event's value it reads: the where steps before it need not
     if (s.includes(`"column":"${evCol}"`)) return [];
@@ -285,7 +307,7 @@ export class PipelineAdvisor {
     // the risk is ROWS WITHOUT THE FIELD: no scope at all (every other event reads NULL), or a scope that
     // keeps an event the field is not populated on. A scope within the field's events is the right one.
     const missing = (evs) => (hasScope ? [...scoped].filter((e) => !evs.includes(e)) : null);
-    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && (!hasScope || missing(evs).length); });
+    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !(allEvents.length && allEvents.every((e) => evs.includes(e))) && (!hasScope || missing(evs).length); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
     return [hasScope

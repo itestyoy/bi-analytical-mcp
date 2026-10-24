@@ -224,6 +224,8 @@ export const pipelineMaterializeMethods = {
       }
       const cp = (draft.checkpoints || []).find((c) => c.task_id === id);
       if (cp) cp.rows = result.row_count ?? null;
+      // (a judgement of a step its own answer already said is not repeated by the build)
+      if (draft.said?.length && Array.isArray(result.warnings)) result.warnings = result.warnings.filter((w) => !draft.said.includes(w));
       if (plan.checkpoint) {
         result.from_checkpoint = { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at };
         result.steps_recomputed = plan.stages.length;

@@ -110,8 +110,11 @@ export function joinKeysOf(catalog, joins, columns) {
 export function declarationOf(catalog, { name, description, source }, st) {
   const main = catalog.getModel(source);
   if (!catalog.semanticModelKeys().includes(source)) {
-    const joinable = !!catalog.models[source]?.join;
-    fail(`'${source}' has no primary entity, so a semantic layer cannot be built over it — a semantic layer is built over ${catalog.semanticModelKeys().join(', ')}${joinable ? `. To cut their metrics by '${source}', join it in this step (join: [{ source: '${source}', on }] — semantic_index({ request: { source: '${source}' } }) shows its contract); to count its own rows, a pipeline: build_model start with source '${source}' and an aggregate step` : `; to count its own rows, a pipeline: build_model start with source '${source}' and an aggregate step`}`, 'source');
+    // (a model with no primary entity is never joined in this step either: its rows reach a pipeline,
+    // whose join stage brings them onto a source's rows, and a semantic_model step over that table)
+    const joinable = !!catalog.joinContract(source);
+    const bases = catalog.semanticModelKeys().filter((k) => !catalog.models[k]?.scd);
+    fail(`'${source}' has no primary entity, so a semantic layer cannot be built over it — a semantic layer's measures fold ${bases.join(', ')}. To count its own rows, a pipeline: build_model start with source '${source}' and an aggregate step${joinable ? `; to cut another source's metrics by it, a pipeline over that source with a join stage ({ stage: 'join', source: '${source}', on, attrs } — semantic_index({ request: { source: '${source}' } }) shows its contract), its last step a semantic_model step over the table it builds` : ''}`, 'source');
   }
   const timeColumn = main.time?.column || null;
   if (st.time !== undefined && st.time !== timeColumn) fail(`time: '${source}' is read on its own time axis, '${timeColumn}' — leave time out (it names the axis of a table the steps before this one built)`, 'time');
@@ -121,7 +124,7 @@ export function declarationOf(catalog, { name, description, source }, st) {
   for (const [i, m] of (st.measures || []).entries()) {
     const { source: of, ...measure } = m;
     if (of === source) fail(`measures[${i}] '${m.name}': '${source}' is the main model — leave source out`, 'measures');
-    if (of !== undefined && !catalog.semanticModelKeys().includes(of)) fail(`measures[${i}] '${m.name}': '${of}' has no primary entity, so a semantic layer cannot load it — the semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'measures');
+    if (of !== undefined && !catalog.semanticModelKeys().includes(of)) fail(`measures[${i}] '${m.name}': '${of}' has no primary entity, so a semantic layer cannot load it — a measure folds ${catalog.semanticModelKeys().filter((k) => !catalog.models[k]?.scd).join(', ')}`, 'measures');
     (item(of ?? source).measures ||= []).push(measure);
   }
   const seen = new Set();

@@ -551,6 +551,14 @@ test('a cumulative metric over a time_range sums the days before the range that 
   await assert.rejects(() => engine.raw.query_model({ ...query, steps: [{ stage: 'metrics', metrics: ['two_day'] }] }), /'two_day' accumulates over a trailing 2 days? — .*groups by metric_time/);
   const whole = await engine.query_model({ ...query, steps: [{ stage: 'metrics', metrics: ['to_date'] }] });
   assert.equal(whole.ok, true, JSON.stringify(whole.error));
+  // past the last event, a windowed metric whose window holds no event is 0 — not a missing value — on
+  // every day of the range, at the day's grain and a week's
+  const last = [...day.keys()].sort().at(-1);
+  const after = (n) => new Date(Date.parse(`${last}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const tail = await engine.query_model({ context_id: created.context_id, time_range: { start: after(-1), end: after(6) }, steps: [{ stage: 'metrics', metrics: ['two_day'], group_by: [{ time: 'metric_time', grain: 'day' }] }, ...byDay] });
+  assert.equal(tail.ok, true, JSON.stringify(tail.error));
+  const tailDays = Array.from({ length: 8 }, (_, i) => after(i - 1));
+  assert.deepEqual(tail.rows.map((x) => [String(x.metric_time_day).slice(0, 10), x.two_day == null ? null : num(x.two_day)]), tailDays.map((d) => [d, at(after(tailDays.indexOf(d) - 2)) + at(d)]));
   // validate compiles and runs it as a query of it must be written: grouped by metric_time
   const checked = await taskResult(engine, (await engine.raw.context({ action: 'describe', context_id: created.context_id, validate: true, time_range: query.time_range })).task_id);
   assert.deepEqual(checked.compiled.filter((c) => !c.ok), [], JSON.stringify(checked.compiled));

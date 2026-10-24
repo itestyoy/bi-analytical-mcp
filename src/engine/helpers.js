@@ -50,9 +50,9 @@ export function pageBlock({ offset = 0, limit, returned, has_more = false, total
   return {
     offset, limit, returned, ...(known != null ? { total_rows: known } : {}), has_more,
     ...(has_more ? { next_offset: offset + returned } : {}),
-    // (one row, or none, has no order to speak of; and where every row is on the page, which rows a page
-    // holds does not depend on it — the note is said where it matters: a page with more after it)
-    ...(ordered === false && !(known != null && known <= 1) ? { ordered: false, ...(has_more || offset > 0 ? { order_note: 'no order_by step: the rows come in no particular order — end the steps with an order_by step for a ranking, and for pages that hold the same rows each time' } : {}) } : {}),
+    // (one row, or none, has no order to speak of; where every row is on the page, which rows a page holds
+    // does not depend on it — only how they are listed, said in a shorter note)
+    ...(ordered === false && !(known != null && known <= 1) ? { ordered: false, order_note: has_more || offset > 0 ? 'no order_by step: the rows come in no particular order — end the steps with an order_by step for a ranking, and for pages that hold the same rows each time' : 'no order_by step: the rows come in no particular order — end the steps with an order_by step to sort them' } : {}),
   };
 }
 

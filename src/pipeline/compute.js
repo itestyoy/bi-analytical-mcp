@@ -720,7 +720,9 @@ export function exprSchema(catalog, { project = null, places = null, kind = 'exp
     const required = typeof args === 'number' ? args > 0 : args.min > 0;
     const fields = Object.fromEntries([...needs, ...may].map((n) => [n, P[n]]));
     return form({
-      title: `fn: ${names.join(' | ')}${title ? ` — args ${title}` : ''}${label ? ` (${label})` : ''}`,
+      // (the parameters it requires named beside its args, where a reader of the title looks — a window's
+      // `over` is said by its label)
+      title: `fn: ${names.join(' | ')}${title ? ` — args ${title}` : ''}${needs.filter((n) => n !== 'over').length ? ` + ${needs.filter((n) => n !== 'over').join(', ')}` : ''}${label ? ` (${label})` : ''}`,
       tag: ['fn', names],
       required: [...(takesArgs && required ? ['args'] : []), ...needs],
       // an aggregate over a window reads a frame of its window; a window function reads its partition whole

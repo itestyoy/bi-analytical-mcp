@@ -73,7 +73,7 @@ test('a function given a parameter under another name is refused as that functio
   ]) {
     const msg = await refusal(expr);
     assert.match(msg, new RegExp(`missing required property '${field}'`), msg);
-    assert.match(msg, new RegExp(`fn: ${fn} takes fn, args, ${field}`), msg);
+    assert.match(msg, new RegExp(`fn: ${fn} \\+ ${field} takes fn, args, ${field}`), msg);
   }
 });
 
@@ -94,6 +94,6 @@ test('a window on a source with no time axis, and a layer over a model with no p
   await assert.rejects(engine.build_model({ action: 'start', name: 'exp_window', source: 'experiments', time_range: { start: '2026-01-01', end: '2026-01-31' } }),
     (e) => e.field === 'time_range' && /'experiments' has no time axis, so time_range bounds nothing there — leave it out and bound its own time columns in a where step \(assigned_at/.test(e.message));
   await assert.rejects(engine.build_model({ action: 'start', name: 'exp_layer', source: 'experiments', steps: [{ stage: 'semantic_model', measures: [{ name: 'assigned', expr: { fn: 'count' } }], metrics: [{ name: 'assigned', type: 'simple', measure: 'assigned' }] }] }),
-    /'experiments' has no primary entity, .* join it in this step \(join: \[\{ source: 'experiments', on \}\]/);
+    /'experiments' has no primary entity, .* a pipeline over that source with a join stage \(\{ stage: 'join', source: 'experiments', on, attrs \}/);
   assert.equal(ctxs.list().length, before, 'no context was created');
 });

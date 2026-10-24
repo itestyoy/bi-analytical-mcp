@@ -198,7 +198,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   carry `meta.mcp.required_filter: true`: every question over its model says which of its values it is
   about (a stream, a test flag), and an answer that compares it nowhere — no where step on it, no case
   in the measures it reads — is warned, never refused (`requiredFilterWarnings`,
-  src/engine/pipeline-warnings.js: a build over the model, a metric folding it).
+  src/engine/pipeline-warnings.js: a build over the model, a metric folding it); `{ when: { <column>:
+  <values> } }` instead of `true` requires it only of rows that column may hold one of those values in
+  (a tester flag of the production stream, not of the test one).
 - An events source is EXTENDED, never duplicated: a new source reuses the same
   machinery — the catalog accessors (`eventNames/eventProps/eventNameFor/propertyFor`),
   the indexer worklist and the value-index API all take the source as an argument.

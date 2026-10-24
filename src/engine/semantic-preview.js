@@ -129,7 +129,11 @@ export const semanticPreviewMethods = {
     // beside the metrics — is said as the measure it is: it is not queried by name)
     const declared = project ? null : new Set((ctx.state.metrics || []).map((m) => m.name));
     // (what a metric reads that is no declared metric of a task's context is its measure: said as one)
-    const asMeasure = (def) => (declared && def?.input?.metric && !declared.has(def.input.metric) ? { ...def, input: { measure: def.input.metric } } : def);
+    // (named as it was declared: the latest spec reads a measure through a simple metric of its own, which
+    // may carry a suffix of the spec's conversion — `_filled` where it fills 0, `_m` where a name was taken)
+    const measureNames = new Set(Object.values(ctx.state.additions || {}).flatMap((a) => (a.measures || []).map((x) => x.name)));
+    const declaredMeasure = (n) => { for (let k = n; k; k = k.replace(/(_filled|_m)$/, '')) { if (measureNames.has(k)) return k; if (!/(_filled|_m)$/.test(k)) break; } return n; };
+    const asMeasure = (def) => (declared && def?.input?.metric && !declared.has(def.input.metric) ? { ...def, input: { measure: declaredMeasure(def.input.metric) } } : def);
     // (its definition names it as `input: { measure }` already: no entry of its own beside the metric)
     const metrics = scope.metrics.filter((m) => !(declared && input.metric && m.name !== input.metric && !declared.has(m.name))).map((m) => {
       const def = asMeasure(layer.definition(m.name) || {});

@@ -71,7 +71,7 @@ test('a mistake is refused IN the call — no task is started for it', async () 
   assert.equal(e._listTasks().tasks.length, 1, 'only the declaration\'s task exists');
 });
 
-test('query_model\'s read pages what the task holds, reads a build\'s task too, and an unknown task is result_gone', async () => {
+test('query_model\'s read pages what the task holds, reads a build\'s task too, and an unknown task is unknown_task', async () => {
   const runner = orderedRunner();
   const e = engine(runner);
   const created = await startDeclare(e, TASK);
@@ -83,7 +83,7 @@ test('query_model\'s read pages what the task holds, reads a build\'s task too, 
   assert.deepEqual([within.row_count, within.page.held_rows, within.page.has_more], [1, 1, false]);
   const past = await one(e.query_model({ task_ids: [q.task_id], offset: 10 }));
   assert.equal(past.row_count, 0);
-  await assert.rejects(() => one(e.query_model({ task_ids: ['ffffffffffff'] })), (err) => err.code === 'result_gone');
+  await assert.rejects(() => one(e.query_model({ task_ids: ['ffffffffffff'] })), (err) => err.code === 'unknown_task');
   // the one query tool reads every task back — a declaration's as well as a query's
   assert.equal((await one(e.query_model({ task_ids: [created.task_id] }))).task_id, created.task_id);
 });
@@ -92,7 +92,7 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   const runner = orderedRunner();
   const e = engine(runner);
   const start = (from_task, extra = {}) => e.build_model({ action: 'start', name: 'slice', from_task, ...extra });
-  await assert.rejects(() => start('ffffffffffff'), (err) => err.code === 'result_gone');
+  await assert.rejects(() => start('ffffffffffff'), (err) => err.code === 'unknown_task');
   const created = await startDeclare(e, TASK);
   // still running (the parse is held)
   await assert.rejects(() => start(created.task_id), /still running/);

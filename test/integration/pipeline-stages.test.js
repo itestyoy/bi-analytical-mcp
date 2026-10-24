@@ -2078,3 +2078,18 @@ test('median and a percentile of a two-place decimal keep their third place (met
   assert.equal(num(meta.p75), num(want.p75));
   assert.notEqual(num(meta.med), Math.trunc(num(want.med) * 100) / 100, 'not cut to the column\'s two places');
 });
+
+// least / greatest of a missing value is missing on every warehouse (DuckDB's own skip a NULL, BigQuery's
+// return one): a clamp of a price that is not there stays not there instead of becoming the clamp's bound
+test('least / greatest are missing where an argument is: a clamp counts only the rows that hold a value', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRowsFrom('events',
+    { stage: 'compute', name: 'clamped', expr: { fn: 'greatest', args: [{ fn: 'least', args: [{ property: 'price_in_usd_of_event_data' }, { value: 15 }] }, { value: 0 }] } },
+    { stage: 'aggregate', measures: [
+      { name: 'clamped_rows', expr: { fn: 'count', args: [{ column: 'clamped' }] } },
+      { name: 'clamped_sum', expr: { fn: 'sum', args: [{ column: 'clamped' }] } },
+    ] });
+  const want = (await wh.query("select count(price_in_usd_of_event_data) as n, sum(greatest(least(price_in_usd_of_event_data, 15), 0)) as s from fct_analytics_events where price_in_usd_of_event_data is not null")).rows[0];
+  assert.ok(num(want.n) > 0, 'the fixture has prices');
+  assert.deepEqual([num(rows[0].clamped_rows), num(rows[0].clamped_sum)], [num(want.n), num(want.s)]);
+});

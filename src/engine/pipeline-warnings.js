@@ -59,7 +59,7 @@ export class PipelineAdvisor {
       ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
       ...this.pythonPreparationWarnings(st, draft, i),
       ...this.globalWindowWarnings(st),
-      ...this.offsetMaturityWarnings(st),
+      ...this.offsetMaturityWarnings(st, stages.slice(0, i)),
     ]));
   }
 
@@ -69,13 +69,16 @@ export class PipelineAdvisor {
    * day N yet, so a count of it there is 0 or missing — no measurement — and a curve or a cohort grid
    * read over every anchor bends down at its end. Said where such a column is made.
    */
-  offsetMaturityWarnings(stage) {
+  offsetMaturityWarnings(stage, before = []) {
     if (stage?.stage !== 'compute') return [];
-    const diff = exprCalls(stage.expr).find((c) => c.fn === 'date_diff');
+    // an anchor is a moment the rows were given per entity — an attribute a join before it brought (an
+    // install date, a first purchase): a gap to the previous row or between a funnel's steps is no age
+    const joined = new Set(before.filter((st) => st?.stage === 'join').flatMap((st) => (st.attrs || []).map((a) => a.name ?? a.column)));
+    const diff = exprCalls(stage.expr).find((c) => c.fn === 'date_diff' && joined.has(c.args?.[0]?.column));
     if (!diff) return [];
-    const [from] = (diff.args || []).map((a) => a?.column ?? a?.property).filter(Boolean);
+    const from = diff.args[0].column;
     const unit = diff.unit || 'day';
-    return [`'${stage.name}' counts ${unit}s from ${from ? `'${from}'` : 'its first moment'}: an anchor late in the data has not reached a large value yet, so there its count is 0 or missing — no measurement. Read a value N only over anchors early enough to reach it: a where on ${from ? `'${from}'` : 'the anchor'} ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).`];
+    return [`'${stage.name}' counts ${unit}s from '${from}': an anchor late in the data has not reached a large value yet, so there its count is 0 or missing — no measurement. Read a value N only over anchors early enough to reach it: a where on '${from}' ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).`];
   }
 
   /**

@@ -210,6 +210,7 @@ export const semanticBuildMethods = {
     const exRef = groupable.find(plain) || groupable[0];
     const exText = exRef ? refText(exRef) : "{ time: 'metric_time', grain: 'day' }";
     return {
+      ok: true,
       context_id: ctx.id,
       task: compiled.task,
       ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),

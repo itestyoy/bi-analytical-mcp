@@ -149,7 +149,7 @@ test('a declared pie carries each country\'s share of the warehouse total', opts
 
 // A result that EXISTED and is no longer there says so structurally (error.code result_gone), and a
 // card of it would read "no longer available" — not the failure a broken query is.
-test('a result that is gone — forgotten, expired or deleted — is result_gone, not "Error"', opts, async (t) => {
+test('a result that is gone — forgotten, expired or deleted — is result_gone, not "Error"; a task never run is unknown_task', opts, async (t) => {
   if (skip(t)) return;
   // held in memory, then forgotten (what a restart or the hour does)
   const done = await q({ steps: [revenue()] });
@@ -158,8 +158,8 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
   const forgotten = await one(engine.query_model({ task_ids: [done.task_id] }));
   assert.deepEqual([forgotten.ok, forgotten.error.code], [false, 'result_gone']);
   assert.deepEqual(buildViewModel('display_model_result', forgotten), { kind: 'none', reason: 'gone' });
-  // a task this server never ran
-  await assert.rejects(one(engine.query_model({ task_ids: ['ffffffffffff'] })), (e) => e.code === 'result_gone');
+  // a task this server never ran is no result that went: unknown_task
+  await assert.rejects(one(engine.query_model({ task_ids: ['ffffffffffff'] })), (e) => e.code === 'unknown_task');
   // a materialized result whose table definition was deleted
   const built = await q({ steps: [revenue()], materialize: true });
   assert.equal(Number(built.rows[0].revenue), 85);

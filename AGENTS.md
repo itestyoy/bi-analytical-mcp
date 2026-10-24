@@ -374,7 +374,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   retentioneering stages' and filter_events' — is a LIST of them that all hold (`conditionSlot`,
   src/schema-kit.js). A missing value is two-valued everywhere: a comparison with one does not hold
   (`neq`, `not_in`, `not_like` mean present and different), `not(c)` holds wherever `c` does not, a
-  `concat` is missing where any part is (each part read as its text), a missing array's length is 0 on
+  `concat` is missing where any part is (each part read as its text), so are `least` / `greatest` where any
+  argument is, a missing array's length is 0 on
   both warehouses, and a boolean a compute stage (or a computed semantic dimension) stores is never
   NULL. A VALUE'S TYPE IS WHERE IT IS READ, AND CONVERTING IS
   `cast`: a column has the warehouse's type (where the warehouse was asked: ONE rule of grounding,

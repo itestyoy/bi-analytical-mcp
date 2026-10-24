@@ -60,7 +60,7 @@ export const OUTPUTS = {
     model: str,
     semantic_model: str,
     held: list(str),
-    tasks_gone: num,
+    stored_results_removed: num,
     metrics_remaining: list(),
     metrics_removed: list(),
     removed_files: list(),

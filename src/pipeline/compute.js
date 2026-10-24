@@ -137,6 +137,9 @@ function commonType(types, fallback) {
  *  missing — SQL's ||, on every warehouse (DuckDB's concat() would skip a NULL, BigQuery's returns one);
  *  a part that is not known to be text read as its text by the dialect's cast (BigQuery's || takes text
  *  alone). The one writer of a concatenation: concat's, and the eventstream's keys. */
+/** least / greatest of the arguments, missing where any of them is (one rule on every warehouse). */
+const pickedSql = (fn, a) => `CASE WHEN ${a.map((x) => `(${x}) IS NULL`).join(' OR ')} THEN NULL ELSE ${fn}(${a.join(', ')}) END`;
+
 export function concatSql(d, parts) {
   const texts = parts.map((x) => (x.type === 'string' && !x.declared ? x.sql : d.castExpr(x.sql, 'string', x.type)));
   return texts.length === 1 ? texts[0] : `(${texts.join(' || ')})`;
@@ -366,8 +369,10 @@ export const FNS = {
   hll_extract: { args: 1, title: '[sketch] → the distinct count of one sketch', sql: ({ d, a, t, at }) => { needsSketch('hll_extract', t[0], at); return { expr: d.hllExtract(a[0]), type: 'int' }; } },
   json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: arrayColumnType('string') }) }, // STRING JSON array → native array of its texts (then unnest)
   coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
-  least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `least(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
-  greatest: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `greatest(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
+  // (missing where any argument is, on every warehouse: DuckDB's least / greatest skip a NULL, BigQuery's
+  // return one — so a clamp of a missing value stays missing instead of becoming its bound)
+  least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: pickedSql('least', a), type: commonType(t, 'numeric') }) },
+  greatest: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: pickedSql('greatest', a), type: commonType(t, 'numeric') }) },
   concat: { args: { min: 1 }, sql: ({ d, r }) => ({ expr: concatSql(d, r), type: 'string' }) },
   // the dialect's one conversion, told what the value is where it is known: a number, a flag or a text
   // converts to int alike on every warehouse — the number it holds, rounded half away from zero. A raw's

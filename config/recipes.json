@@ -1477,7 +1477,7 @@
         }
       ],
       "notes": "A ratio is not additive — summing it across slices is meaningless; re-query it at the grain you want. Check the denominator before reading an extreme value: a slice with a tiny population produces a volatile rate, and an empty one has no rate at all.",
-      "hack": "A derived metric whose expr is { fn: \"div\", args: [{ metric: <numerator> }, { metric: <denominator> }] } recomputes both METRICS under every grouping, so the ratio stays correct in every slice: sum ÷ count_distinct = per actor, sum ÷ count = per row. Each side is a simple metric first. Never divide two numbers you fetched separately."
+      "hack": "A derived metric whose expr is { fn: \"div\", args: [{ metric: <numerator> }, { metric: <denominator> }] } recomputes both METRICS under every grouping, so the ratio stays correct in every slice: sum ÷ count_distinct = per actor, sum ÷ count = per row. Each side is a simple metric first. Within one grain, never divide two numbers you fetched separately — the derived metric divides them in every slice; a ratio of two grains (DAU / MAU) is recipe \"same_measure_two_grains\"."
     },
     {
       "id": "payload_property_measure_and_dimension",
@@ -1935,7 +1935,7 @@
           ]
         }
       ],
-      "notes": "The two numbers come from two queries at two grains, and divide the results outside the layer: count_distinct is re-counted per grain, so a month is NOT the sum of its days — which is exactly what makes the ratio meaningful. Keep both raw numbers in the answer; the ratio alone hides whether the base grew or the activity did.",
+      "notes": "The two numbers come from two queries at two grains, and divide the results outside the layer: count_distinct is re-counted per grain, so a month is NOT the sum of its days — which is exactly what makes the ratio meaningful. Keep both raw numbers in the answer; the ratio alone hides whether the base grew or the activity did. Rolling, in the layer: a cumulative metric over the same measure with window '30 days' is the month's actors as of each day, and a derived metric dividing the daily one by it is the stickiness per day.",
       "hack": "Query the SAME count_distinct at two grains (day vs month) and divide the results: because count_distinct is re-counted per grain, the two numbers are genuinely different questions. One model, two queries — not two models."
     },
     {

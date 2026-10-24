@@ -19,7 +19,7 @@
 // side's tasks back is given (`sideOf`, `readers`). The engine and a feature reach it as `engine.tasks`.
 
 import { detached, withSignal, withProgress, isolatedTarget, currentSignal } from './request-context.js';
-import { ToolError, RESULT_GONE } from './validate.js';
+import { ToolError, RESULT_GONE, UNKNOWN_TASK } from './validate.js';
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { isPlainObject } from './engine/helpers.js';
 
@@ -240,7 +240,7 @@ export class TaskRunner {
   /** The task behind an id — or the one refusal of an id this server does not know. */
   known(id) {
     const job = this.jobs.get(id);
-    if (!job) throw new ToolError(`unknown task_id: ${id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+    if (!job) throw new ToolError(`unknown task_id: ${id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: UNKNOWN_TASK });
     return job;
   }
 

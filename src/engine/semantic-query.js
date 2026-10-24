@@ -1121,7 +1121,7 @@ export const semanticQueryMethods = {
         // or a 0 / null of a query not grouped by time — is no measurement, said as a warning with the last week there is
         if (startDay && startDay > freshDay) {
           const weekBefore = new Date(Date.parse(`${freshDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
-          outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. Its last 7 days: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
+          outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? `a 0 or null here is no measurement${this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true }).length ? ', and a cumulative metric repeats the total it had when the data ended' : ''}` : 'it returns no rows'} — not a real value. Its last 7 days: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
         } else if (!endDay || endDay > freshDay) {
           // (a cumulative metric is not empty there: it repeats the total it had when the data ended)
           const windowed = this._windowedMetrics(ctx.state.metrics || [], metrics).length;
@@ -1161,7 +1161,7 @@ export const semanticQueryMethods = {
         const wantFrom = tr.start ? String(tr.start).slice(0, 10) : null;
         const wantTo = tr.end ? String(tr.end).slice(0, 10) : null;
         const short = first && last ? [wantFrom && first > wantFrom ? `starts ${first}, not ${wantFrom}` : null, wantTo && last < wantTo ? `ends ${last}, not ${wantTo}` : null].filter(Boolean) : [];
-        if (short.length) outside.push(`The series ${short.join(' and ')}: a cumulative metric has a row for each day of the project's time spine (metricflow_time_spine), and its days stop there — the days past it are not in the answer, not zero. Ask within ${first} … ${last} (the spine is the dbt project's: whoever owns it can widen it).`);
+        if (short.length) outside.push(`The series ${short.join(' and ')}: a cumulative metric has a row for each day of the project's time spine (metricflow_time_spine), and its days stop there — the days ${short.length === 2 ? 'before and after it' : wantFrom && first > wantFrom ? 'before it' : 'after it'} are not in the answer, not zero. Ask within ${first} … ${last} (the spine is the dbt project's: whoever owns it can widen it).`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) {
@@ -1178,7 +1178,11 @@ export const semanticQueryMethods = {
         for (const pc of propertyCols) {
           if (!pageRows.some((row) => row[pc.column] == null)) continue;
           const evCol = this.catalog.eventNameColumn(pc.source);
-          if (evCol && JSON.stringify(q.wheres || []).includes(`"column":"${evCol}"`)) continue;
+          // (where the steps name the events, the NULL group is the rows of them that carry no value)
+          if (evCol && JSON.stringify(q.wheres || []).includes(`"column":"${evCol}"`)) {
+            recs.push(`'${pc.property}' has no value on some of the events the where step keeps: those rows are the NULL group here — semantic_index({ request: { source: '${pc.source}', property: '${pc.property}' } }) gives its coverage.`);
+            continue;
+          }
           const on = this.valueIndex.appliesMap(pc.source, [pc.property])?.[pc.property];
           if (on?.length) recs.push(`'${pc.property}' is set only on ${on.length > 4 ? `${on.slice(0, 4).join(', ')}, … (${on.length} events)` : on.join(', ')}: on every other event of '${pc.source}' it is NULL, and those events are the NULL group here. To read it over the events that carry it, filter to them in a where step before the metrics step ({ fn: "in", args: [{ source: "${pc.source}", column: "${evCol}" }, ${on.slice(0, 2).map((e) => `{ value: "${e}" }`).join(', ')}] }).`);
         }
@@ -1205,6 +1209,13 @@ export const semanticQueryMethods = {
       const sumsDistinct = (st) => [...(st.measures || []).map((m) => m.expr), st.measure].filter(Boolean)
         .some((e) => exprCalls(e).some((c) => c.fn === 'sum' && (c.args || []).some(readsDistinct)));
       const refolds = (q.tail || []).some((st) => (st?.stage === 'aggregate' || st?.stage === 'pivot') && !keepsTime(st) && sumsDistinct(st));
+      // an average over the time buckets folds the buckets the answer has: a bucket with no data has no row
+      // (or a missing value), so it is left out — 85 over 5 days with data, not over the 7 of the window
+      const averagesBuckets = (q.tail || []).some((st) => (st?.stage === 'aggregate' || st?.stage === 'pivot') && !keepsTime(st)
+        && [...(st.measures || []).map((m) => m.expr), st.measure].filter(Boolean).some((e) => exprCalls(e).some((c) => ['average', 'median', 'percentile'].includes(c.fn))));
+      if (averagesBuckets && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
+        recs.push('An average (or a median) of the per-bucket values folds the buckets that have a value: a bucket with no data is left out, not counted as 0 — for an average over every bucket of the window, divide the sum by the number of buckets.');
+      }
       if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — a step after the metrics step folds the per-bucket values, and their sum counts a user once per bucket. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }

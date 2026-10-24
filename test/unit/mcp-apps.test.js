@@ -122,14 +122,14 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   ]);
 });
 
-test('a task that is gone reaches the model as result_gone over MCP, and a card of it would say "no longer available"', async () => {
+test('a task this server never ran reaches the model as unknown_task over MCP; a result that is gone, as result_gone, and a card of it would say "no longer available"', async () => {
   for (const era of ['legacy', 'modern']) {
     const r = await (await s.client({ era })).callTool({ name: 'query_model', arguments: { request: { task_ids: ['ffffffffffff'] } } });
     assert.equal(r.isError, true, era);
     const payload = JSON.parse(r.content[0].text);
-    assert.equal(payload.error.code, 'result_gone', era);
-    assert.deepEqual(buildViewModel('display_model_result', payload), { kind: 'none', reason: 'gone' }, era);
+    assert.equal(payload.error.code, 'unknown_task', era);
   }
+  assert.deepEqual(buildViewModel('display_model_result', { ok: false, error: { code: 'result_gone', message: 'gone' } }), { kind: 'none', reason: 'gone' });
 });
 
 test('structured output only for a card that is DRAWN — display_model_result\'s answer, experiment with card: true — and the same view model decides', () => {

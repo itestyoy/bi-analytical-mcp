@@ -26,7 +26,7 @@
 
 import { buildSchemas, transportSchema, MAX_WAIT_SECONDS, METHOD_CONTRACTS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
-import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
+import { makeValidators, validateInput, ToolError, RESULT_GONE, UNKNOWN_TASK } from './validate.js';
 import { abTest, srmCheck, sampleSize } from './experiment.js';
 import { TaskRunner } from './task-runner.js';
 import { PARTITION_DIM } from './yaml-render.js';
@@ -379,7 +379,7 @@ export class Engine {
    */
   _taskBase(input) {
     const job = this.jobs.get(input.from_task);
-    if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
+    if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: UNKNOWN_TASK });
     // a task of another part of the server (a feature's) holds no table a pipeline reads: said as it is
     if (!['semantic', 'pipeline'].includes(this.tasks.sideOf(job.tool))) throw new ToolError(`task ${job.id} was started by ${job.tool}, and a build starts only from a pipeline build or a metric query run with materialize: true — build the rows you need with build_model from the source instead`, { stage: 'validate', field: 'from_task' });
     if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start from it`, { stage: 'validate', field: 'from_task' });
@@ -524,14 +524,21 @@ export class Engine {
       if (st.draft) st.draft.checkpoints = (st.draft.checkpoints || []).filter((cp) => cp.model !== c.model);
       this.ctxs.touch(c.consumer);
     }
-    // what it held, said with the removal: its tasks' results go with it (a read of one says so)
+    // what it held, said with the removal: the tables its tasks stored go with it (a read of one says so),
+    // while a result a task holds in memory stays readable — marked as of a context that is gone
     const held = this.ctxs.has(input.context_id) ? this.ctxs.get(input.context_id).state : null;
-    const tasks = held ? this.jobs.list().filter((j) => j.context_id === input.context_id).length : 0;
+    const own = held ? this.jobs.list().filter((j) => j.context_id === input.context_id) : [];
+    const tables = own.filter((j) => j.table).length;
+    const kept = own.length - tables;
     const out = this.ctxs.drop(input.context_id);
     // nothing removed is said, not left to read as success: the id names no context
     if (out.removed) {
       const what = [held?.draft || held?.pipeline_model ? 'its pipeline' : null, (held?.metrics || []).length || held?.draft?.semantic ? 'its semantic layer' : null].filter(Boolean);
-      return { ...out, context_id: input.context_id, ...(what.length ? { held: what } : {}), ...(tasks ? { tasks_gone: tasks } : {}) };
+      return {
+        ...out, context_id: input.context_id, ...(what.length ? { held: what } : {}),
+        ...(tables ? { stored_results_removed: tables } : {}),
+        ...(kept ? { note: `${kept} task result(s) held in memory stay readable by task_ids (marked context_gone) until they age out; the tables its builds stored are removed.` } : {}),
+      };
     }
     return { ...out, context_id: input.context_id, reason: "no context has this id (deleted already, retired after idling, or never created) — context({ request: { action: 'list' } }) lists those that exist" };
   }

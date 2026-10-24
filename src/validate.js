@@ -694,6 +694,10 @@ export function validateInput(validator, input, _opts = {}) {
  *  distinct from a query that FAILED, so a reader can say "no longer available" instead of "error". */
 export const RESULT_GONE = 'result_gone';
 
+/** error.code of a task id this server holds no task for (never started here, or forgotten) — distinct from a
+ *  result that existed and is gone. */
+export const UNKNOWN_TASK = 'unknown_task';
+
 export class ToolError extends Error {
   constructor(message, { stage = 'validate', field, code } = {}) {
     super(message);

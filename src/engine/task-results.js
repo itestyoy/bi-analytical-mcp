@@ -3,7 +3,7 @@
 // one tool that draws a model result (display_model_result) with its drill-down reads. The lifecycle
 // itself is src/task-runner.js. Methods of the Engine (src/engine/helpers.js — mixin).
 
-import { ToolError, RESULT_GONE } from '../validate.js';
+import { ToolError, RESULT_GONE, UNKNOWN_TASK } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { RESULT_MODEL_PREFIX, builtBehind } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
@@ -482,7 +482,7 @@ export const taskResultMethods = {
   async drill_result(input) {
     this._validate('drill_result', input);
     const job = this.jobs.get(input.task_id);
-    if (!job) throw new ToolError(`unknown task_id: ${input.task_id}`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+    if (!job) throw new ToolError(`unknown task_id: ${input.task_id}`, { stage: 'validate', field: 'task_id', code: UNKNOWN_TASK });
     if (!job.drawn && this._displayed?.get(job.id) !== 'drawn') throw new ToolError(`task ${job.id} was not drawn as a card — only a card reads its own result`, { stage: 'validate', field: 'task_id' });
     if (job.status !== 'ready' || !job.table) throw new ToolError(`task ${job.id} holds no stored table to drill into`, { stage: 'validate', field: 'task_id' });
     if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) {

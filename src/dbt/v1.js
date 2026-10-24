@@ -301,7 +301,11 @@ export class DbtV1 {
    * full-table aggregate isn't killed mid-flight.
    */
   async show(projectDir, sql, limit = 1000, timeout = this.timeout) {
-    const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];
+    // dbt writes `limit <n>` after the SQL it shows (get_limit_sql). A BigQuery pipe query (a read is
+    // rendered as one: FROM … |> …) takes no plain LIMIT after its operators, so it is shown with dbt's
+    // limit off and the limit written as the pipe operator it is.
+    const pipe = /(^|\n)\s*\|>/.test(sql);
+    const args = ['show', '--inline', pipe ? `${sql}\n|> LIMIT ${Math.max(0, Math.trunc(limit))}` : sql, '--output', 'json', '--limit', pipe ? '-1' : String(limit)];
     const r = await this._dbt(projectDir, args, timeout);
     // Preserve r.error (the process-level message: timeout, ENOENT, spawn failure) so callers can
     // log the REAL reason from ANY level — not just dbt's own stderr.

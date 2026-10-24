@@ -266,18 +266,22 @@ test('a required_filter column: an answer over all its values is warned, a filte
   const doc = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
   const acq = doc.models.find((m) => mcp(m).role === 'acquisition');
   acq.columns.find((c) => c.name === 'media_source').config = { meta: { mcp: { required_filter: true } } };
+  // campaign is required only of applovin's rows (a column required `when` another holds some values)
+  acq.columns.find((c) => c.name === 'campaign').config = { meta: { mcp: { required_filter: { when: { media_source: 'applovin' } } } } };
   const at = join(tempDir('mcpit-reqfilter'), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
   const e = settle(new Engine({ catalog: loadCatalog(at, { profilesDir: BASE, projectDir: BASE }), contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('mcpit-reqfilter-ws'), timeSpineDialect: 'duckdb' }), runner: backend }));
-  const warned = (r) => (r.warnings || []).some((w) => w.includes('required_filter') && w.includes("'media_source'"));
+  const warnedOf = (r, column) => (r.warnings || []).some((w) => w.includes('required_filter') && w.includes(`'${column}'`));
+  const warned = (r) => warnedOf(r, 'media_source');
   const applovin = { fn: 'eq', args: [{ column: 'media_source' }, { value: 'applovin' }] };
   const out = await declare(e, {
     name: 'reqf',
     semantic_models: [{ source: 'acquisition', measures: [
       { name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } },
       { name: 'applovin_cost', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [applovin], then: { column: 'cost' } }] }] } },
+      { name: 'meta_cost', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'media_source' }, { value: 'meta' }] }], then: { column: 'cost' } }] }] } },
     ] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'applovin_cost', type: 'simple', measure: 'applovin_cost' }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'applovin_cost', type: 'simple', measure: 'applovin_cost' }, { name: 'meta_cost', type: 'simple', measure: 'meta_cost' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   const all = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
@@ -287,6 +291,10 @@ test('a required_filter column: an answer over all its values is warned, a filte
   const own = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['applovin_cost'] }] });
   assert.ok(near(num(own.rows[0].applovin_cost), 8.25), `applovin_cost=${own.rows[0].applovin_cost}`);
   assert.ok(!warned(own), `a measure whose case compares the column folds the rows it names: ${JSON.stringify(own.warnings)}`);
+  assert.ok(warnedOf(own, 'campaign'), `applovin's rows: campaign is required of them: ${JSON.stringify(own.warnings)}`);
+  const meta = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['meta_cost'] }] });
+  assert.ok(near(num(meta.rows[0].meta_cost), 5.75), `meta_cost=${meta.rows[0].meta_cost}`);
+  assert.ok(!warnedOf(meta, 'media_source') && !warnedOf(meta, 'campaign'), `meta's rows: campaign is not required of them: ${JSON.stringify(meta.warnings)}`);
   const one = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost', 'applovin_cost'] }] });
   assert.equal(one.ok, true, JSON.stringify(one.error));
   assert.ok(near(num(one.rows[0].cost), 8.25) && near(num(one.rows[0].applovin_cost), 8.25), JSON.stringify(one.rows));

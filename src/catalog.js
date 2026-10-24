@@ -326,6 +326,11 @@ export class Catalog {
 
   /** The columns every question over `key` should filter (meta.mcp.required_filter): a stream, a test flag. */
   requiredFilters(key) {
+    return this.requiredFilterSpecs(key).map((r) => r.column);
+  }
+
+  /** The same, each with the condition it holds under: { column, when?: { <column>: [<values>] } }. */
+  requiredFilterSpecs(key) {
     return this.models[key]?.required_filters || [];
   }
 

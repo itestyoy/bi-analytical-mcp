@@ -73,10 +73,17 @@ export class PipelineAdvisor {
    * question may really be about all of them.
    */
   requiredFilterWarnings(source, declared) {
-    const required = this.catalog.requiredFilters?.(source) || [];
+    const required = this.catalog.requiredFilterSpecs?.(source) || [];
     if (!required.length) return [];
     const compared = comparedColumns(declared);
-    const missing = required.filter((c) => !compared.has(c) && !compared.has(`${source}.${c}`));
+    const keptTo = (c) => compared.get(c) ?? compared.get(`${source}.${c}`);
+    // (a column required only `when` another may hold some values: not of rows kept to values of it
+    // outside those — every constant it is compared with by eq / in is one of the others)
+    const applies = (r) => !r.when || Object.entries(r.when).every(([c, values]) => {
+      const kept = keptTo(c);
+      return !kept?.size || [...kept].some((v) => values.some((w) => String(w) === String(v)));
+    });
+    const missing = required.filter((r) => applies(r) && !keptTo(r.column)).map((r) => r.column);
     if (!missing.length) return [];
     const names = missing.map((c) => `'${c}'`).join(' and ');
     return [`'${source}' marks ${names} required_filter — every question over it says which value${missing.length > 1 ? 's' : ''} it is about — and no condition here compares ${missing.length > 1 ? 'them' : 'it'}: these rows hold all of ${missing.length > 1 ? 'their' : 'its'} values together (the column's description says what they are). Filter ${missing.length > 1 ? 'each' : 'it'} — a where step, before the metrics step in a metric query, or a case in each measure — or say in the answer why every value belongs. semantic_index({ request: { source: '${source}', column: '${missing[0]}' } }) lists its values.`];

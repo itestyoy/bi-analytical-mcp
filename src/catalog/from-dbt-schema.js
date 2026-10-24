@@ -119,11 +119,17 @@ export function dbtSchemaToCatalog(doc) {
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.data_type) dataTypes[col.name] = String(col.data_type); // the warehouse type as declared — the semantic layer reads a time column by it
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
-      // meta.mcp.required_filter: true — the authors' word that every question over this model names
-      // which of this column's values it is about (a stream, a test flag): a read that does not is warned
+      // meta.mcp.required_filter — the authors' word that every question over this model names which of
+      // this column's values it is about (a stream, a test flag): a read that does not is warned. true, or
+      // { when: { <column>: <value> | [<values>] } }: required only of rows that column may hold one of
+      // those values in (a tester flag of the production stream, not of the test one)
       if (cm.required_filter !== undefined) {
-        if (cm.required_filter !== true) throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.required_filter must be true (every query over the model should filter this column), or left out`);
-        (m.required_filters ||= []).push(col.name);
+        const rf = cm.required_filter;
+        const whenOk = (w) => w && typeof w === 'object' && !Array.isArray(w) && Object.keys(w).length > 0
+          && Object.values(w).every((v) => (Array.isArray(v) ? v.length > 0 && v.every((x) => ['string', 'number', 'boolean'].includes(typeof x)) : ['string', 'number', 'boolean'].includes(typeof v)));
+        const form = rf === true ? {} : rf && typeof rf === 'object' && !Array.isArray(rf) && Object.keys(rf).length === 1 && whenOk(rf.when) ? { when: Object.fromEntries(Object.entries(rf.when).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])) } : null;
+        if (!form) throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.required_filter must be true (every query over the model should filter this column), or { when: { <column>: <value> | [<values>] } } (required only where that column may hold one of those values), or left out`);
+        (m.required_filters ||= []).push({ column: col.name, ...form });
       }
       if (cm.entity) {
         // A column-level entity is the single-column case of the same declaration.
@@ -266,6 +272,9 @@ export function dbtSchemaToCatalog(doc) {
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     m.columns = allColumns;
+    for (const r of m.required_filters || []) {
+      for (const c of Object.keys(r.when || {})) if (!allColumns.some((x) => x.name === c)) throw new Error(`column '${r.column}' of model '${model.name}': meta.mcp.required_filter.when names '${c}', which is no column of the model`);
+    }
     m.data_types = dataTypes;
     // Model-level `meta.mcp.entities`: a join key that spans SEVERAL columns, or one relationship
     // carried by several ALTERNATIVE columns (`variants`). It lives on the MODEL because it

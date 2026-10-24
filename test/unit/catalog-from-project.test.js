@@ -105,6 +105,11 @@ test('required_filter is read off a column as true, and anything else is refused
   assert.deepEqual(loadCatalogFromProject(dir, { dialect: 'duckdb' }).requiredFilters('users'), ['country']);
   const wrong = project({ 'users.yml': marked.replace('required_filter: true', 'required_filter: prod'), 'events.yml': eventsYml });
   assert.throws(() => loadCatalogFromProject(wrong, { dialect: 'duckdb' }), /column 'country' of model 'dim_users': meta\.mcp\.required_filter must be true/);
+  // { when }: required only where another column may hold one of the values named — a column of the model
+  const when = project({ 'users.yml': marked.replace('required_filter: true', 'required_filter: { when: { user_id: u1 } }'), 'events.yml': eventsYml });
+  assert.deepEqual(loadCatalogFromProject(when, { dialect: 'duckdb' }).requiredFilterSpecs('users'), [{ column: 'country', when: { user_id: ['u1'] } }]);
+  const stray = project({ 'users.yml': marked.replace('required_filter: true', 'required_filter: { when: { stream: prod } }'), 'events.yml': eventsYml });
+  assert.throws(() => loadCatalogFromProject(stray, { dialect: 'duckdb' }), /required_filter\.when names 'stream', which is no column of the model/);
 });
 
 test('a catalog file that is not a dbt model-schema YAML is refused', () => {

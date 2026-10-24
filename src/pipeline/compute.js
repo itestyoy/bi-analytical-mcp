@@ -1055,19 +1055,24 @@ export function eachNode(e, visit) {
 }
 
 /** The columns some condition compares, anywhere in `v` — steps, measures, a whole declaration: a
- *  comparison's { column } (or { property }) argument, as its name and, where the leaf names its model,
- *  `<source>.<name>`. */
-export function comparedColumns(v, out = new Set()) {
+ *  comparison's { column } (or { property }) argument, keyed by its name and, where the leaf names its
+ *  model, `<source>.<name>` — each with the constants an eq / in compares it with (none for another
+ *  comparison: it is compared, with no value it keeps). */
+export function comparedColumns(v, out = new Map()) {
   if (Array.isArray(v)) { v.forEach((x) => comparedColumns(x, out)); return out; }
   if (!isObj(v)) return out;
   if (v.fn !== undefined) {
     eachNode(v, (n) => {
       if (!CONDITION_FNS.includes(n.fn)) return;
-      for (const a of Array.isArray(n.args) ? n.args : []) {
+      const args = Array.isArray(n.args) ? n.args : [];
+      const kept = n.fn === 'eq' || n.fn === 'in' ? args.filter((a) => isObj(a) && a.fn === undefined && Object.hasOwn(a, 'value')).map((a) => a.value) : [];
+      for (const a of args) {
         const name = isObj(a) && a.fn === undefined ? (typeof a.column === 'string' ? a.column : typeof a.property === 'string' ? a.property : null) : null;
         if (!name) continue;
-        out.add(name);
-        if (typeof a.source === 'string') out.add(`${a.source}.${name}`);
+        for (const key of [name, ...(typeof a.source === 'string' ? [`${a.source}.${name}`] : [])]) {
+          if (!out.has(key)) out.set(key, new Set());
+          for (const x of kept) out.get(key).add(x);
+        }
       }
     });
     return out;

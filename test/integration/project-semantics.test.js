@@ -131,18 +131,20 @@ test('each of the project\'s semantic models is read at start as a context named
   assert.ok(loaded?.layer, JSON.stringify(loaded));
   assert.deepEqual(loaded.contexts.sort(), [ACQ, EV]);
   const o = (await engine.semantic_index({})).project_semantic_layer;
-  const ctxOf = (id) => o.contexts.find((c) => c.context_id === id);
-  const names = (id) => ctxOf(id).metrics.map((m) => m.name);
+  // the overview names each context's metrics; what each is cut by is context describe's
+  const names = (id) => o.contexts.find((c) => c.context_id === id).metrics;
   assert.deepEqual(names(ACQ), [
     'project_clicks', 'project_cost', 'project_cost_avg', 'project_cost_max', 'project_cost_per_touch', 'project_ctr',
     'project_events_per_click', 'project_impressions', 'project_impressions_last_day', 'project_paid_rows', 'project_touches',
   ]);
   // a metric of two semantic models is in the context of each
   assert.deepEqual(names(EV), ['project_active_players', 'project_events_per_click', 'project_events_per_player', 'project_events_total']);
-  const of = (id, name) => ctxOf(id).metrics.find((m) => m.name === name);
+  const described = { [ACQ]: await engine.context({ action: 'describe', context_id: ACQ }), [EV]: await engine.context({ action: 'describe', context_id: EV }) };
+  // a metric cut as most of its context's are carries no group_by of its own: the shared one is said once
+  const of = (id, name) => { const m = described[id].metrics.find((x) => x.name === name); return { ...m, ...(m.group_by || described[id].metrics_group_by) }; };
   assert.deepEqual(of(EV, 'project_events_total').dimensions_from, [EV]);
-  assert.deepEqual(ctxOf(EV).dimensions.map((d) => d.name).sort(), ['bundle_id', 'event_at', 'event_name']);
-  assert.deepEqual(ctxOf(ACQ).dimensions.map((d) => d.name).sort(), ['campaign', 'spend_date']);
+  assert.deepEqual(described[EV].dimensions.map((d) => d.name).sort(), ['bundle_id', 'event_at', 'event_name']);
+  assert.deepEqual(described[ACQ].dimensions.map((d) => d.name).sort(), ['campaign', 'spend_date']);
   // a ratio over a derived metric reads what its inputs read, and groups by the same — the keys
   // declared only as entities included
   assert.deepEqual(of(ACQ, 'project_cost_per_touch').semantic_models, [ACQ]);
@@ -152,9 +154,8 @@ test('each of the project\'s semantic models is read at start as a context named
   assert.deepEqual(of(ACQ, 'project_cost_max').meta, { additive: false });
   // (the model-level primary_entity has no column behind it: it addresses the dimensions, it is not a key to group by)
   assert.deepEqual(of(ACQ, 'project_cost_per_touch').entities, [{ entity: 'channel' }, { entity: 'media_source' }, { entity: 'player' }]);
-  const described = await engine.context({ action: 'describe', context_id: ACQ });
-  assert.equal(described.engine, 'project');
-  assert.equal(described.context_id, ACQ);
+  assert.equal(described[ACQ].engine, 'project');
+  assert.equal(described[ACQ].context_id, ACQ);
   // the tools that take one of them offer them as values, and still take any id a build returned
   for (const tool of ['query_model', 'context']) {
     const schema = engine.schemas[tool];

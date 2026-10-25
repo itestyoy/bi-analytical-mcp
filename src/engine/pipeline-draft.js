@@ -710,11 +710,15 @@ export const pipelineDraftMethods = {
     // A python stage's bodies pass the static gate BEFORE the draft persists them (what it only
     // warns of — an astype the runtime's frame does not take — goes with the answer)
     if (changedStage && changedStage.stage === 'python') filterWarnings = (await this._gatePythonStage(changedStage)).warnings;
-    if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
+    // a where's conditions, and a funnel step's (its own where, on the step's rows)
+    const conditionLists = changedStage?.stage === 'where' && Array.isArray(changedStage.conditions)
+      ? [changedStage.conditions]
+      : changedStage?.stage === 'match_recognize' ? (changedStage.steps || []).map((st) => st.where).filter(Array.isArray) : [];
+    if (conditionLists.length) {
       // each comparison of a column or an event property (its own value, not a field of it) with
       // constants, at any depth of and / or / not
       const specs = [];
-      eachCondition(changedStage.conditions, (cd) => {
+      for (const conditions of conditionLists) eachCondition(conditions, (cd) => {
         const cmp = comparisonOf(cd);
         if (!cmp || cmp.subject.field !== undefined) return;
         const name = cmp.subject.column ?? cmp.subject.property;

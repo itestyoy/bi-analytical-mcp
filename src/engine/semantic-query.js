@@ -549,10 +549,17 @@ export const semanticQueryMethods = {
         }),
       };
     };
-    if (only) return one(only);
+    // a context described: its own model (its dimensions and entities); its metrics are the layer's
+    // answer beside this one (context describe), so they are not said twice
+    if (only) { const { metrics: _metrics, ...own } = one(only); return own; }
     return {
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. context({ request: { action: 'describe', context_id, metric } }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
-      contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it, listed here with its metrics by name: context({ request: { action: 'describe', context_id } }) gives its dimensions and each metric's definition and meta, and with metric one metric's full group_by — everything it can be grouped by. Query one with query_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A.`,
+      // (by name only: every request that reads the overview carries it — the details are one describe away)
+      contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map((id) => {
+        const ctx = this.ctxs.get(id);
+        const sm = layer.semantic_models.find((x) => x.name === ctx.state.semantic_model);
+        return { context_id: id, ...(sm?.description ? { description: sm.description } : {}), metrics: this._projectMetricsOf(ctx).map((m) => m.name) };
+      }),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
       // joins the project declares that no reference could name — a model joined through several keys,
       // a hop onto no single model: left out, each with how to declare it so it is served

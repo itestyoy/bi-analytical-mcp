@@ -6581,7 +6581,7 @@
           ]
         }
       ],
-      "notes": "Each semantic model names its own `source` and is scoped with its own event vocabulary — an event or property of one source is not readable on the other, and there is no default source. What makes them comparable is metric_time: both are put on the same axis without being joined.",
+      "notes": "Each semantic model names its own `source` and is scoped with its own event vocabulary — an event or property of one source is not readable on the other, and there is no default source. What makes them comparable is metric_time: both are put on the same axis without being joined. A filter one source needs (its required_filter columns — semantic_index({ request: { source } }) lists them: a stream, a test flag) is written into THAT source's measures, as a case over the rows it keeps: a where step before the metrics step filters only the metrics that fold its model, and is refused in a query that holds a metric of the other source.",
       "hack": "One semantic_model step, a measure of another source named by its `source`: the layer answers both in one query and lines them up over metric_time. Extrapolate: any number of sources side by side; a RATIO across two of them belongs in a derived metric, not in a measure."
     },
     {

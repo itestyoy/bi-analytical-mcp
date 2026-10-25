@@ -168,6 +168,14 @@ export const semanticPreviewMethods = {
       const spoken = (d) => (d?.agg_time_dimension === EVENT_TIME_DIM && timeCol(d.semantic_model) ? { ...d, agg_time_dimension: timeCol(d.semantic_model) } : d);
       return { ...spoken(m), ...(inputOf ? { input_of: input.metric } : {}), definition: spoken(def), group_by: cut };
     });
+    // most metrics of a layer are cut alike: that group_by is said once, beside them, and a metric
+    // carries its own only where it differs (one metric asked: its own, in full)
+    const cutKey = (m) => JSON.stringify(m.group_by);
+    const counts = new Map();
+    if (!input.metric) for (const m of metrics) counts.set(cutKey(m), (counts.get(cutKey(m)) || 0) + 1);
+    const [commonKey, commonCount] = [...counts.entries()].sort((x, y) => y[1] - x[1])[0] || [];
+    const sharedCut = commonCount > 1 ? JSON.parse(commonKey) : null;
+    const listedMetrics = sharedCut ? metrics.map((m) => (cutKey(m) === commonKey ? (({ group_by: _g, ...rest }) => rest)(m) : m)) : metrics;
     const first = (input.metric && scope.metrics.find((m) => m.name === input.metric)) || scope.metrics.find((m) => !declared || declared.has(m.name)) || scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
     // (a categorical column where there is one: a time or a validity bound reads as an odd first cut)
@@ -208,7 +216,8 @@ export const semanticPreviewMethods = {
         ...(entities ? { entities: entities.map(({ expr, ...e }) => ({ ...e, ...(expr && expr !== e.name && !/[()|]/.test(expr) ? { expr } : {}) })) } : {}),
         ...(measures?.length ? { measures } : {}),
       })),
-      metrics,
+      metrics: listedMetrics,
+      ...(sharedCut ? { metrics_group_by: sharedCut, metrics_group_by_note: 'What every metric above without a group_by of its own is cut by.' } : {}),
       // what a query of THIS context names a cut by
       ...(project || input.metric ? {} : { groupable }),
       ...(first ? { query_with: `query_model(${JSON.stringify({ request: { context_id: ctx.id, steps: [...(firstRequired.length ? [{ stage: 'where', conditions: firstRequired.map((r) => ({ fn: 'eq', args: [r, { value: '<value>' }] })) }] : []), { stage: 'metrics', metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }] }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),

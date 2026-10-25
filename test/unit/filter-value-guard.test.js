@@ -47,6 +47,21 @@ test('a wrong-cased value is rejected at any depth of and / or / not, on a colum
   assert.equal(ok.action, 'add_steps');
 });
 
+// A funnel step's own where is checked as a where stage is: a value the data holds in other casing,
+// or not at all, is refused in the call rather than matching nobody minutes later.
+test('a funnel step\'s where value is checked against the indexed values, as a where stage is', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
+  const s = await e.build_model({ action: 'start', name: 'funnelval', source: 'events' });
+  const funnel = (value) => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'match_recognize', steps: [
+    { name: 'start', event_name: ['level_started'] },
+    { name: 'won', event_name: ['level_completed'], where: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value }] }] },
+  ] }] });
+  await assert.rejects(() => funnel('Win'), (err) => /different casing/.test(err.message) && /'win'/.test(err.message));
+  await assert.rejects(() => funnel('victory'), (err) => /does not occur/.test(err.message));
+  assert.equal((await funnel('win')).action, 'add_steps');
+});
+
 // A value that does NOT occur (and the full value set is indexed) is rejected as absent.
 test('an absent value is rejected when the full value set is indexed', async () => {
   const e = engine();

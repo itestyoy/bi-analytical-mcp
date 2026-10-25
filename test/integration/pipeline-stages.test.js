@@ -1205,6 +1205,26 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
 
 // #4a: a column of the rows (session_number — a physical column, not a payload property) is
 // usable in a step's where, the grammar of every where.
+// A funnel whose first step reaches nobody still answers one row when an aggregate follows it — of
+// zeros, which read as a real "0% converted". The same is said as of no rows: most likely a filter that
+// matched nothing (a value of another app passes the catalog's check and matches nothing here).
+test('a funnel whose first step reaches nobody: its counts are 0, and the build says that is likely a filter', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await mrPipe([
+    { stage: 'match_recognize', steps: [
+      { name: 'buy', event_name: ['iap_purchase_completed'], where: [{ fn: 'gt', args: [{ property: 'price_in_usd_of_event_data' }, { value: 1000000 }] }] },
+      { name: 'back', event_name: ['new_session'] },
+    ] },
+    { stage: 'aggregate', measures: [{ name: 'buyers', expr: { fn: 'count' } }, { name: 'came_back', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ column: 'reached_back' }], then: { value: 1 } }] }] } }] },
+  ]);
+  assert.deepEqual(out.rows.map((r) => [num(r.buyers), num(r.came_back)]), [[0, 0]]);
+  assert.ok(out.warnings.some((w) => w.includes('Every number in the result is 0') && w.includes('first step reached nobody')), JSON.stringify(out.warnings));
+  // a result with a number that is not 0 says nothing of the kind
+  const some = await mrPipe([{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
+  assert.ok(num(some.rows[0].n) > 0);
+  assert.ok(!some.warnings.some((w) => w.includes('Every number in the result is 0')), JSON.stringify(some.warnings));
+});
+
 test('match_recognize takes a column in a step condition', opts, async (t) => {
   if (skip(t)) return;
   const colCond = { fn: 'gte', args: [{ column: 'session_number' }, { value: 2 }] };

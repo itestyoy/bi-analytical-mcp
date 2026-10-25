@@ -503,8 +503,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   ONLY A TOOL WITH A VIEW CARRIES `_meta.ui` (its `resourceUri`, `visibility: ["model"]`) — a host opens a
   frame for every call of a tool that declares `_meta.ui`, and one with no page behind it spins on
   "Computing…" for ever, as the official registerAppTool marks only the tools it registers with a view;
-  `drill_result` carries its visibility (`["model", "app"]` — hosts refused a card's call to an app-only
-  tool; the server answers it only for a DRAWN task); no other tool carries any `_meta.ui`, the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
+  no other tool carries any `_meta.ui` — `drill_result` included: its visibility is the spec's default
+  `["model", "app"]` (hosts refused a card's call to an app-only tool; the server answers it only for a
+  DRAWN task) —, the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
   server call is drill_result for the task it was drawn from — a drill-down's next view — a pivot
   row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): the card sends the
   path taken and the level chosen ({ task_id, path, level?, mode? }), and the SERVER makes the read —

@@ -23,10 +23,11 @@
 // drill-down's next view — a pivot row opened, a chart mark clicked (its task's stored table,
 // filtered to the path taken). Held in three places, so no single one is load-bearing:
 //   * ONLY a tool with a view carries `_meta.ui` (its resourceUri, and visibility ["model"]: callable by
-//     the model, NOT by a view), and drill_result ["model", "app"] — the view's read of its own drawn
-//     task, served by the server only for a drawn task. A tool with no view carries no `_meta.ui` at
-//     all: a host draws a frame for a tool that declares one, and a frame with no page behind it
-//     spins on "Computing…" for ever (seen in Claude for every query and build);
+//     the model, NOT by a view). A tool with no view carries no `_meta.ui` at all — drill_result
+//     included, whose visibility is the spec's default ["model", "app"] (the view's read of its own
+//     drawn task, served by the server only for a drawn task): a host draws a frame for a tool that
+//     declares `_meta.ui`, and a frame with no page behind it spins on "Computing…" for ever (seen in
+//     Claude for every query and build);
 //   * the view resource declares an empty `csp` — no connect/resource/frame origins, i.e. no fetch,
 //     XHR, WebSocket, remote script or nested frame — and the page carries the same policy itself;
 //   * the view's code has exactly one server call, drill_result, reached with its own drill-down
@@ -55,26 +56,25 @@ export { RESOURCE_MIME_TYPE };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-/** Who may call a tool: the model — and, for the one tool a card calls itself (its definition's
- *  `appCallable`: drill_result, the card reading the next view of its own drawn task), the view too.
- *  Its visibility is ["model", "app"] — the spec's default — and not ["app"] alone: a host refused
- *  the card's call to an app-only tool ("Could not load this level"), while this pair is what hosts
- *  serve. What keeps it the card's own read is the server: it answers only for a task that was DRAWN. */
+/** Who may call a tool with a view: the model, not a view. The one tool a card calls itself (its
+ *  definition's `appCallable`: drill_result, the card reading the next view of its own drawn task)
+ *  declares nothing — the spec's default visibility, ["model", "app"], is what it needs, and not
+ *  ["app"] alone: a host refused the card's call to an app-only tool ("Could not load this level").
+ *  What keeps it the card's own read is the server: it answers only for a task that was DRAWN. */
 export const TOOL_VISIBILITY = Object.freeze(['model']);
 
 /**
  * The `_meta` a tool carries, from its definition (src/tools/define.js) — null for a tool that draws
- * nothing. A tool that draws (`view`: 'result' for the result view, or a feature's own view) carries
- * its view and its visibility; the one tool a card calls itself (drill_result) its visibility. Nothing
- * else carries `_meta.ui` — not a query, not a build, not a read of a task — as the official
- * registerAppTool marks only the tools it registers with a view: a host takes `_meta.ui` for "this
- * tool has a UI" and opens a frame for every call of it, which with no page to fill it spins for ever.
+ * nothing. Only a tool that draws (`view`: 'result' for the result view, or a feature's own view)
+ * carries `_meta.ui`: its view, and its visibility (the model's). Nothing else does — not a query, not
+ * a build, not a read of a task, not drill_result (the card's own read, the spec's default visibility
+ * ["model", "app"] without saying it) — as the official registerAppTool marks only the tools it
+ * registers with a view: a host takes `_meta.ui` for "this tool has a UI" and opens a frame for every
+ * call of it, which with no page to fill it spins for ever.
  */
 export function viewMeta(def) {
   const uri = def.view === 'result' ? RESULT_VIEW_URI : def.view?.uri || null;
-  if (!uri && !def.appCallable) return null;
-  const visibility = def.appCallable ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY];
-  return uri ? { ui: { resourceUri: uri, visibility } } : { ui: { visibility } };
+  return uri ? { ui: { resourceUri: uri, visibility: [...TOOL_VISIBILITY] } } : null;
 }
 
 /** The view's network policy: nothing. Maps to CSP connect-src / resource / frame-src 'none'. */

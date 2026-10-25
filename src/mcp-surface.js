@@ -95,9 +95,9 @@ const toolsOf = (engine) => engine?.tools || CORE_REGISTRY;
 
 /**
  * The advertised tools — ONE list, the same for every client, as the official ext-apps
- * `registerAppTool` does: a tool with a view carries `_meta.ui` (the view and its visibility; drill_result
- * its visibility, the card's own read), no other tool carries any, and a host without the extension
- * ignores it. It is not a per-client list because a host re-draws a card already in a
+ * `registerAppTool` does: a tool with a view carries `_meta.ui` (the view and its visibility), no other
+ * tool carries any — drill_result, the card's own read, included: its visibility is the spec's default
+ * — and a host without the extension ignores it. It is not a per-client list because a host re-draws a card already in a
  * conversation (reopened, or on another device) by finding the tool that drew it, on a listing
  * that need not carry the Apps declaration: a list without display_model_result there made every
  * stored card "Connector not found". What a client WITHOUT the extension does not get is what

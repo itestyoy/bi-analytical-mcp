@@ -87,10 +87,10 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   {
     const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
     // only a tool with a view carries _meta.ui (a host opens a frame for every call of a tool that does: one
-    // with no page behind it spins for ever) — and the card's own read, the one tool visible to "app"
+    // with no page behind it spins for ever) — the card's own read drill_result none either: its visibility
+    // is the spec's default, ["model", "app"]
     for (const t of (await c.listTools()).tools) {
-      if (t.name === 'drill_result') assert.deepEqual(t._meta?.ui, { visibility: ['model', 'app'] });
-      else if (VIEWED.includes(t.name)) assert.deepEqual(t._meta?.ui, { resourceUri: RESULT_VIEW_URI, visibility: ['model'] }, t.name);
+      if (VIEWED.includes(t.name)) assert.deepEqual(t._meta?.ui, { resourceUri: RESULT_VIEW_URI, visibility: ['model'] }, t.name);
       else assert.equal(t._meta?.ui, undefined, `${t.name} draws nothing, so it declares no UI`);
     }
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;

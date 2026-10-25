@@ -200,6 +200,23 @@ test('a search returns the notes it matches, not the ones a fragment of it lands
   assert.deepEqual((await searchNotes(e, 'ad fromat')).notes.map((n) => n.id), [notes[0].id]);
 });
 
+// What a note is ABOUT outweighs what its body mentions in passing, and limit caps the notes a search
+// answers with (5 unless it says).
+test('a note about the searched words leads one that mentions them in passing, and limit caps the notes', async () => {
+  const e = engine();
+  const [about, passing] = (await e.memory({ action: 'record', notes: [
+    { note: 'D1 counts a player who returns in the 24 hours after the first 24 from install', question: 'how is retention counted?', aliases: ['retention', 'удержание'], about: [{ term: 'retention' }] },
+    { note: 'monitoring run of the 23rd: DAU fell 4% on Android, retention and revenue unchanged, nothing to act on', about: [{ term: 'monitoring' }] },
+  ] })).notes;
+  assert.deepEqual((await searchNotes(e, 'retention')).notes.map((n) => n.id), [about.id], 'a body mentioning the word in passing is left behind the note about it');
+  assert.deepEqual((await searchNotes(e, 'nothing to act on')).notes.map((n) => n.id), [passing.id], 'a body is still found by its own words');
+  const many = (await e.memory({ action: 'record', notes: Array.from({ length: 7 }, (_, i) => ({ note: `churn finding ${i}`, aliases: ['churn'] })) })).notes;
+  assert.equal((await searchNotes(e, 'churn')).notes.length, 5, 'five unless limit says');
+  const r = await e.semantic_index({ search: 'churn', limit: 2 });
+  assert.equal(r.memory_matches.length, 2);
+  assert.ok(many.length === 7);
+});
+
 // Regression (test report 2026-06-13 #7): a multi-word phrase lifted from the NOTE body —
 // not contiguous, not an alias — must still be found (token-coverage lexical match).
 test('search finds a multi-word phrase from the note body (interleaved words)', async () => {

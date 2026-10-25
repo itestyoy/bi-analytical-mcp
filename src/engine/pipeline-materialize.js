@@ -18,6 +18,20 @@ const SHOWN_ROWS = READ_PAGE;
 /** Whether a pipeline's rows come out sorted: its last stage that is not a limit is an order_by. */
 const endsSorted = (stages) => [...(stages || [])].reverse().find((st) => st.stage !== 'limit')?.stage === 'order_by';
 
+/** Whether rows carry numbers and every one of them is 0 (a missing value aside). */
+function allZero(rows) {
+  let numbers = 0;
+  for (const row of rows) {
+    for (const v of Object.values(row || {})) {
+      const n = typeof v === 'number' ? v : (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : null);
+      if (n === null) continue;
+      if (n !== 0) return false;
+      numbers += 1;
+    }
+  }
+  return numbers > 0;
+}
+
 export const pipelineMaterializeMethods = {
   /**
    * The name the NEXT build of this pipeline takes. The counter lives on the CONTEXT, not on the
@@ -444,6 +458,12 @@ export const pipelineMaterializeMethods = {
           : []),
         ...((this.runner && rows.length === 0 && !sampled)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the steps / widen the window.`]
+          : []),
+        // rows came back, but every number in them is 0: as suspect as no rows — a funnel step, or a
+        // where, on a value the scoped rows never hold (a value of another app passes the catalog's
+        // check: the index holds the values of every app together)
+        ...((this.runner && rows.length && allZero(rows))
+          ? [`Every number in the result is 0 — usually a filter that matched nothing rather than a real zero${stages.some((st) => st.stage === 'match_recognize') ? ': a funnel whose first step reached nobody. Check that each step\'s values occur in the events you kept — the value index lists a property\'s values across every app, so a value of another app passes the check yet matches nothing here (filter to the app and look at the property\'s values with a quick aggregate).' : '. Check that the where values occur in the rows you kept.'}`]
           : []),
       ],
     };

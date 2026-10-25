@@ -500,8 +500,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the
   pivot's only, Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
   theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT:
-  every tool is `visibility: ["model"]` except `drill_result` (`["model", "app"]` — hosts refused a
-  card's call to an app-only tool; the server answers it only for a DRAWN task), the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
+  ONLY A TOOL WITH A VIEW CARRIES `_meta.ui` (its `resourceUri`, `visibility: ["model"]`) — a host opens a
+  frame for every call of a tool that declares `_meta.ui`, and one with no page behind it spins on
+  "Computing…" for ever, as the official registerAppTool marks only the tools it registers with a view;
+  `drill_result` carries its visibility (`["model", "app"]` — hosts refused a card's call to an app-only
+  tool; the server answers it only for a DRAWN task); no other tool carries any `_meta.ui`, the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
   server call is drill_result for the task it was drawn from — a drill-down's next view — a pivot
   row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): the card sends the
   path taken and the level chosen ({ task_id, path, level?, mode? }), and the SERVER makes the read —
@@ -874,10 +877,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   layer only: its copy of the project leaves the project's semantic keys out
   (`withoutSemanticLayer`, src/context-manager.js) — the latest spec allows one semantic model per
   dbt model, and a name of one layer could shadow the other's. The overview
-  (`semantic_index().project_semantic_layer.contexts`) lists each context with its dimensions and its
-  metrics, each with its meta (the project's notes on reading it) and the semantic models whose
-  dimensions cut it; context({ action: "describe", context_id, metric }) gives one metric's definition
-  and its full group_by.
+  (`semantic_index().project_semantic_layer.contexts`) lists each context with its metrics by name — every
+  request that reads it carries it; context({ action: "describe", context_id }) gives its dimensions and
+  each metric with its definition and meta (the project's notes on reading it), the cut most of them share
+  said once (`metrics_group_by`) and a metric's own where it differs, and with `metric` one metric's
+  definition and its full group_by.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v1`
   (used unless DBT_ENV names another — TEMPORARILY: every dbt v2 on PyPI lists a BigQuery dataset one

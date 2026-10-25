@@ -155,14 +155,17 @@ export class MemoryStore {
     // inside one ('format' in 'reformatted', 'ad' in 'load'); a two-letter word ('ad', 'ui') counts too
     const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const qtokens = ql.split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2).map((t) => new RegExp(`(?<![\\p{L}\\p{N}])${escape(t)}`, 'u'));
+    // what a note is ABOUT — its question, its aliases (the user's words for it), what it is linked to —
+    // outweighs a word its body mentions in passing: a long note names many things it is not about
+    const scoreIn = (hay, phrase, [base, span]) => {
+      if (ql && hay.includes(ql)) return phrase;
+      if (!qtokens.length) return 0;
+      const cov = qtokens.filter((t) => t.test(hay)).length / qtokens.length;
+      return cov >= 0.6 ? base + span * cov : 0;
+    };
     for (const n of notes) {
-      const hay = this._embedText(n).toLowerCase();
-      let lex = 0;
-      if (ql && hay.includes(ql)) lex = 1; // whole-query exact substring
-      else if (qtokens.length) {
-        const cov = qtokens.filter((t) => t.test(hay)).length / qtokens.length;
-        if (cov >= 0.6) lex = 0.5 + 0.4 * cov; // most/all query words present
-      }
+      const short = [n.question, ...(n.aliases || []), ...(n.targets || []).map(targetWords)].filter(Boolean).join('\n').toLowerCase();
+      const lex = Math.max(scoreIn(short, 1, [0.5, 0.4]), scoreIn(String(n.note || '').toLowerCase(), 0.7, [0.3, 0.3]));
       if (lex > 0) scored.set(n.id, lex);
     }
 

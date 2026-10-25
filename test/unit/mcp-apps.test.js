@@ -86,9 +86,13 @@ test('the hint to show a result as a card reaches only a client that renders car
 test('the view reads only its own result: one tool is app-callable (and only by the app), no network, one server call in its code', async () => {
   {
     const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
-    // a host refuses a view's tools/call to a tool that is not visible to "app": only the card's read of its own task is,
-    // and the model never sees that one
-    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'drill_result' ? ['model', 'app'] : ['model'], t.name);
+    // only a tool with a view carries _meta.ui (a host opens a frame for every call of a tool that does: one
+    // with no page behind it spins for ever) — and the card's own read, the one tool visible to "app"
+    for (const t of (await c.listTools()).tools) {
+      if (t.name === 'drill_result') assert.deepEqual(t._meta?.ui, { visibility: ['model', 'app'] });
+      else if (VIEWED.includes(t.name)) assert.deepEqual(t._meta?.ui, { resourceUri: RESULT_VIEW_URI, visibility: ['model'] }, t.name);
+      else assert.equal(t._meta?.ui, undefined, `${t.name} draws nothing, so it declares no UI`);
+    }
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
     assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, 'no origin of any kind');
   }

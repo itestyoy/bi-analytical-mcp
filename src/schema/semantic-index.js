@@ -72,7 +72,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     view('{ search }', 'Events, properties, columns, values and recipes by word.', ['search'], {
       search: field.search,
       fuzzy: field.fuzzy,
-      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Value matches (default 20).' },
+      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Matches of each kind: values (default 20), saved notes (default 5, at most 20).' },
     }),
     view('{ notes }', 'The saved findings, newest first.', ['notes'], {
       notes: { const: true },

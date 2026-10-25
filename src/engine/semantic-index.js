@@ -630,7 +630,8 @@ export const semanticIndexMethods = {
     const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
     // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
     // used, recorded as an alias, resolves straight back to the real field it described.
-    const mem = await this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false });
+    // (as many notes as limit asks, 5 unless it says: a note is long, and the best ones lead)
+    const mem = await this.memoryStore.search(input.search, { limit: Math.min(input.limit ?? 5, 20), fuzzy: input.fuzzy !== false });
     const memHits = mem.notes.map(memoryView);
     if (memHits.length) {
       res.memory_matches = memHits;

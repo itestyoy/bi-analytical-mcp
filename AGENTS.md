@@ -806,6 +806,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (semantic build / query / preview, the pipeline draft and its materialization, reading a task back,
   semantic_index's catalog views) stay the engine's own methods, one file per family under src/engine/.
   A new concern with a dependency set of its own is a service, not another mixin.
+- WHAT HAS BEEN ASKED IS KEPT BY MEANING, NEVER AS A WAY TO THE DATA (src/task-index.js, `engine.taskIndex`):
+  every task a tool starts is recorded as it starts (the task runtime's `onStart`) — one line of text
+  that says what it computes (its context's name and description, the source, the events, metrics,
+  columns and values its input names, its window) and a vector of it: the deployment's embedder's
+  (MEMORY_EMBEDDINGS, at `TASK_DIMS`, after the start and never in its way, stored with its model and
+  re-embedded for another), or without one a local TF-IDF vector over the tasks read. semantic_index's
+  `{ tasks }` view reads it — the tasks like a phrase, or the themes of a period (narrowed to a phrase,
+  clustered by k-means at the count that separates best) — and answers what each computed and when,
+  NEVER a task id, a context id or a table: another task's rows may not fit the question at hand, so
+  nothing found here can be read back, built on or drawn. The store's `task_log` is kept across a reset.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

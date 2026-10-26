@@ -93,6 +93,12 @@ export const semanticIndexMethods = {
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this.indexViews.run(input);
     if (input.status) return this.indexViews.status(input);
+    // ── what has been asked of this server: tasks like a phrase, or the themes of a period ──
+    if (input.tasks) {
+      // the tasks started before the index existed are kept from the job registry first
+      this.taskIndex.backfill([...this.jobs.jobs.values()], (id) => { try { return this.ctxs.get(id); } catch { return null; } });
+      return input.tasks.themes ? this.taskIndex.themes(input.tasks) : this.taskIndex.similar(input.tasks);
+    }
 
     // ── { guide }: the analyst procedure + routing (workflow, IF/DO triggers, per-task
     // recipes) — the generic skill knowledge served through the MCP, single-sourced. ──

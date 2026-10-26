@@ -46,6 +46,7 @@ import { CORE_TOOLS } from './tools/core.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore } from './memory.js';
+import { TaskIndex } from './task-index.js';
 import { openStore } from './store.js';
 import { ErrorLog, readGenerated } from './error-log.js';
 import { getDialect } from './dialects/index.js';
@@ -210,7 +211,10 @@ export class Engine {
     this.ctxs = contextManager || new ContextManager({});
     this._contextCatalogs = new Map(); // context id → the catalog its layer is read over (_catalogOf)
     // the task runtime (src/task-runner.js): the engine's tools and a feature's start and read tasks through it
-    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a) });
+    // WHAT HAS BEEN ASKED OF THIS SERVER, by meaning (src/task-index.js): every task's line of text and
+    // its vector — semantic_index({ request: { tasks } }); never a way back to a task's data
+    this.taskIndex = new TaskIndex({ store: this.store, embedder, toolOf: (kind) => this.tasks?.toolOf(kind) || kind, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} task-index ${m}`) });
+    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a), onStart: (id, tool, ctx, input) => this.taskIndex.record({ id, tool, ctx, input }) });
     // WHAT A FEATURE MAY USE OF THE ENGINE (src/features.js), besides its task runtime (engine.tasks),
     // the dbt project's contexts (engine.ctxs), the catalog and the job registry: the one surface it
     // is written against, so an engine method can change without reaching into a feature

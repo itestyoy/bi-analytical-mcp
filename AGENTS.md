@@ -731,7 +731,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
     proxied read, the drawn mark persisted with the task so a card outlives a restart;
   * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
     skill files in resources/list, templates and resources/read, the SKILLS pointer in the
-    instructions;
+    instructions — the wire is the SDK's `SkillsExtension`, attached to the server of a request that
+    declares it, over the catalog src/skills.js renders (its `SkillSource`);
   * Tasks (`io.modelcontextprotocol/tasks`): a long call becoming a task, tasks/get|cancel|update
     (-32021 otherwise).
   The extensions are 2026-07-28's: a 2025 client gets none of them, whatever its `initialize` declared.

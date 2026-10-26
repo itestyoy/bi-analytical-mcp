@@ -8,35 +8,29 @@
 // client, except its extensions (Apps, Skills, Tasks), each offered only to a client that declares
 // it in the request being served (src/client-extensions.js).
 //
-// The tools are registered on the low-level `Server`, the SDK's documented path for a JSON Schema
-// you already have (docs: "Low-level Server"): our input schemas are built from the catalog, and
-// the engine validates arguments itself so a refusal comes back as a tool error the model can fix,
-// naming the field and the branch.
+// The tools are registered on the low-level `Server` (`mcp.server`), the SDK's documented path for a
+// JSON Schema you already have (docs: "Low-level Server"): our input schemas are built from the
+// catalog, and the engine validates arguments itself so a refusal comes back as a tool error the
+// model can fix, naming the field and the branch. The resources — the view pages, the skill files —
+// are the high-level `McpServer`'s (registerResource, and the SDK's Skills extension attached to it).
 //
 // The three extensions, each declared in `capabilities.extensions`:
 //   * Apps  (io.modelcontextprotocol/ui)     — `_meta.ui` on the viewed tools, the `ui://` view;
-//   * Skills (io.modelcontextprotocol/skills) — skills/list, skills/get, files via resources/read;
+//   * Skills (io.modelcontextprotocol/skills) — the SDK's SkillsExtension: skills/list, skills/get,
+//     the skill:// template and its files via resources/read;
 //   * Tasks (io.modelcontextprotocol/tasks)   — a call that outgrows its window comes back as a
 //     task (`resultType: "task"`); tasks/update here; tasks/get and tasks/cancel are served in
 //     front of the SDK (src/mcp-tasks.js) until the SDK serves the extension itself.
 
 import { z } from 'zod';
-import { Server, ProtocolError, ResourceNotFoundError } from '@modelcontextprotocol/server';
+import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine, unknownToolMessage } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
 import { RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
 import { clientCapabilities, declaresExtension, UI_EXTENSION, SKILLS_EXTENSION, TASKS_EXTENSION } from './client-extensions.js';
-import { LIST_TTL_MS } from './surface-change.js';
+import { PER_CLIENT } from './surface-change.js';
 
-
-// What this server lists and says depends on which extensions the client declared
-// (src/client-extensions.js), so those answers are its own to cache — for LIST_TTL_MS, short, so a
-// deploy that changes them reaches it within a minute even when no subscription stream is open
-// (src/surface-change.js). Skills are part of the surface's fingerprint, so their list is too.
-const PER_CLIENT = { ttlMs: LIST_TTL_MS, cacheScope: 'private' };
-
-const SkillsListParams = z.object({ cursor: z.string().optional() }).passthrough();
-const SkillsGetParams = z.object({ uri: z.string() }).passthrough();
+const AnyParams = z.object({}).passthrough();
 const TaskUpdateParams = z.object({ taskId: z.string(), inputResponses: z.record(z.string(), z.unknown()).optional() }).passthrough();
 const AnyResult = z.object({}).passthrough();
 
@@ -73,11 +67,12 @@ const missingExtension = (id) => new ProtocolError(-32021, 'Missing required cli
 export function createMcpServer(services, { era, offer = offeredExtensions(services, { era }) } = {}) {
   const { engine, tasks } = services;
   const renders = offer.apps;
-  const server = new Server(services.serverInfo || SERVER_INFO, {
+  const mcp = new McpServer(services.serverInfo || SERVER_INFO, {
     capabilities: serverCapabilities(services),
     instructions: services.instructionsFor(offer),
     cacheHints: { 'server/discover': PER_CLIENT, 'tools/list': PER_CLIENT, 'resources/list': PER_CLIENT, 'resources/templates/list': PER_CLIENT, 'resources/read': PER_CLIENT },
   });
+  const server = mcp.server;
 
   server.setRequestHandler('tools/list', async () => {
     logLine('rpc', `tools/list → ${services.toolDefs.length} tools (${era || '?'}, apps=${renders})`);
@@ -128,34 +123,25 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     return { resultType: 'task', ...tasks.detailed(t), statusMessage: 'The call is running; poll tasks/get.' };
   }
 
-  server.setRequestHandler('resources/list', async () => {
-    const resources = services.resources(offer);
-    logLine('rpc', `resources/list → ${resources.length} (${era || '?'}, apps=${renders})`);
-    return { resources };
-  });
-  server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates(offer) }));
-  server.setRequestHandler('resources/read', async (request) => {
-    const contents = services.read(request.params.uri, offer);
-    // what a host fetches to (re-)draw a card is one line away from its answer
-    logLine('rpc', `resources/read ${String(request.params.uri).slice(0, 120)} → ${contents ? 'ok' : 'NOT FOUND'} (${era || '?'}, apps=${renders})`);
-    // the SDK puts this on the wire as each revision spells it (-32002 in 2025, -32602 in 2026-07-28)
-    if (!contents) throw new ResourceNotFoundError(request.params.uri);
-    return { contents };
-  });
+  // The view pages: listed and read for every client. A card already in a conversation is re-drawn by
+  // the host when the chat is reopened — on this device or another — and that fetch need not carry
+  // the Apps declaration; refusing it broke every stored card ("Connector not found"). A page is
+  // static and draws only the result the host hands it: reading it offers nothing. What is OFFERED —
+  // the tools that draw, the instructions — stays for a client that declares the extension.
+  for (const { uri, name, ...meta } of services.apps.resources()) {
+    mcp.registerResource(name, uri, meta, async () => {
+      // what a host fetches to (re-)draw a card is one line away from its answer
+      logLine('rpc', `resources/read ${uri} (${era || '?'}, apps=${renders})`);
+      return { contents: services.apps.read(uri) };
+    });
+  }
 
-  if (services.skills) {
-    // served to a client that declared the Skills extension in this request, refused to any other
-    server.setRequestHandler('skills/list', { params: SkillsListParams, result: AnyResult }, async () => {
-      if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
-      return { skills: services.skills.list(), ...PER_CLIENT };
-    });
-    server.setRequestHandler('skills/get', { params: SkillsGetParams, result: AnyResult }, async ({ uri }) => {
-      if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
-      const s = services.skills.get(uri);
-      if (!s) throw new ProtocolError(-32602, `Not a skill this server serves: ${uri}`);
-      // the extension requires the caching hints on skills/get as on skills/list
-      return { skill: s, ...PER_CLIENT };
-    });
+  // Skills: the SDK's extension, for a client that declared it in this request; refused to any other
+  if (offer.skills) services.skillsExtension.attach(mcp);
+  else if (services.skills) {
+    for (const method of ['skills/list', 'skills/get']) {
+      server.setRequestHandler(method, { params: AnyParams, result: AnyResult }, async () => { throw missingExtension(SKILLS_EXTENSION); });
+    }
   }
 
   // tasks/update carries input for a task waiting on the client; this server never asks for any,
@@ -167,6 +153,6 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     return {};
   });
 
-  return server;
+  return mcp;
 }
 

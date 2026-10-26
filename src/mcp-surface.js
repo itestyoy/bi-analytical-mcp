@@ -15,8 +15,8 @@ import { buildViewModel } from './apps/result-view-model.js';
 import { toolRegistry } from './tools/define.js';
 import { CORE_TOOLS } from './tools/core.js';
 
-import { buildSkills } from './skills.js';
-import { surfaceFingerprint, surfaceChange, SurfaceChangeBus, CHANGE_WINDOW_MS } from './surface-change.js';
+import { buildSkills, skillsExtension } from './skills.js';
+import { surfaceFingerprint, surfaceChange, SurfaceChangeBus, CHANGE_WINDOW_MS, PER_CLIENT } from './surface-change.js';
 import { TaskRegistry } from './tasks.js';
 
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
@@ -395,37 +395,9 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     /** The instructions for what this client is offered: the card and skills paragraphs only for
      *  a client that declared those extensions (src/client-extensions.js). */
     instructionsFor,
-    resources(offer = {}) {
-      return [
-        ...apps.resources(), // the view page: listed and read for every client, like the tools that draw into it
-        ...(skills && offer.skills ? skills.skills.map((s) => ({ uri: s.uri, name: s.frontmatter.name, title: `Skill: ${s.frontmatter.name}`, description: s.frontmatter.description, mimeType: 'text/markdown', size: s.resources.find((r) => r.uri === s.uri)?.size })) : []),
-      ];
-    },
-    templates(offer = {}) {
-      return skills && offer.skills
-        ? skills.skills.filter((s) => s.resources.some((r) => /\/recipes\//.test(r.uri))).map((s) => ({
-          uriTemplate: s.uri.replace(/SKILL\.md$/, 'recipes/{recipe}.md'),
-          name: `${s.frontmatter.name}-recipe`,
-          title: `Recipe (${s.frontmatter.name})`,
-          description: 'One recipe of this skill in full — payload, example queries, the reusable technique. The same entry as semantic_index({ request: { recipe } }).',
-          mimeType: 'text/markdown',
-        }))
-        : [];
-    },
-    /** The contents of a resource, or null when this server has no such URI. */
-    read(uri, offer = {}) {
-      if (typeof uri !== 'string') return null;
-      // The view page is served to ANY request that asks for it by its URI. A card already in a
-      // conversation is re-drawn by the host when the chat is reopened — on this device or another
-      // — and that fetch need not carry the Apps declaration; refusing it broke every stored card
-      // ("Connector not found"). It is a static page that draws only the result the host hands it:
-      // reading it offers nothing. What is OFFERED — the listing, the tools that draw, the
-      // instructions — stays for a client that declares the extension.
-      const ui = apps.read(uri);
-      if (ui) return ui;
-      const f = offer.skills ? skills?.read(uri) : null;
-      return f ? [{ uri: f.uri, mimeType: f.mimeType, text: f.text }] : null;
-    },
+    // the SDK's Skills extension over the rendered catalog, attached to the server of a request whose
+    // client declared it (src/mcp-server.js)
+    skillsExtension: skills ? skillsExtension(skills, { cacheHint: PER_CLIENT }) : null,
     onShutdown(fn) { shutdownHooks.add(fn); },
     close() { for (const fn of shutdownHooks) { try { fn(); } catch { /* best effort */ } } tasks.close(); },
   };

@@ -278,7 +278,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   answered in front of it — `src/mcp-tasks.js`, with the SDK's own request classifier — until it does.)
 - **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
-  files via `resources/read` with sha256 digests). Generated at startup from the same objects
+  files via `resources/read` with sha256 digests — served by the SDK's `SkillsExtension`). Generated at startup from the same objects
   `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy. A client
   that does not declare it gets `skills/list` / `skills/get` refused (-32021), no skill files in the
   resource listings or reads, and no SKILLS pointer in the instructions — the same content stays

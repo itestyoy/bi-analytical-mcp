@@ -20,10 +20,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/express": "^2.0.1",
-    "@modelcontextprotocol/ext-apps": "^2.0.0",
-    "@modelcontextprotocol/node": "^2.1.0",
-    "@modelcontextprotocol/server": "^2.1.0",
+    "@modelcontextprotocol/express": "^2.0.2",
+    "@modelcontextprotocol/ext-apps": "^2.0.3",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "express": "^5.2.1",
@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "0.130.0",
-    "@modelcontextprotocol/client": "^2.1.0",
+    "@modelcontextprotocol/client": "^2.4.0",
     "chart.js": "^4.5.1",
     "chartjs-chart-sankey": "^0.19.1",
     "vite": "^6.4.3",

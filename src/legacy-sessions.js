@@ -2,8 +2,10 @@
 // of the per-request handler, as the SDK documents for serving 2025 traffic next to 2026-07-28.
 //
 // A 2025 client that opens with `initialize` gets an Mcp-Session-Id, and the requests that carry it
-// are served by the ONE server of that session (src/mcp-server.js, built for the 2025 era — it offers
-// no extension: they are 2026-07-28's). What a session gives that a stateless request cannot:
+// are served by the ONE server of that session (src/mcp-server.js, built for the 2025 era with the
+// capabilities its initialize declared — the extensions it declared there, Tasks aside, are offered
+// for the session's life, as that revision fixes them once). What a session gives that a stateless
+// request cannot:
 //   * cancellation — `notifications/cancelled` reaches the request it names, within its session (a
 //     request id means nothing across clients), and the work of that call stops;
 //   * the GET stream the 2025 transport keeps for the server's own messages.
@@ -17,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { classifyInboundRequest, isInitializeRequest } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { setting } from './settings.js';
-import { createMcpServer } from './mcp-server.js';
+import { createMcpServer, offeredExtensions } from './mcp-server.js';
 import { logLine } from './mcp-surface.js';
 
 export class LegacySessions {
@@ -52,7 +54,8 @@ export class LegacySessions {
       onsessioninitialized: (sid) => { this.sessions.set(sid, entry); logLine('session', `opened ${sid} (${this.sessions.size} open)`); },
     });
     entry.transport.onclose = () => { const sid = entry.transport.sessionId; if (sid && this.sessions.delete(sid)) logLine('session', `closed ${sid}`); };
-    entry.server = createMcpServer(this.services, { era: 'legacy' });
+    const capabilities = req.body?.params?.capabilities ?? null;
+    entry.server = createMcpServer(this.services, { era: 'legacy', offer: offeredExtensions(this.services, { era: 'legacy', capabilities }) });
     await entry.server.connect(entry.transport);
     return entry.transport.handleRequest(req, res, req.body);
   }

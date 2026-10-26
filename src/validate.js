@@ -106,13 +106,24 @@ function hoisted(ctx, instancePath, used) {
   const root = ctx.schema;
   const forms = (n) => (Array.isArray(n?.anyOf) ? n.anyOf.map((b) => deref(root, b)) : [n]);
   const holder = forms(root).find((f) => f?.properties?.[m[1]] && f.properties[used]);
-  return holder ? ` — it is written once, at the top of the request beside ${m[1]}, not in each of them` : null;
+  if (holder) return ` — it is written once, at the top of the request beside ${m[1]}, not in each of them`;
+  // a request of its own written as a member of the list (semantic_index's guide among its views)
+  const own = forms(root).find((f) => f?.properties?.[used] && (f.required || []).includes(used) && !f.properties[m[1]]);
+  return own ? ` — { ${used} } is a request of its own, not one of ${m[1]}: a call of its own with { ${used}: … }` : null;
 }
 
 /** What a value spelled another tool's way needs besides its name here. */
 const SPELLING_NOTE = {
   alpha: 'confidence = 1 − alpha: alpha 0.05 is confidence 0.95',
   ratio: 'a derived metric has no numerator / denominator: its expr divides one metric by the other, { fn: "div", args: [{ metric: <numerator> }, { metric: <denominator> }] }',
+};
+
+/**
+ * A value of the grammar that some places do not take, said where it stands when one of them refuses it:
+ * `raw` is a pipeline build's escape hatch — a read (query_model) and a semantic declaration take none.
+ */
+const NOT_TAKEN_HERE = {
+  raw: 'raw SQL is taken only by a pipeline build\'s steps (build_model — from_task builds on a stored result); here write it with the functions listed — a date window, e.g., is { fn: "between", args: [{ fn: "date_diff", args: [<earlier>, <later>], unit: "day" }, { value: 0 }, { value: 13 }] }',
 };
 
 /** A query's fields that are said in its steps — where each goes, for a request that wrote it beside them. */
@@ -321,7 +332,8 @@ function describe(e, ctx = {}) {
       const vals = e.params.values;
       if (vals.length === 1) return `${fieldRef(e.params.at)} must be ${JSON.stringify(vals[0])}`;
       const path = String(e.params.at);
-      return oneOf(fieldRef(path), vals, used, alt, alt ? null : takenElsewhere(ctx.schema, path.split('/').pop(), used, valueAt(ctx.input, path.slice(0, path.lastIndexOf('/')))));
+      const elsewhere = alt ? null : takenElsewhere(ctx.schema, path.split('/').pop(), used, valueAt(ctx.input, path.slice(0, path.lastIndexOf('/'))));
+      return oneOf(fieldRef(path), vals, used, alt, elsewhere) + (!alt && !elsewhere && typeof used === 'string' && NOT_TAKEN_HERE[used] ? `. ${NOT_TAKEN_HERE[used]}` : '');
     }
     case 'oneOf':
     case 'anyOf': return `${at} must match exactly one of the allowed configurations (provide the fields for exactly one mode)`;

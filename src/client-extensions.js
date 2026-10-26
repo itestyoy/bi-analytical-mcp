@@ -1,10 +1,14 @@
 // WHAT THE CLIENT OF THE REQUEST BEING SERVED DECLARED — the one source every extension is gated on.
 //
-// An extension of this server (MCP Apps, Skills, Tasks) is OFFERED only to a client that declares
-// it, IN THE REQUEST BEING SERVED: `capabilities.extensions[<id>]` in the request's envelope. That
-// is a 2026-07-28 client, whose every request carries its capabilities. The extensions are 2026-07-28's:
-// a 2025 client — served in a session of its own or statelessly (src/legacy-sessions.js) — is offered
-// none of them, whatever its `initialize` declared.
+// An extension of this server (MCP Apps, Skills, Tasks) is OFFERED only to a client that declares it
+// (`capabilities.extensions[<id>]`), where its revision has the client declare:
+//   * a 2026-07-28 client — in THIS request's envelope: the revision is stateless, so nothing an
+//     earlier request declared carries over (a client may declare only what a request needs);
+//   * a 2025 client — once, in its `initialize`, for the session it opens (src/legacy-sessions.js);
+//     a 2025 request served outside a session declared nothing this server saw, and is offered none.
+// Tasks is 2026-07-28's alone (the 2025 revision's experimental tasks are another wire). Skills are
+// served to any client that asks — skills/list needs nothing of the client — and a declaring one is
+// pointed at them in the instructions.
 //
 // The HTTP layer (src/server.js) reads the envelope and serves the request inside
 // `withClientCapabilities`; the server factory (src/mcp-server.js) reads it back to decide what the

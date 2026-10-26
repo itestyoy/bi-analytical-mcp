@@ -1,7 +1,8 @@
 // SKILLS OVER MCP — the analyst procedure and the recipes served as Agent Skills.
 //
-// Offered only to a client that declares the extension in the request being served — a 2026-07-28
-// client (src/client-extensions.js). What the extension (SEP-2640) makes a host rely on, checked
+// Served to every client; one that declares the extension (a 2026-07-28 client in its request, a 2025
+// client in its initialize) is also pointed at them in the instructions (src/client-extensions.js).
+// What the extension (SEP-2640) makes a host rely on, checked
 // from the host's side with the official client: every file a skills/list entry names is readable with
 // resources/read and its bytes match the listed sha256 digest and size (a host MUST refuse a file
 // that does not); the entry's frontmatter is the SKILL.md frontmatter verbatim; the last path
@@ -95,20 +96,19 @@ test('the server instructions point at the skills — for a client that declares
   for (const skill of (await c.request({ method: 'skills/list', params: {} }, Listed)).skills) assert.ok(c.getInstructions().includes(skill.uri));
 });
 
-test('a client that does not declare Skills in its request gets none of it: no listing, no files, no pointer', async () => {
-  // a 2025 client declares its capabilities once, in initialize — its later requests carry none
-  for (const [era, capabilities] of [['legacy', SKILLS_CAPS], ['legacy', {}], ['modern', {}]]) {
-    const label = `${era} ${capabilities.extensions ? 'declaring at initialize' : 'declaring nothing'}`;
+test('skills are served to every client; the pointer in the instructions only to one that declares them', async () => {
+  // skills/list needs nothing of the client (SEP-2640: a client calls it once it sees the server
+  // declare the extension) — a 2026 client declares in its request, a 2025 client in its initialize
+  const cases = [['legacy', SKILLS_CAPS, true], ['legacy', {}, false], ['modern', SKILLS_CAPS, true], ['modern', {}, false]];
+  for (const [era, capabilities, declares] of cases) {
+    const label = `${era} ${declares ? 'declaring' : 'declaring nothing'}`;
     const c = await s.client({ era, capabilities });
-    await assert.rejects(() => c.request({ method: 'skills/list', params: {} }, Listed), (e) => e.code === -32021, `${label}: skills/list refused`);
-    await assert.rejects(() => c.request({ method: 'skills/get', params: { uri: 'skill://x/SKILL.md' } }, Got), (e) => e.code === -32021, `${label}: skills/get refused`);
-    assert.ok(!(await c.listResources()).resources.some((r) => r.uri.startsWith('skill://')), `${label}: no skill file listed`);
-    assert.deepEqual((await c.listResourceTemplates()).resourceTemplates, [], `${label}: no recipe template`);
-    assert.ok(!c.getInstructions().includes('skill://'), `${label}: no pointer in the instructions`);
+    const [first] = (await c.request({ method: 'skills/list', params: {} }, Listed)).skills;
+    assert.ok(first, `${label}: listed`);
+    assert.deepEqual((await c.request({ method: 'skills/get', params: { uri: first.uri } }, Got)).skill, first, `${label}: got`);
+    const [file] = (await c.readResource({ uri: first.uri })).contents;
+    assert.equal(digest(file.text), first.resources.find((r) => r.uri === first.uri).digest, `${label}: read, as listed`);
+    assert.ok((await c.listResources()).resources.some((r) => r.uri === first.uri), `${label}: its SKILL.md is a listed resource`);
+    assert.equal(c.getInstructions().includes(first.uri), declares, `${label}: the pointer in the instructions`);
   }
-  // …and a skill file is not served to it by URI either
-  const withSkills = await s.client({ era: 'modern', capabilities: SKILLS_CAPS });
-  const [first] = (await withSkills.request({ method: 'skills/list', params: {} }, Listed)).skills;
-  const plain = await s.client({ era: 'modern' });
-  await assert.rejects(() => plain.readResource({ uri: first.uri }));
 });

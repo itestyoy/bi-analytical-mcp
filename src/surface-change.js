@@ -24,6 +24,12 @@ import { InMemoryServerEventBus } from '@modelcontextprotocol/server';
 /** How long a client may cache the lists and server/discover: a change reaches it within this. */
 export const LIST_TTL_MS = 60 * 1000;
 
+// What this server lists and says depends on which extensions the client declared
+// (src/client-extensions.js), so those answers are its own to cache — for LIST_TTL_MS, short, so a
+// deploy that changes them reaches it within a minute even when no subscription stream is open.
+// Skills are part of the surface's fingerprint, so their list is too.
+export const PER_CLIENT = { ttlMs: LIST_TTL_MS, cacheScope: 'private' };
+
 /**
  * How long after a start that CHANGED the surface a new subscription is told so. It counts from the
  * start, not from a client's reconnect, so it outlasts a listen stream coming back with backoff or a

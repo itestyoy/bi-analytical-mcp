@@ -22,7 +22,7 @@ Fast entrypoint for the repository: one line per area.
 | Area | Location | Purpose |
 |------|----------|---------|
 | Server entry | `src/server.js` | HTTP endpoint `/mcp`, 2025 sessions, health check, timers |
-| Protocol surface | `src/mcp-server.js`, `src/mcp-surface.js`, `src/mcp-tasks.js`, `src/legacy-sessions.js`, `src/client-extensions.js`, `src/surface-change.js` | What is offered and to which client |
+| Protocol surface | `src/mcp-server.js`, `src/mcp-surface.js`, `src/legacy-sessions.js`, `src/client-extensions.js`, `src/surface-change.js` | What is offered and to which client |
 | Tool definitions | `src/tools/` | One definition per tool (`defineTool`); the core's in `core.js` |
 | Input schemas | `src/schema.js`, `src/schema/`, `src/schema-kit.js` | Built from the catalog; `outputs.js` for answers of one shape |
 | Validation | `src/validate.js` | Ajv over the published schema, refusals in words |

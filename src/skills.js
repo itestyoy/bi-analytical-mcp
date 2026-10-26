@@ -16,9 +16,15 @@
 //   * skills/list and skills/get return, per skill, the frontmatter verbatim and EVERY file with
 //     its sha256 digest and byte size (the host verifies each read against them);
 //   * files are read with resources/read; supporting references are relative links in SKILL.md.
+//
+// The wire is the SDK's (`SkillsExtension`, @modelcontextprotocol/server/ext/skills): skills/list,
+// skills/get, the `skill://` resource template and resources/read of a file, the caching hints, each
+// entry checked against the extension's rules. This module renders the catalog and hands it to the SDK
+// as its `SkillSource` (skillsExtension below).
 
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
+import { SkillsExtension } from '@modelcontextprotocol/server/ext/skills';
 import { buildGuide } from './guide.js';
 import { RESEARCH_DOMAINS, RESEARCH_GUIDES, RESEARCH_SCOPE, researchGuide } from './research-guides.js';
 import { pythonAuthoringGuide } from './python-guide.js';
@@ -174,4 +180,30 @@ export function buildSkills(engine) {
     get: (uri) => skills.find((s) => s.uri === uri) || null,
     read: (uri) => files.get(uri) || null,
   };
+}
+
+/**
+ * The SDK's Skills extension over a rendered catalog (buildSkills): the catalog is its SkillSource, and
+ * only each skill's SKILL.md is listed in resources/list — the files are reached through the skill.
+ */
+export function skillsExtension(skills, { cacheHint } = {}) {
+  return new SkillsExtension({
+    cacheHint,
+    source: {
+      list: async () => ({ skills: skills.list() }),
+      get: async (uri) => skills.get(uri) ?? undefined,
+      read: async (uri) => {
+        const f = skills.read(uri);
+        return f ? { text: f.text, mimeType: f.mimeType } : undefined;
+      },
+      listResources: async () => skills.list().map((s) => ({
+        uri: s.uri,
+        name: s.frontmatter.name,
+        title: `Skill: ${s.frontmatter.name}`,
+        description: s.frontmatter.description,
+        mimeType: MARKDOWN,
+        size: s.resources.find((r) => r.uri === s.uri)?.size,
+      })),
+    },
+  });
 }

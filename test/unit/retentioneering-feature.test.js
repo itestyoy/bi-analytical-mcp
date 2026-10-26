@@ -73,8 +73,8 @@ test('off: no tool, no view, no guide, no skill, no instruction line, nothing in
   const defs = buildToolDefs(e);
   for (const t of TOOLS) assert.ok(!defs.some((d) => d.name === t), `${t} is not listed`);
   const s = createServices(e);
-  assert.ok(!s.resources({ skills: true }).some((r) => r.uri === RETENTIONEERING_VIEW_URI));
-  assert.equal(s.read(RETENTIONEERING_VIEW_URI), null);
+  assert.ok(!s.apps.resources().some((r) => r.uri === RETENTIONEERING_VIEW_URI));
+  assert.equal(s.apps.read(RETENTIONEERING_VIEW_URI), null);
   assert.ok(!s.skills.list().some((k) => k.frontmatter.name === 'retentioneering'));
   assert.ok(!s.instructionsFor({ apps: true, skills: true }).includes('build_retentioneering_model'));
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ guide: 'retentioneering' })), /`guide` must be one of/, 'its guide is no name the schema offers');
@@ -95,10 +95,10 @@ test('on: three tools within the budgets, the drawing one pointing at its own vi
     assert.equal(typeof d.annotations.readOnlyHint, 'boolean');
   }
   assert.equal(defs.find((d) => d.name === 'display_retentioneering_result')._meta.ui.resourceUri, RETENTIONEERING_VIEW_URI);
-  assert.equal(defs.find((d) => d.name === 'build_retentioneering_model')._meta.ui.resourceUri, undefined, 'only the drawing tool carries a view');
+  assert.equal(defs.find((d) => d.name === 'build_retentioneering_model')._meta, undefined, 'only the drawing tool carries a view');
   const s = createServices(e);
-  assert.ok(s.resources({}).some((r) => r.uri === RETENTIONEERING_VIEW_URI));
-  const [page] = s.read(RETENTIONEERING_VIEW_URI);
+  assert.ok(s.apps.resources().some((r) => r.uri === RETENTIONEERING_VIEW_URI));
+  const [page] = s.apps.read(RETENTIONEERING_VIEW_URI);
   assert.equal(page.uri, RETENTIONEERING_VIEW_URI);
   assert.deepEqual(page._meta.ui.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] });
   // the guide, its routing trigger, the skill, one line of the core instructions

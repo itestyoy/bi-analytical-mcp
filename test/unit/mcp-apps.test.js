@@ -52,24 +52,33 @@ test('the two drawing tools carry the view — for a client that declares MCP Ap
 });
 
 test('a client that does not declare MCP Apps sees the same tools and page, but nothing speaks to its model about cards and nothing draws', async () => {
-  // a 2025 client declares its capabilities once, in initialize: its later requests carry none, so
-  // even a declaration there does not turn the feature on; a 2026 client that declares nothing neither
+  // a 2026 client declares in each request, a 2025 client once, in its initialize: one that declares
+  // nothing in either revision gets no card
   const apps = (await (await s.client({ era: 'modern', capabilities: APPS_CAPS })).listTools()).tools;
-  for (const [era, capabilities] of [['legacy', APPS_CAPS], ['legacy', {}], ['modern', {}]]) {
-    const label = `${era} ${capabilities.extensions ? 'declaring at initialize' : 'declaring nothing'}`;
-    const c = await s.client({ era, capabilities });
+  for (const era of ['legacy', 'modern']) {
+    const c = await s.client({ era, capabilities: {} });
     // the list is the one list: a host re-drawing a stored card finds its tool and page on requests
     // that need not carry the declaration (hiding them made every stored card "Connector not found")
-    assert.deepEqual((await c.listTools()).tools, apps, `${label}: the same tools, _meta.ui included`);
-    assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is listed`);
+    assert.deepEqual((await c.listTools()).tools, apps, `${era}: the same tools, _meta.ui included`);
+    assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${era}: the view is listed`);
     const [page] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
-    assert.equal(page.mimeType, 'text/html;profile=mcp-app', `${label}: and read`);
+    assert.equal(page.mimeType, 'text/html;profile=mcp-app', `${era}: and read`);
     // …but nothing tells its model about cards, and nothing draws
-    assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
+    assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${era}: no card instructions`);
     const r = await c.callTool({ name: 'display_model_result', arguments: { request: { task_id: 'ffffffffffff' } } });
-    assert.equal(r.isError, true, label);
-    assert.match(JSON.parse(r.content[0].text).error.message, /MCP Apps/, label);
+    assert.equal(r.isError, true, era);
+    assert.match(JSON.parse(r.content[0].text).error.message, /MCP Apps/, era);
   }
+});
+
+test('a 2025 client that declares MCP Apps in its initialize is offered cards for its session', async () => {
+  const c = await s.client({ era: 'legacy', capabilities: APPS_CAPS });
+  assert.ok(c.getInstructions().includes('RESULT CARDS'), 'its model is told how cards work');
+  // its later requests carry no declaration — the session's holds: the drawing tool is not refused
+  // for want of the extension (this task is unknown, which is the refusal it gets instead)
+  const r = await c.callTool({ name: 'display_model_result', arguments: { request: { task_id: 'ffffffffffff' } } });
+  assert.equal(r.isError, true);
+  assert.doesNotMatch(JSON.parse(r.content[0].text).error.message, /MCP Apps/);
 });
 
 test('the hint to show a result as a card reaches only a client that renders cards', async () => {

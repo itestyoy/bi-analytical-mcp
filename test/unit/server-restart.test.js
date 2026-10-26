@@ -78,12 +78,12 @@ test('an initialize opens a session — a stale id with it is dropped; without a
   } finally { await srv.stop(); }
 });
 
-test('in a 2025 session the client\'s cancel stops the call, and no extension is offered', async () => {
+test('in a 2025 session the client\'s cancel stops the call, and the extensions its initialize declared are offered', async () => {
   const srv = await serveOn(0);
   const client = new Client({ name: 'canceller', version: '0' }, { capabilities: { extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } } });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${srv.port}/mcp`)));
-    assert.ok(!/RESULT CARDS/.test(client.getInstructions() || ''), 'the Apps extension is 2026-07-28\'s');
+    assert.ok(/RESULT CARDS/.test(client.getInstructions() || ''), 'Apps, declared at initialize, holds for the session');
     const ctl = new AbortController();
     const call = client.callTool({ name: 'wait', arguments: { request: { seconds: 6 } } }, { signal: ctl.signal }).catch(() => null);
     await new Promise((r) => setTimeout(r, 300));

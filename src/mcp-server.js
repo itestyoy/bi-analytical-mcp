@@ -31,7 +31,6 @@ import { RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
 import { clientCapabilities, declaresExtension, UI_EXTENSION, SKILLS_EXTENSION, TASKS_EXTENSION } from './client-extensions.js';
 import { PER_CLIENT } from './surface-change.js';
 
-const AnyParams = z.object({}).passthrough();
 const TaskParams = z.object({ taskId: z.string() }).passthrough();
 const TaskUpdateParams = z.object({ taskId: z.string(), inputResponses: z.record(z.string(), z.unknown()).optional() }).passthrough();
 const AnyResult = z.object({}).passthrough();
@@ -51,16 +50,19 @@ export function serverCapabilities(services) {
 }
 
 /**
- * Which extensions a server built for this request offers: each only if the client declared it IN
- * this request (a 2026-07-28 envelope) — a 2025 client carries no capabilities past initialize
- * (src/client-extensions.js). Apps also needs the view's MIME type among the declared ones.
+ * Which extensions a server built for this request offers — each only to a client that declared it:
+ * a 2026-07-28 client in THIS request's envelope (a stateless revision: nothing carries over from an
+ * earlier request), a 2025 client in its `initialize`, for the session it opens (`capabilities`; a
+ * 2025 request served outside a session declared nothing this server saw). Apps also needs the view's
+ * MIME type among the declared ones; Tasks is 2026-07-28's alone — the 2025 revision's experimental
+ * tasks are another wire (src/client-extensions.js).
  */
-export function offeredExtensions(services, { era } = {}) {
-  const caps = era === 'modern' ? clientCapabilities() : null;
+export function offeredExtensions(services, { era, capabilities = null } = {}) {
+  const caps = era === 'modern' ? clientCapabilities() : capabilities;
   return {
     apps: rendersApps(caps),
     skills: !!services.skills && declaresExtension(caps, SKILLS_EXTENSION),
-    tasks: declaresExtension(caps, TASKS_EXTENSION),
+    tasks: era === 'modern' && declaresExtension(caps, TASKS_EXTENSION),
   };
 }
 
@@ -138,13 +140,10 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     });
   }
 
-  // Skills: the SDK's extension, for a client that declared it in this request; refused to any other
-  if (offer.skills) services.skillsExtension.attach(mcp);
-  else if (services.skills) {
-    for (const method of ['skills/list', 'skills/get']) {
-      server.setRequestHandler(method, { params: AnyParams, result: AnyResult }, async () => { throw missingExtension(SKILLS_EXTENSION); });
-    }
-  }
+  // Skills: the SDK's extension, served to every client — skills/list needs nothing of the client, and
+  // the extension's clients call it once they see the server declare it (SEP-2640); what a client that
+  // declared it gets beyond that is the pointer in the instructions (offer.skills)
+  services.skillsExtension?.attach(mcp);
 
   // The Tasks extension's methods, for a client that declared it in this request. A task this server
   // does not know is the handler's answer (in-band); the SDK answers the entry checks (headers, the

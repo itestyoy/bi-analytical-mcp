@@ -263,10 +263,11 @@ hour; and the fingerprint is part of `serverInfo.version` (`0.1.0+<fingerprint>`
 at startup (`surface <fingerprint> — changed since the last start …`). A host that ignores all three
 still needs its tool list refreshed by hand after a deploy.
 
-Each extension below is offered ONLY to a client that declares it in the request being served —
-its capabilities in the 2026-07-28 envelope. The extensions are 2026-07-28's: a 2025 client is
-offered none of them, whatever its `initialize` declared (src/client-extensions.js). The listings that differ by client are cached
-`private`.
+Each extension below is offered ONLY to a client that declares it, where its protocol revision has
+it declare: a 2026-07-28 client in the request being served (its envelope's capabilities — nothing
+carries over from an earlier request), a 2025 client once, in its `initialize`, for the session it
+opens (src/client-extensions.js). Tasks is 2026-07-28's alone. The listings that differ by client are
+cached `private`.
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
   finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a call
@@ -279,14 +280,12 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
 - **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
   files via `resources/read` with sha256 digests — served by the SDK's `SkillsExtension`). Generated at startup from the same objects
-  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy. A client
-  that does not declare it gets `skills/list` / `skills/get` refused (-32021), no skill files in the
-  resource listings or reads, and no SKILLS pointer in the instructions — the same content stays
-  reachable through `semantic_index`.
+  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy. Served to
+  every client (`skills/list` needs nothing of the client); one that declares the extension is also
+  pointed at them in the instructions. The same content stays reachable through `semantic_index`.
 - **Apps** (`io.modelcontextprotocol/ui`) — drawing is offered ONLY to a client that declares the extension
-  (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
-  request carries its capabilities. Every other client — including a 2025 client, whatever its
-  `initialize` declared (the extensions are 2026-07-28's) — gets no card
+  (with the view's MIME type): a 2026-07-28 client in the request being served, a 2025 client in
+  its `initialize`, for its session. Every other client gets no card
   instructions and no `show_to_user` hint, and a call that would draw (`display_model_result`, `card`
   on `experiment`) is refused. The tool list (with `_meta.ui`) and the view page are the same for
   every client, as the official ext-apps `registerAppTool` serves them: a host re-draws a card

@@ -223,7 +223,8 @@ function logRequest(req, res) {
   const method = msg && typeof msg === 'object' ? msg.method : undefined;
   if (!method || method === 'tools/call') return; // tool calls are logged by runTool, with their outcome
   const h = req.headers;
-  const caps = envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY);
+  // a 2026-07-28 request declares in its envelope, a 2025 client once, in its initialize
+  const caps = method === 'initialize' ? msg.params?.capabilities : envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY);
   const target = msg.params?.uri || msg.params?.name;
   const bits = [
     `${req.method} rpc=${method}`,

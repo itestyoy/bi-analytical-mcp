@@ -719,8 +719,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   step and its pre-run check (`diff_charted`), and a stored diff says which form it holds); any other
   (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
   returned, has no card, and is answered in words.
-- AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
-  envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
+- AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, WHERE ITS REVISION HAS IT DECLARE
+  (src/client-extensions.js, the one source): a 2026-07-28 client in THIS request's envelope
+  (`extensions[<id>]` — the revision is stateless: nothing an earlier request declared carries over,
+  and a client may declare only what a request needs); a 2025 client once, in its `initialize`, for
+  the session it opens (src/legacy-sessions.js) — a 2025 request outside a session declared nothing
+  this server saw:
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the
     RESULT CARDS instructions, the `show_to_user` hint — and what DRAWS — a call to
     display_model_result (refused otherwise). The tool list (with `_meta.ui`,
@@ -730,13 +734,13 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
     need not carry the declaration, and hiding them broke every stored card ("Connector not
     found"). drill_result is served for a DRAWN task whatever envelope the host puts on the card's
     proxied read, the drawn mark persisted with the task so a card outlives a restart;
-  * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
-    skill files in resources/list, templates and resources/read, the SKILLS pointer in the
-    instructions — the wire is the SDK's `SkillsExtension`, attached to the server of a request that
-    declares it, over the catalog src/skills.js renders (its `SkillSource`);
-  * Tasks (`io.modelcontextprotocol/tasks`): a long call becoming a task, tasks/get|cancel|update
-    (-32021 otherwise).
-  The extensions are 2026-07-28's: a 2025 client gets none of them, whatever its `initialize` declared.
+  * Skills (`io.modelcontextprotocol/skills`): the SKILLS pointer in the instructions. skills/list,
+    skills/get and the skill files (listed, templated, read) are served to EVERY client in either
+    revision — skills/list needs nothing of the client, and the extension's clients call it once they
+    see the server declare it (SEP-2640), as the SDK's `SkillsExtension` serves them: the wire is its,
+    over the catalog src/skills.js renders (its `SkillSource`);
+  * Tasks (`io.modelcontextprotocol/tasks`), 2026-07-28's alone (the 2025 revision's experimental
+    tasks are another wire): a long call becoming a task, tasks/get|cancel|update (-32021 otherwise).
   The lists that differ are cached `private`.
 - A 2025 CLIENT IS SERVED IN FULL OTHERWISE (src/legacy-sessions.js): its `initialize` opens a session
   of the SDK's own sessionful transport (`NodeStreamableHTTPServerTransport`, the SDK's documented

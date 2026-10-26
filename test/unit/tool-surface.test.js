@@ -97,9 +97,11 @@ test('context lists, describes and deletes — and a read never removes', async 
   const e = engine();
   // start a draft to create a context.
   const s = await e.build_model({ action: 'start', name: 'ctxtool', source: 'events' });
-  // a context a build made is reached by its id, never listed (its id is the key to its tables)
+  // a context a build made is listed without its id (the key to its tables, given only to whoever built it)
   const list = await e.context({ action: 'list' });
-  assert.ok(!list.contexts.some((c) => c.context_id === s.context_id), 'list names no context a build made');
+  const mine = list.contexts.find((c) => c.name === 'ctxtool');
+  assert.ok(mine, 'list shows the created context');
+  assert.equal('context_id' in mine, false, '— without its id');
   const desc = await e.context({ action: 'describe', context_id: s.context_id });
   assert.equal(desc.context_id ?? desc.id ?? s.context_id, desc.context_id ?? desc.id ?? s.context_id); // describe returns the context shape
   // strict: describe requires context_id; list forbids it.

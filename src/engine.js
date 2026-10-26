@@ -575,16 +575,21 @@ export class Engine {
    */
   _listContexts({ limit = CONTEXT_PAGE, offset = 0, search } = {}) {
     const needle = typeof search === 'string' && search.trim() ? search.trim().toLowerCase() : null;
-    // only the dbt project's own contexts are listed: a context a build made is reached by the id its
-    // build answered — the key to its tables, which no listing hands to anyone else
+    // every context is listed with what it holds and why — but a context a build made WITHOUT its id:
+    // the id (and a table's name, which carries it) is the key to its tables, handed only to whoever
+    // built it. The dbt project's own contexts keep theirs: their names are what everyone queries.
+    const keyless = (entry) => {
+      if (this.ctxs.get(entry.context_id)?.state?.engine === 'project') return entry;
+      const { context_id: _key, ...rest } = entry;
+      return { ...rest, holds: (rest.holds || []).map((h) => h.replace(/^a built table \([^)]*\)/, 'a built table')) };
+    };
     const all = this.ctxs.list()
-      .filter((entry) => this.ctxs.get(entry.context_id)?.state?.engine === 'project')
       .map((entry) => {
         // one context a feature cannot describe (state an earlier version stored) is listed with
         // why — it never takes the list of every other context down with it
         let brief = null;
-        try { brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief; } catch (e) { return { ...entry, unreadable: e?.message || String(e) }; }
-        return brief ? { ...entry, ...brief } : entry;
+        try { brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief; } catch (e) { return keyless({ ...entry, unreadable: e?.message || String(e) }); }
+        return keyless(brief ? { ...entry, ...brief } : entry);
       })
       .filter((entry) => !needle || JSON.stringify(entry).toLowerCase().includes(needle))
       .sort((a, b) => a.idle_ms - b.idle_ms);

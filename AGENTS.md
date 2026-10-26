@@ -808,11 +808,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   A new concern with a dependency set of its own is a service, not another mixin.
 - A TASK'S AND A CONTEXT'S ID IS ITS OWNER'S KEY (HARD RULE). Contexts and tasks carry no owner, so
   whoever holds an id can read, extend or drop what it names; an id is handed only to whoever started
-  the work (the answer of the call that did). No view lists another's: `context({ action: "list" })`
-  names only the dbt project's own semantic models, semantic_index's `{ status }` says a task by its
-  tool, status and age, a context's describe counts the drafts that read its tables instead of naming
-  them, and the task index (below) answers no id. The one exception is `explore_errors`, kept whole
-  for debugging.
+  the work (the answer of the call that did). Everything else about the work may be said; its ids may
+  not: `context({ action: "list" })` lists every context with what it holds and why, a context a build
+  made without its id or a table's name (which carries the id) — the dbt project's own contexts keep
+  their names, which everyone queries; semantic_index's `{ status }` says a task by its tool, status
+  and age; a context's describe counts the drafts that read its tables instead of naming them; the
+  task index (below) answers no id. The one exception is `explore_errors`, kept whole for debugging.
 - WHAT HAS BEEN ASKED IS KEPT BY MEANING, NEVER AS A WAY TO THE DATA (src/task-index.js, `engine.taskIndex`):
   every task a tool starts is recorded as it starts (the task runtime's `onStart`) — one line of text
   that says what it computes (its context's name and description, the source, the events, metrics,

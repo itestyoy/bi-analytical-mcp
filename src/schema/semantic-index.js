@@ -107,7 +107,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
       guide: field.guide,
     }),
     // what has been asked of this server (src/task-index.js): a record of the questions, never a way to their data
-    view('{ tasks }', 'What has been asked of this server: the past tasks most like a phrase, or the themes of a period — what each computed and when, never its data.', ['tasks'], {
+    view('{ tasks }', 'What has been asked of this server: the past tasks most like a phrase (what each computed, when and how), or the themes of a period — never their data.', ['tasks'], {
       tasks: {
         anyOf: [
           {

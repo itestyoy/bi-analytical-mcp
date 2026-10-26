@@ -5,9 +5,10 @@
 // a phrase, and the themes of a period (the tasks of the window, narrowed to those near a phrase if
 // one is given, clustered).
 //
-// It is a record of the QUESTIONS, never a way to the data: what it answers carries no task id, no
-// context id and no table — a task found here cannot be read back, built on or drawn. Another task's
-// rows may not fit the question at hand, and reaching them is not what this is for.
+// It is a record of the QUESTIONS and of HOW each was computed — never a way to the data: what it
+// answers carries no task id, no context id and no table, and a found task's steps are said without
+// them (`howOf`), so a task found here cannot be read back, built on or drawn. Another task's rows may
+// not fit the question at hand, and reaching them is not what this is for; its method may help.
 //
 // The vector is the deployment's embedder's (the one semantic memory search uses — MEMORY_EMBEDDINGS,
 // OpenAI) at TASK_DIMS dimensions, computed after the task starts and never in its way, and stored
@@ -44,6 +45,16 @@ const STOP = new Set(['by', 'of', 'the', 'and', 'or', 'per', 'for', 'in', 'on', 
 
 /** An English plural said as its singular (installs → install), so the two forms are one word. */
 const singular = (w) => (w.length > 3 && /^[a-z]+s$/.test(w) && !/(ss|us|is)$/.test(w) ? w.slice(0, -1) : w);
+
+// what in a tool's input names stored work rather than saying how something is computed
+const LEADS_TO_DATA = new Set(['context_id', 'from_task', 'task_id', 'task_ids', 'table', 'cancel', 'offset']);
+
+/** How a task computed what it did — its input without anything that names stored work (a context, a task, a table). */
+export function howOf(input) {
+  if (Array.isArray(input)) return input.map(howOf);
+  if (!input || typeof input !== 'object') return input;
+  return Object.fromEntries(Object.entries(input).filter(([k]) => !LEADS_TO_DATA.has(k)).map(([k, v]) => [k, howOf(v)]));
+}
 
 /** The words of a text: letters and digits, lower case, a snake_case name also taken apart. */
 export function words(text) {
@@ -237,7 +248,7 @@ export class TaskIndex {
   record({ id, tool, ctx = null, input = null, at = Date.now() }) {
     try {
       const text = taskText({ tool: this.toolOf(tool) || tool, ctx, input });
-      this.store.taskLog.put({ id, at, tool: this.toolOf(tool) || tool, source: ctx?.state?.draft?.source ?? input?.source ?? null, text });
+      this.store.taskLog.put({ id, at, tool: this.toolOf(tool) || tool, source: ctx?.state?.draft?.source ?? input?.source ?? null, text, how: input ? howOf(input) : null });
       if (this.embedder) { this.pending.add(id); this._schedule(); }
     } catch (e) { this.logger(`✗ task ${id} not indexed: ${e?.message || e}`); }
   }
@@ -287,9 +298,9 @@ export class TaskIndex {
     return { rows: this.store.taskLog.range({ since, until, model: this.model }), vectorOf };
   }
 
-  /** What a task is said as here: what it computed and when — never a way back to it. */
-  _shown(r, score) {
-    return { at: new Date(r.at).toISOString(), tool: r.tool, ...(r.source ? { source: r.source } : {}), task: r.text, ...(score != null ? { similarity: Math.round(score * 1000) / 1000 } : {}) };
+  /** What a task is said as here: what it computed, when and (where asked) how — never a way back to it. */
+  _shown(r, score, { how = false } = {}) {
+    return { at: new Date(r.at).toISOString(), tool: r.tool, ...(r.source ? { source: r.source } : {}), task: r.text, ...(score != null ? { similarity: Math.round(score * 1000) / 1000 } : {}), ...(how && r.how ? { how: r.how } : {}) };
   }
 
   /** The tasks most like a phrase, within a window. */
@@ -297,7 +308,7 @@ export class TaskIndex {
     const { rows, vectorOf } = await this._rows(timeRange);
     const q = await vectorOf(search);
     const ranked = rows.map((r) => ({ r, s: cosineSimilarity(q, r.vector) })).sort((a, b) => b.s - a.s || b.r.at - a.r.at).slice(0, limit);
-    return { model: this.model, searched: rows.length, tasks: ranked.map(({ r, s }) => this._shown(r, s)) };
+    return { model: this.model, searched: rows.length, tasks: ranked.map(({ r, s }) => this._shown(r, s, { how: true })) };
   }
 
   /**

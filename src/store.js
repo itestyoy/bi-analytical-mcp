@@ -51,10 +51,10 @@
 //   errors.get(id)                    -> row | null   (args and detail in full)
 //   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
 //   errors.prune({ before, keep })    -> removed count (older than `before`, beyond the newest `keep`)
-//   taskLog.put({ id, at, tool, source, text })   (a task started — what it computes, src/task-index.js)
+//   taskLog.put({ id, at, tool, source, text, how })   (a task started — what it computes and how, src/task-index.js)
 //   taskLog.has(id) -> bool;  taskLog.setVector(id, model, vec)
 //   taskLog.missing(model, limit)     -> [{ id, text }] (no vector of this model yet, oldest first)
-//   taskLog.range({ since, until, model? }) -> [{ id, at, tool, source, text, vector? }] (with a model: its vectors; oldest first)
+//   taskLog.range({ since, until, model? }) -> [{ id, at, tool, source, text, how, vector? }] (with a model: its vectors; oldest first)
 //   reset()                           (wipe every table but memory, the error log and the task log — MCP_DB_RESET)
 //   close()
 
@@ -99,13 +99,13 @@ export class MemoryBackend {
     const taskLog = new Map(); // id → { id, at, tool, source, text, model, vector }
     const byTime = (a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     this.taskLog = {
-      put: (r) => { const had = taskLog.get(r.id); taskLog.set(r.id, { ...had, id: r.id, at: had?.at ?? r.at, tool: r.tool ?? null, source: r.source ?? null, text: String(r.text) }); },
+      put: (r) => { const had = taskLog.get(r.id); taskLog.set(r.id, { ...had, id: r.id, at: had?.at ?? r.at, tool: r.tool ?? null, source: r.source ?? null, text: String(r.text), how: r.how != null ? structuredClone(r.how) : null }); },
       has: (id) => taskLog.has(id),
       setVector: (id, model, vec) => { const r = taskLog.get(id); if (r) { r.model = model; r.vector = Array.from(vec); } },
       missing: (model, limit = 1000) => [...taskLog.values()].filter((r) => r.model !== model).sort(byTime).slice(0, limit).map((r) => ({ id: r.id, text: r.text })),
       range: ({ since = null, until = null, model = null }) => [...taskLog.values()]
         .filter((r) => (model == null || (r.model === model && r.vector)) && (since == null || r.at >= since) && (until == null || r.at <= until))
-        .sort(byTime).map((r) => ({ id: r.id, at: r.at, tool: r.tool, source: r.source, text: r.text, ...(model != null ? { vector: [...r.vector] } : {}) })),
+        .sort(byTime).map((r) => ({ id: r.id, at: r.at, tool: r.tool, source: r.source, text: r.text, how: r.how != null ? structuredClone(r.how) : null, ...(model != null ? { vector: [...r.vector] } : {}) })),
     };
 
     const meta = new Map();
@@ -339,7 +339,7 @@ const TABLES = [
   { name: 'server_meta', kept: true, key: ['key'], columns: ['key TEXT', 'value TEXT'] },
   // what each task computed, as a line of text and its vector (src/task-index.js) — the questions asked,
   // kept across a reset like the memory: a record of use, not something the server re-derives
-  { name: 'task_log', kept: true, key: ['id'], columns: ['id TEXT', 'at INTEGER', 'tool TEXT', 'source TEXT', 'text TEXT', 'model TEXT', 'vector BLOB'] },
+  { name: 'task_log', kept: true, key: ['id'], columns: ['id TEXT', 'at INTEGER', 'tool TEXT', 'source TEXT', 'text TEXT', 'model TEXT', 'vector BLOB', 'how TEXT'] },
   // with what reproduces an error: the context's state, the code of the model that failed, the runtime
   { name: 'errors', kept: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'at INTEGER', 'source TEXT', 'severity TEXT', 'tool TEXT', 'stage TEXT', 'field TEXT', 'code TEXT', 'context_id TEXT', 'task_id TEXT', 'message TEXT', 'args TEXT', 'detail TEXT', 'context TEXT', 'files TEXT', 'runtime TEXT'] },
 ];
@@ -435,15 +435,16 @@ export class SqliteBackend {
     const toBlob = (v) => Buffer.from(new Float32Array(v).buffer);
     const fromBlob = (b) => { const u = new Uint8Array(b); return Array.from(new Float32Array(u.buffer, u.byteOffset, u.byteLength / 4)); };
     this.taskLog = {
-      put(r) { s._run('INSERT INTO task_log (id, at, tool, source, text) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET tool = excluded.tool, source = excluded.source, text = excluded.text', r.id, r.at, r.tool ?? null, r.source ?? null, String(r.text)); },
+      put(r) { s._run('INSERT INTO task_log (id, at, tool, source, text, how) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET tool = excluded.tool, source = excluded.source, text = excluded.text, how = excluded.how', r.id, r.at, r.tool ?? null, r.source ?? null, String(r.text), r.how != null ? JSON.stringify(r.how) : null); },
       has(id) { return !!s._get('SELECT 1 AS x FROM task_log WHERE id = ?', id); },
       setVector(id, model, vec) { s._run('UPDATE task_log SET model = ?, vector = ? WHERE id = ?', model, toBlob(vec), id); },
       missing(model, limit = 1000) { return s._all('SELECT id, text FROM task_log WHERE model IS NULL OR model != ? ORDER BY at, id LIMIT ?', model, limit); },
       range({ since = null, until = null, model = null }) {
         const rows = model == null
-          ? s._all('SELECT id, at, tool, source, text FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', since, since, until, until)
-          : s._all('SELECT id, at, tool, source, text, vector FROM task_log WHERE model = ? AND vector IS NOT NULL AND (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', model, since, since, until, until);
-        return rows.map((r) => ({ id: r.id, at: Number(r.at), tool: r.tool, source: r.source, text: r.text, ...(r.vector ? { vector: fromBlob(r.vector) } : {}) }));
+          ? s._all('SELECT id, at, tool, source, text, how FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', since, since, until, until)
+          : s._all('SELECT id, at, tool, source, text, how, vector FROM task_log WHERE model = ? AND vector IS NOT NULL AND (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', model, since, since, until, until);
+        const how = (t) => { if (t == null) return null; try { return JSON.parse(t); } catch { return null; } };
+        return rows.map((r) => ({ id: r.id, at: Number(r.at), tool: r.tool, source: r.source, text: r.text, how: how(r.how), ...(r.vector ? { vector: fromBlob(r.vector) } : {}) }));
       },
     };
 

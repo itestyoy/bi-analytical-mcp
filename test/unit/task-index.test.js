@@ -93,11 +93,13 @@ test('a clustering is the same on every run', () => {
 test('every task a tool starts is recorded as it starts; semantic_index reads the index, its two forms apart', async () => {
   const e = new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('task-index-engine') }) });
   opened.push(() => e.close());
-  const id = e.tasks.start(null, 'build_model', async () => ({ ok: true }), { input: { source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }] } });
+  const steps = [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }];
+  const id = e.tasks.start(null, 'build_model', async () => ({ ok: true }), { input: { source: 'events', context_id: 'abc123', from_task: 'aaaaaaaaaaaa', steps } });
   assert.ok(e.store.taskLog.has(id));
   const found = await e.semantic_index({ tasks: { search: 'level completed' } });
   assert.equal(found.searched, 1);
-  assert.equal(found.tasks.length, 1);
+  // how it was computed is said — its steps — and nothing that names stored work
+  assert.deepEqual(found.tasks[0].how, { source: 'events', steps });
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ tasks: { search: 'x', themes: true } })), /tasks/);
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ tasks: { themes: true, limit: 3 } })), /tasks/);
 });

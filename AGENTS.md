@@ -813,9 +813,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (MEMORY_EMBEDDINGS, at `TASK_DIMS`, after the start and never in its way, stored with its model and
   re-embedded for another), or without one a local TF-IDF vector over the tasks read. semantic_index's
   `{ tasks }` view reads it — the tasks like a phrase, or the themes of a period (narrowed to a phrase,
-  clustered by k-means at the count that separates best) — and answers what each computed and when,
-  NEVER a task id, a context id or a table: another task's rows may not fit the question at hand, so
-  nothing found here can be read back, built on or drawn. The store's `task_log` is kept across a reset.
+  clustered by k-means at the count that separates best) — and answers what each computed, when and
+  (a found task) how — its input without what names stored work (`howOf`) — NEVER a task id, a context
+  id or a table: another task's rows may not fit the question at hand, so nothing found here can be
+  read back, built on or drawn; its method may help. The store's `task_log` is kept across a reset.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

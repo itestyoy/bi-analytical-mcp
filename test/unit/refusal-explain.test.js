@@ -91,3 +91,13 @@ test('a query is started without an offset: paging is the read\'s, by row number
   assert.equal(refusal(e, 'query_model', { context_id: 'abc123', steps: metrics, limit: 10 }), null);
   assert.equal(refusal(e, 'query_model', { task_ids: ['abc123abc123'], offset: 100, limit: 10 }), null);
 });
+
+test('a request of its own written among views, raw in a read, and a source named as a context say where each goes', () => {
+  const e = engine();
+  const guide = refusal(e, 'semantic_index', { views: [{ source: 'events' }, { guide: 'research' }] });
+  assert.match(guide, /\{ guide \} is a request of its own, not one of views/);
+  const raw = refusal(e, 'query_model', { context_id: 'abc123', steps: [{ stage: 'where', conditions: [{ fn: 'raw', sql: '{1} > 0', args: [{ column: 'x' }] }] }] });
+  assert.match(raw, /raw SQL is taken only by a pipeline build/);
+  assert.throws(() => e._ctx('users'), /'users' is a source of the catalog, not a context/);
+  assert.throws(() => e._ctx('abc123'), /No context has that id/);
+});

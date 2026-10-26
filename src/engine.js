@@ -289,7 +289,12 @@ export class Engine {
     // the way out: a context that is gone (deleted, retired after idling) or was never made is not
     // guessed at — the list names those that exist
     const wayOut = ". No context has that id (deleted, retired after idling, or never created): context({ request: { action: 'list' } }) lists those that exist";
-    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(`${e.message}${wayOut}${hint}`, { stage: 'validate', field: 'context_id' }); }
+    // a model of the catalog named as a context: its rows are read by a build, its columns grouped by
+    // in a metric query — said instead of the list of contexts
+    const model = typeof id === 'string' && this.catalog.models?.[id]
+      ? `. '${id}' is a source of the catalog, not a context: its rows are read by a build — build_model({ request: { action: 'start', name, source: '${id}', steps } }), then query_model({ request: { context_id: <its context_id>, steps } }) — and a metric query groups by its columns as { source: '${id}', column }`
+      : null;
+    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(`${e.message}${model || `${wayOut}${hint}`}`, { stage: 'validate', field: 'context_id' }); }
     if (ctx.state?.internal) throw new ToolError(`unknown context_id: ${id}${this.project ? ` — the dbt project's own semantic models are contexts of their own, named after them: ${this.project.contexts.join(', ')}` : ''}`, { stage: 'validate', field: 'context_id' });
     const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this._catalogOf(ctx).models[k]);
     if (gone.length) {

@@ -19,8 +19,9 @@
 //   * Skills (io.modelcontextprotocol/skills) — the SDK's SkillsExtension: skills/list, skills/get,
 //     the skill:// template and its files via resources/read;
 //   * Tasks (io.modelcontextprotocol/tasks)   — a call that outgrows its window comes back as a
-//     task (`resultType: "task"`); tasks/update here; tasks/get and tasks/cancel are served in
-//     front of the SDK (src/mcp-tasks.js) until the SDK serves the extension itself.
+//     task (`resultType: "task"`); tasks/get, tasks/update, tasks/cancel here. The SDK checks their
+//     routing headers (Mcp-Name is the taskId) and passes tasks/get and tasks/cancel — names it also
+//     knows as the 2025 experimental tasks' — to a handler registered with its own schema.
 
 import { z } from 'zod';
 import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
@@ -31,6 +32,7 @@ import { clientCapabilities, declaresExtension, UI_EXTENSION, SKILLS_EXTENSION, 
 import { PER_CLIENT } from './surface-change.js';
 
 const AnyParams = z.object({}).passthrough();
+const TaskParams = z.object({ taskId: z.string() }).passthrough();
 const TaskUpdateParams = z.object({ taskId: z.string(), inputResponses: z.record(z.string(), z.unknown()).optional() }).passthrough();
 const AnyResult = z.object({}).passthrough();
 
@@ -144,12 +146,25 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     }
   }
 
+  // The Tasks extension's methods, for a client that declared it in this request. A task this server
+  // does not know is the handler's answer (in-band); the SDK answers the entry checks (headers, the
+  // envelope) before it.
+  const taskOf = (taskId) => {
+    if (!offer.tasks) throw missingExtension(TASKS_EXTENSION);
+    const t = tasks.get(taskId);
+    if (!t) throw new ProtocolError(-32602, 'Failed to retrieve task: Task not found (it never existed, or it ended more than its TTL ago)');
+    return t;
+  };
+  server.setRequestHandler('tasks/get', { params: TaskParams, result: AnyResult }, async ({ taskId }) => tasks.detailed(taskOf(taskId)));
+  server.setRequestHandler('tasks/cancel', { params: TaskParams, result: AnyResult }, async ({ taskId }) => {
+    tasks.cancel(taskOf(taskId).taskId, 'Cancelled by the client (tasks/cancel).');
+    return {};
+  });
   // tasks/update carries input for a task waiting on the client; this server never asks for any,
   // so a response is acknowledged and ignored (the extension tells servers to ignore responses to
-  // keys that are not outstanding). tasks/get and tasks/cancel: src/mcp-tasks.js.
+  // keys that are not outstanding)
   server.setRequestHandler('tasks/update', { params: TaskUpdateParams, result: AnyResult }, async ({ taskId }) => {
-    if (!offer.tasks) throw missingExtension(TASKS_EXTENSION);
-    if (!tasks.get(taskId)) throw new ProtocolError(-32602, 'Failed to retrieve task: Task not found');
+    taskOf(taskId);
     return {};
   });
 

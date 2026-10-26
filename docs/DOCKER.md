@@ -274,8 +274,8 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   protocol task's result is the rows, not "still running". A call that starts work still answers
   with its `task_id` at once.
   `tasks/cancel` stops the call's dbt process. (The TypeScript SDK does not implement this extension
-  yet and routes `tasks/get` / `tasks/cancel` as methods of the older revision, so those two are
-  answered in front of it — `src/mcp-tasks.js`, with the SDK's own request classifier — until it does.)
+  yet; it checks its routing headers and passes `tasks/get` / `tasks/update` / `tasks/cancel` to the
+  server's own handlers, src/mcp-server.js.)
 - **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
   files via `resources/read` with sha256 digests — served by the SDK's `SkillsExtension`). Generated at startup from the same objects

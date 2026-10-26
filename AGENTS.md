@@ -293,8 +293,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   test/unit/tool-definitions.test.js holds the two to each other. `context` lists, describes AND
   deletes (`action: "delete"`, `what` the target) — one tool for the contexts, marked destructive, to
   keep the tool list short. Do NOT hand-roll wire
-  behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
-  is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
+  behaviour the SDK provides (headers, envelope, discover, sessions, error codes, the Skills
+  extension); the Tasks extension's three methods are handlers of ours (src/mcp-server.js), registered
+  with their own schema, until the SDK serves that extension too.
 - EVERY TOOL TAKES ONE FIELD, `request`, AND ITS SCHEMA IS NEVER CUT (HARD RULE). What a client is
   shown is `wireSchema(engine.schemas[name])` (src/schema/transport.js): a closed root object whose one
   required field is `request`, the tool's own schema as its value, `$defs` at the root — the one root

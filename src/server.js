@@ -27,7 +27,6 @@ import { BackgroundIndexer } from './value-indexer.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
-import { answerTaskRequest } from './mcp-tasks.js';
 import { LegacySessions } from './legacy-sessions.js';
 import { withClientCapabilities, envelopeCapabilities } from './client-extensions.js';
 
@@ -271,7 +270,6 @@ export function createApp(engine, opts = {}) {
     // the transport asks for it on an SSE response: a buffering proxy (nginx) then passes each event
     // through as it is written — a progress heartbeat, a list_changed on a listen stream
     res.setHeader('X-Accel-Buffering', 'no');
-    if (answerTaskRequest(services.tasks, req, res, services.serverInfo)) return;
     if (sessions.claims(req)) return void sessions.handle(req, res).catch((e) => { logLine('session', `✗ ${e?.message || e}`); if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: `Internal error: ${e?.message || e}` }, id: null }); });
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)

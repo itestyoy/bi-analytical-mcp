@@ -155,9 +155,10 @@ export class ValueIndexViews {
     // Batch-fallback events of the last run (combined scan failed → per-property, FULL reason).
     const fallbacks = (last?.id != null && this.valueIndex.runNotes) ? this.valueIndex.runNotes(last.id).map((n) => n.note) : [];
 
-    // [{ task_id, tool, status, table, context_id, age_ms }] — the newest first: `recent` is the latest tasks,
-    // of every side (a feature's too), not the first ones this process ever started
-    const jobs = this.jobs.list().map((j) => (j.tool ? { ...j, tool: this.toolOf(j.tool) } : j)).sort((a, b) => a.age_ms - b.age_ms);
+    // the newest first: `recent` is the latest tasks, of every side (a feature's too). A task is said by
+    // its tool, status and age ONLY — its id, context and table are the key to its rows, which only
+    // whoever started it holds (the answer that started it): no view lists another's
+    const jobs = this.jobs.list().map((j) => ({ ...(j.tool ? { tool: this.toolOf(j.tool) } : {}), status: j.status, age_ms: j.age_ms })).sort((a, b) => a.age_ms - b.age_ms);
     const running = jobs.filter((j) => j.status === 'running');
     const byStatus = jobs.reduce((m, j) => { m[j.status] = (m[j.status] || 0) + 1; return m; }, {});
 
@@ -166,7 +167,7 @@ export class ValueIndexViews {
     else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ request: { source, property } }) and ({ source, column }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect an event property's values via semantic_index({ request: { source, property } }), a column's via ({ source, column }).`);
-    if (running.length) recommendations.push(`${running.length} task(s) running — read one with query_model (a feature's task with its own query tool) and { task_ids }; it waits for the task.`);
+    if (running.length) recommendations.push(`${running.length} task(s) running — a task you started is read with query_model (a feature's with its own query tool) and the task_ids its start answered; the read waits for it.`);
     if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ request: { run: ${last.id} } }) for the full breakdown, or ${this.rowView(slowest[0])} for one across syncs.`);
     if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ request: { run: ${last.id} } }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No running tasks and the value index is idle/current.`);
@@ -188,7 +189,7 @@ export class ValueIndexViews {
       tasks: {
         total: jobs.length,
         by_status: byStatus,
-        running,
+        running: running.length,
         recent: jobs.slice(0, recent),
       },
       recommendations,

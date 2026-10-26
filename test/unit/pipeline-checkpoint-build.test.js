@@ -103,8 +103,8 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   });
   assert.equal(runner.held.length, 1, 'no second build was started');
   assert.equal(draftOf(e, context_id).checkpoints.length, 1, 'and no second prefix was recorded');
-  // A client that lost the task_id can still find it, and looking at it does not wait.
-  assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_model'));
+  // the job registry keeps it with its table, and looking at it does not wait
+  assert.ok(e.jobs.list().some((j) => j.task_id === bg.task_id && j.table === bg.model && e.tasks.toolOf(j.tool) === 'build_model'));
   const peek = await one(e.query_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
   assert.equal(peek.status, 'running');
 

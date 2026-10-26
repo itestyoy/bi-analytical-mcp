@@ -24,7 +24,7 @@ test('semantic_index({ status }): idle state before any sync', async () => {
   assert.equal(out.value_index.last_run, null);
   assert.equal(out.value_index.seconds_since_last_sync, null);
   assert.equal(out.tasks.total, 0);
-  assert.deepEqual(out.tasks.running, []);
+  assert.equal(out.tasks.running, 0);
   assert.ok(out.recommendations.some((r) => /not run yet/i.test(r)), 'guides the AI that the index is empty');
 });
 

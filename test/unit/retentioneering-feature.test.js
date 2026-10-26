@@ -479,7 +479,7 @@ test('a query result stored before its rows were numbered within their tables is
 // A path-analysis context is seen in context() for what it holds — its eventstreams, their steps and
 // how far they are materialized — in the listing as in describe; the core asks the feature, by name of
 // nothing (src/features.js describeContext). Context lifecycle; no warehouse.
-test('context() lists and describes a path-analysis context by its eventstreams and their steps', async () => {
+test('context() describes a path-analysis context by its eventstreams and their steps', async () => {
   const e = on();
   const { contextFor } = await import('../../src/retentioneering/contexts.js');
   const ctx = contextFor(e, {});
@@ -490,9 +490,6 @@ test('context() lists and describes a path-analysis context by its eventstreams 
   };
   // a description is kept with its eventstream (a context stored before kept one for the context: shown as it was)
   ctx.state.retentioneering.eventstreams.es2 = { ...ctx.state.retentioneering.eventstreams.es, description: 'level paths', steps: [] };
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === ctx.id);
-  assert.equal(listed.description, 'onboarding paths');
-  assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps_count: 1, materialized_through: 0 }, { name: 'es2', description: 'level paths', source: 'events', steps_count: 0, materialized_through: 0 }]);
   const d = await e.context({ action: 'describe', context_id: ctx.id });
   assert.equal(d.engine, 'retentioneering');
   assert.deepEqual(d.eventstreams.map((x) => [x.name, x.source, x.steps.map((s) => s.library), x.base.users, x.description]), [['es', 'events', ['add_start_end_events'], 3, undefined], ['es2', 'events', [], 3, 'level paths']]);

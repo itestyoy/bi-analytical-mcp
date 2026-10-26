@@ -36,8 +36,6 @@ test('a draft keeps its description, reports it, and hands it to the fork', asyn
 
   const described = await e.context({ action: 'describe', context_id: start.context_id });
   assert.equal(described.draft?.description, note);
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === start.context_id);
-  assert.equal(listed.description, note, 'a listing says why the context exists, not only what is in it');
 
   // a fork inherits the parent's note (it is the same question, one variant on)…
   const fork = await e.build_model({ action: 'fork', context_id: start.context_id, name: 'lbl_fork' });
@@ -70,8 +68,6 @@ test('_buildPipeline records its description in the context', async () => {
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || {}));
   const described = await e.context({ action: 'describe', context_id: out.context_id });
   assert.equal(described.models?.[0]?.description, 'payer revenue, one-off table for the weekly readout');
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === out.context_id);
-  assert.equal(listed.description, 'payer revenue, one-off table for the weekly readout');
 });
 
 test('a governed task keeps its description', async () => {
@@ -91,29 +87,17 @@ test('no description means no empty field in the response', async () => {
   const { context_id } = await e.build_model({ action: 'start', name: 'plain', source: 'events' });
   const described = await e.context({ action: 'describe', context_id });
   assert.ok(!('description' in (described.draft || {})), 'nothing is invented for a draft that said nothing');
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === context_id);
-  assert.ok(!('description' in listed));
-  assert.ok(!('task_notes' in listed));
 });
 
-// The listing is a PAGE, most recently used first: a server keeps every conversation's contexts, and the
-// whole list did not fit a model's window. Context lifecycle; no warehouse.
-test('context list pages the contexts, most recently used first, and search narrows them', async () => {
+// A context a build made is reached by the id its build answered: no listing names another's (its id is
+// the key to its tables). Context lifecycle; no warehouse.
+test('context list names no context a build made', async () => {
   const e = engine();
-  const ids = [];
-  for (let i = 0; i < 5; i += 1) ids.push((await e.build_model({ action: 'start', name: `pg${i}`, source: 'events', description: i === 2 ? 'the payer funnel' : `draft ${i}` })).context_id);
-  e.ctxs.touch(ids[1]); // used last
-  const first = await e.context({ action: 'list', limit: 2 });
-  assert.equal(first.total, 5);
-  assert.equal(first.contexts.length, 2);
-  assert.equal(first.contexts[0].context_id, ids[1], 'the one used last comes first');
-  assert.equal(first.next_offset, 2);
-  const rest = await e.context({ action: 'list', offset: first.next_offset, limit: 10 });
-  assert.equal(rest.contexts.length, 3);
-  assert.equal(rest.next_offset, undefined, 'the last page says there is no next one');
-  assert.deepEqual(new Set([...first.contexts, ...rest.contexts].map((c) => c.context_id)), new Set(ids));
-  const found = await e.context({ action: 'list', search: 'PAYER funnel' });
-  assert.deepEqual(found.contexts.map((c) => c.context_id), [ids[2]]);
+  for (let i = 0; i < 3; i += 1) await e.build_model({ action: 'start', name: `pg${i}`, source: 'events', description: `draft ${i}` });
+  const listed = await e.context({ action: 'list' });
+  assert.equal(listed.total, 0);
+  assert.deepEqual(listed.contexts, []);
+  assert.equal((await e.context({ action: 'list', search: 'draft' })).total, 0);
   await assert.rejects(() => e.context({ action: 'list', limit: 0 }), /limit/);
   e.close();
 });
@@ -124,6 +108,8 @@ test('status lists the latest tasks first, of every side', async () => {
   for (let i = 0; i < 12; i += 1) { ids.push(e.jobs.create({ tool: i % 2 ? 'query_model' : 'query_retentioneering_model' })); await new Promise((r) => { setTimeout(r, 2); }); }
   const st = await e.semantic_index({ status: true });
   assert.equal(st.tasks.total, 12);
-  assert.deepEqual(st.tasks.recent.map((t) => t.task_id), ids.slice(-10).reverse(), 'the newest ten, newest first');
+  assert.deepEqual(st.tasks.recent.map((t) => t.tool), ids.slice(-10).reverse().map((_, i) => ((11 - i) % 2 ? 'query_model' : 'query_retentioneering_model')), 'the newest ten, newest first');
+  // a task is said by its tool, status and age — its id, context and table are the key to its rows
+  for (const t of st.tasks.recent) assert.deepEqual(Object.keys(t).sort(), ['age_ms', 'status', 'tool']);
   e.close();
 });

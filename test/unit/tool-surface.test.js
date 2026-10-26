@@ -97,8 +97,9 @@ test('context lists, describes and deletes — and a read never removes', async 
   const e = engine();
   // start a draft to create a context.
   const s = await e.build_model({ action: 'start', name: 'ctxtool', source: 'events' });
+  // a context a build made is reached by its id, never listed (its id is the key to its tables)
   const list = await e.context({ action: 'list' });
-  assert.ok(list.contexts.some((c) => c.context_id === s.context_id), 'list shows the created context');
+  assert.ok(!list.contexts.some((c) => c.context_id === s.context_id), 'list names no context a build made');
   const desc = await e.context({ action: 'describe', context_id: s.context_id });
   assert.equal(desc.context_id ?? desc.id ?? s.context_id, desc.context_id ?? desc.id ?? s.context_id); // describe returns the context shape
   // strict: describe requires context_id; list forbids it.
@@ -106,13 +107,12 @@ test('context lists, describes and deletes — and a read never removes', async 
   await assert.rejects(() => e.context({ action: 'list', context_id: s.context_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'drop', context_id: s.context_id }), /must be one of: list, describe, delete/);
-  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.context_id), 'a read removed nothing');
+  assert.ok(e.ctxs.has(s.context_id), 'a read removed nothing');
   // delete: semantic_model needs its model; context forbids the model's fields
   await assert.rejects(() => e.context({ action: 'delete', what: 'semantic_model', context_id: s.context_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'delete', context_id: s.context_id, cascade: true }), /invalid input/);
   await e.context({ action: 'delete', context_id: s.context_id });
-  const after = await e.context({ action: 'list' });
-  assert.ok(!after.contexts.some((c) => c.context_id === s.context_id), 'dropped context is gone');
+  assert.ok(!e.ctxs.has(s.context_id), 'dropped context is gone');
 });
 
 // Recipes folded into semantic_index: overview lists them; { recipe: id } returns one.

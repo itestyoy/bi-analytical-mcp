@@ -208,9 +208,12 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
   const status = await engine.semantic_index({ status: true });
   assert.ok(Array.isArray(status.tasks.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned
 
+  // the contexts the builds made are kept, and named by no listing (their ids are their owners' keys)
   const ctxs = await engine.context({ action: 'list' });
-  assert.ok(ctxs.contexts.some((c) => c.context_id === S.semCtx), 'semantic context listed');
-  assert.ok(ctxs.contexts.some((c) => c.context_id === S.pipeCtx), 'pipeline context listed');
+  for (const id of [S.semCtx, S.pipeCtx]) {
+    assert.ok(engine.ctxs.has(id), `context ${id} kept`);
+    assert.ok(!ctxs.contexts.some((c) => c.context_id === id), `context ${id} not listed`);
+  }
 });
 
 // ───────────────────────── 5. A/B over the experiments role ─────────────────────────
@@ -319,8 +322,7 @@ test('7. context: delete models + drop contexts; list shows them gone', opts, as
     const d = await engine.context({ action: 'delete', context_id: id });
     assert.equal(d.removed, true, `dropped ${id}`);
   }
-  const remaining = (await engine.context({ action: 'list' })).contexts;
   for (const id of [S.semCtx, S.pipeCtx, S.abCtx]) {
-    assert.ok(!remaining.some((c) => c.context_id === id), `context ${id} gone`);
+    assert.ok(!engine.ctxs.has(id), `context ${id} gone`);
   }
 });

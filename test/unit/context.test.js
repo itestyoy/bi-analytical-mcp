@@ -84,20 +84,16 @@ test('mergeCompiled accumulates additions and dedups metrics', () => {
   assert.deepEqual(state.tasks, ['t1', 't2']);
 });
 
-test('a context a feature cannot describe is listed with why, and the list of the others still comes back', async () => {
+test('a context a build made is never listed: its id is the key of whoever started it', async () => {
   const { loadCatalog } = await import('../../src/catalog.js');
   const { Engine } = await import('../../src/engine.js');
   const catalog = loadCatalog(new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname, {});
   const cm = new ContextManager({ workspaceRoot: tmpRoot() });
   const engine = new Engine({ catalog, contextManager: cm });
-  const broken = cm.create(); const fine = cm.create();
-  broken.state.feature_state = true;
-  // a feature whose describeContext throws on the one context (state an earlier version stored)
-  engine.features = [{ describeContext: (_e, ctx) => { if (ctx.state.feature_state) throw new TypeError("Cannot read properties of undefined (reading 'model')"); return null; } }];
+  cm.create(); cm.create();
   const listed = engine._listContexts();
-  assert.equal(listed.total, 2);
-  assert.ok(listed.contexts.find((c) => c.context_id === broken.id).unreadable);
-  assert.ok(!listed.contexts.find((c) => c.context_id === fine.id).unreadable);
+  assert.equal(listed.total, 0);
+  assert.deepEqual(listed.contexts, []);
   engine.close?.();
 });
 

@@ -306,7 +306,7 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
   assert.equal(vi.total_values, vi.last_successful_run.values_written, '[exact coverage] DB count == the run\'s values_written');
   // jobs section present (no background query jobs ran in this suite).
   assert.equal(typeof out.tasks.total, 'number');
-  assert.ok(Array.isArray(out.tasks.running));
+  assert.equal(typeof out.tasks.running, 'number');
   assert.ok(out.recommendations.length > 0);
 
   // per-property timing drill-down: by RUN (slowest first) and by PROPERTY (history).

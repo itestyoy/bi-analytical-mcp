@@ -54,7 +54,9 @@
 //   taskLog.put({ id, at, tool, source, text, how })   (a task started — what it computes and how, src/task-index.js)
 //   taskLog.has(id) -> bool;  taskLog.setVector(id, model, vec)
 //   taskLog.missing(model, limit)     -> [{ id, text }] (no vector of this model yet, oldest first)
-//   taskLog.range({ since, until, model? }) -> [{ id, at, tool, source, text, how, vector? }] (with a model: its vectors; oldest first)
+//   taskLog.range({ since, until, model? }) -> [{ id, at, tool, source, text, vector? }] (with a model: its vectors; oldest first)
+//   taskLog.count({ since, until })   -> how many tasks the window holds
+//   taskLog.hows(ids)                 -> Map(id → how) (only the tasks asked for: a how may be large)
 //   reset()                           (wipe every table but memory, the error log and the task log — MCP_DB_RESET)
 //   close()
 
@@ -105,7 +107,9 @@ export class MemoryBackend {
       missing: (model, limit = 1000) => [...taskLog.values()].filter((r) => r.model !== model).sort(byTime).slice(0, limit).map((r) => ({ id: r.id, text: r.text })),
       range: ({ since = null, until = null, model = null }) => [...taskLog.values()]
         .filter((r) => (model == null || (r.model === model && r.vector)) && (since == null || r.at >= since) && (until == null || r.at <= until))
-        .sort(byTime).map((r) => ({ id: r.id, at: r.at, tool: r.tool, source: r.source, text: r.text, how: r.how != null ? structuredClone(r.how) : null, ...(model != null ? { vector: [...r.vector] } : {}) })),
+        .sort(byTime).map((r) => ({ id: r.id, at: r.at, tool: r.tool, source: r.source, text: r.text, ...(model != null ? { vector: [...r.vector] } : {}) })),
+      count: ({ since = null, until = null } = {}) => [...taskLog.values()].filter((r) => (since == null || r.at >= since) && (until == null || r.at <= until)).length,
+      hows: (ids) => new Map(ids.filter((id) => taskLog.get(id)?.how != null).map((id) => [id, structuredClone(taskLog.get(id).how)])),
     };
 
     const meta = new Map();
@@ -441,10 +445,20 @@ export class SqliteBackend {
       missing(model, limit = 1000) { return s._all('SELECT id, text FROM task_log WHERE model IS NULL OR model != ? ORDER BY at, id LIMIT ?', model, limit); },
       range({ since = null, until = null, model = null }) {
         const rows = model == null
-          ? s._all('SELECT id, at, tool, source, text, how FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', since, since, until, until)
-          : s._all('SELECT id, at, tool, source, text, how, vector FROM task_log WHERE model = ? AND vector IS NOT NULL AND (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', model, since, since, until, until);
-        const how = (t) => { if (t == null) return null; try { return JSON.parse(t); } catch { return null; } };
-        return rows.map((r) => ({ id: r.id, at: Number(r.at), tool: r.tool, source: r.source, text: r.text, how: how(r.how), ...(r.vector ? { vector: fromBlob(r.vector) } : {}) }));
+          ? s._all('SELECT id, at, tool, source, text FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', since, since, until, until)
+          : s._all('SELECT id, at, tool, source, text, vector FROM task_log WHERE model = ? AND vector IS NOT NULL AND (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', model, since, since, until, until);
+        return rows.map((r) => ({ id: r.id, at: Number(r.at), tool: r.tool, source: r.source, text: r.text, ...(r.vector ? { vector: fromBlob(r.vector) } : {}) }));
+      },
+      count({ since = null, until = null } = {}) {
+        return Number(s._get('SELECT COUNT(*) AS n FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?)', since, since, until, until).n);
+      },
+      hows(ids) {
+        const out = new Map();
+        for (const id of ids) {
+          const r = s._get('SELECT how FROM task_log WHERE id = ?', id);
+          if (r?.how != null) { try { out.set(id, JSON.parse(r.how)); } catch { /* an unreadable how is none */ } }
+        }
+        return out;
       },
     };
 

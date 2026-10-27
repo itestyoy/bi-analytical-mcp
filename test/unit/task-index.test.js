@@ -103,3 +103,84 @@ test('every task a tool starts is recorded as it starts; semantic_index reads th
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ tasks: { search: 'x', themes: true } })), /tasks/);
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ tasks: { themes: true, limit: 3 } })), /tasks/);
 });
+
+test('nothing kept or answered hands an id on: a checkpoint, a context, an id spelled in a note are blanked', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  const ID = 'abcdef123456';
+  index.record({
+    id: 't1', tool: 'build_model',
+    ctx: { state: { draft: { name: 'retention_rerun', description: `retention, rerun of ${ID}`, source: 'events' } } },
+    input: { action: 'materialize', context_id: ID, name: 'retention_rerun', steps: [{ stage: 'limit', limit: 1 }], from_checkpoint: { at: 2, model: `pipe_retention_${ID}_c2` }, note: `see pipe_x_${ID}` },
+  });
+  const found = await index.similar({ search: 'retention rerun' });
+  assert.equal(found.tasks.length, 1);
+  assert.equal(JSON.stringify(found).includes(ID), false, 'the id is nowhere in the answer');
+  assert.deepEqual(found.tasks[0].how.steps, [{ stage: 'limit', limit: 1 }], 'the method is still said');
+});
+
+test('a long string of a task\'s steps is kept cut', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  index.record({ id: 't1', tool: 'build_model', ctx: { state: { draft: { name: 'scoring', source: 'events' } } }, input: { steps: [{ stage: 'python', functions: [{ name: 'f', params: ['df'], body: 'x'.repeat(30000) }] }] } });
+  const [t] = (await index.similar({ search: 'scoring' })).tasks;
+  assert.ok(t.how.steps[0].functions[0].body.length < 1100);
+});
+
+test('an embedder that cannot be reached: the tasks are compared by their words, and the answer says so', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const embedder = { model: 'down', embed: async () => { throw new Error('embeddings HTTP 503'); } };
+  const index = new TaskIndex({ store: s, embedder });
+  seeded(index);
+  const found = await index.similar({ search: 'crash by app version', limit: 2 });
+  assert.match(found.note, /could not be reached/);
+  assert.deepEqual(found.tasks.map((t) => topicOf(t.task)), ['crashes', 'crashes']);
+  const themes = await index.themes({});
+  assert.equal(themes.themes.length, 3);
+});
+
+test('a task is sent to the embedder once, however many reads wait for it', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const local = localVectors(TASKS.map((t) => taskText(t)));
+  let embedded = 0;
+  const embedder = { model: 'm', embed: async (texts) => { embedded += texts.length; await new Promise((r) => { setTimeout(r, 20); }); return texts.map((t) => local.of(t)); } };
+  const index = new TaskIndex({ store: s, embedder });
+  seeded(index);
+  await Promise.all([index.similar({ search: 'crash' }), index.similar({ search: 'retention' }), index.themes({})]);
+  assert.equal(embedded - 2, 12, 'twelve tasks, plus the two phrases searched for');
+});
+
+test('a task whose context is gone, or says nothing of what it was for, is not taken from the registry', () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  const ctxs = { a: { state: { draft: { name: 'kept_one', source: 'events' } } }, b: { state: {} } };
+  index.backfill([{ id: 'j1', tool: 'query_model', contextId: 'a' }, { id: 'j2', tool: 'query_model', contextId: 'b' }, { id: 'j3', tool: 'query_model', contextId: 'gone' }, { id: 'j4', tool: 'query_model' }], (id) => ctxs[id] || null);
+  assert.deepEqual(['j1', 'j2', 'j3', 'j4'].filter((id) => s.taskLog.has(id)), ['j1']);
+});
+
+test('a theme\'s share is of the tasks clustered, one or many', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  seeded(index);
+  const one = await index.themes({ about: 'fatal crashes by device model and app version', min_similarity: 0.6 });
+  assert.equal(one.tasks_about, 1);
+  assert.equal(one.themes[0].share, 1);
+});
+
+test('clustering a long window runs in a thread of its own: the server\'s thread keeps answering meanwhile', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  for (let i = 0; i < 1500; i += 1) {
+    const [topic, texts] = Object.entries(TOPICS)[i % 3];
+    index.record({ id: `x${i}`, tool: 'build_model', ctx: { state: { draft: { name: `${topic}_${i}`, description: texts[i % 4], source: 'events' } } }, at: DAY + i * 1000 });
+  }
+  let ticks = 0;
+  const beat = setInterval(() => { ticks += 1; }, 10);
+  const t0 = Date.now();
+  const themes = await index.themes({});
+  const took = Date.now() - t0;
+  clearInterval(beat);
+  assert.equal(themes.tasks_in_window, 1500);
+  // the interval kept firing while the thread worked: at least half of the ticks the time allowed
+  assert.ok(ticks >= Math.floor(took / 10 / 2), `${ticks} ticks in ${took} ms`);
+});

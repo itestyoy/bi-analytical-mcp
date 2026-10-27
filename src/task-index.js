@@ -6,79 +6,89 @@
 // one is given, clustered).
 //
 // It is a record of the QUESTIONS and of HOW each was computed — never a way to the data: what it
-// answers carries no task id, no context id and no table, and a found task's steps are said without
-// them (`howOf`), so a task found here cannot be read back, built on or drawn. Another task's rows may
-// not fit the question at hand, and reaching them is not what this is for; its method may help.
+// answers carries no task id, no context id and no table, and nothing it keeps does either — a found
+// task's steps are kept without what names stored work and with every id spelled in them blanked
+// (`howOf`, `withoutIds`), so a task found here cannot be read back, built on or drawn. Another task's
+// rows may not fit the question at hand, and reaching them is not what this is for; its method may help.
 //
 // The vector is the deployment's embedder's (the one semantic memory search uses — MEMORY_EMBEDDINGS,
 // OpenAI) at TASK_DIMS dimensions, computed after the task starts and never in its way, and stored
 // with the model that made it: a search reads only the rows of the model it asks with, and the rows
 // of another model (a deployment that switched) are re-embedded when the index is read. Without an
-// embedder the vector is a local one, made when the index is read: the text's words weighted by how
-// rare they are among the tasks read (TF-IDF, so what every task says weighs nothing) and hashed into
-// LOCAL_DIMS dimensions — the index works on every deployment, coarser where the words differ but
-// the meaning is the same.
+// embedder — or while it cannot be reached — the vector is a local one, made when the index is read:
+// the text's words weighted by how rare they are among the tasks read (TF-IDF, so what every task says
+// weighs nothing) and hashed — coarser where the words differ but the meaning is the same.
+//
+// What is computed over the rows read (the local vectors, a search's ranking, the clustering of a
+// period) runs in a thread of its own (src/task-themes-worker.js), so a long window takes none of the
+// server's own thread from every other call.
 
-import { createHash } from 'node:crypto';
-import { cosineSimilarity } from './embeddings.js';
+import { Worker } from 'node:worker_threads';
 import { resolveTimeRange, momentMs, isValidTimezone } from './time-range.js';
 import { ToolError } from './validate.js';
+import { LOCAL_DIMS, normalized } from './task-themes.js';
+
+export { words, localVectors, kmeans, bestKmeans, silhouette } from './task-themes.js';
+export { LOCAL_DIMS };
 
 /** The dimensions an OpenAI text-embedding-3 vector is asked at (plenty to tell themes apart, 1 KB a row). */
 export const TASK_DIMS = 256;
-/** The local vector: the words of the text hashed into this many dimensions. */
-export const LOCAL_DIMS = 512;
 export const LOCAL_MODEL = `local-words-${LOCAL_DIMS}`;
 /** At most this many rows are embedded in one request to the embedder. */
 const EMBED_BATCH = 64;
-/** A theme is told with this many of its most typical tasks. */
-const EXAMPLES = 3;
-/** The number of clusters is chosen on at most this many tasks of the window. */
-const SILHOUETTE_SAMPLE = 400;
+/** How long a computation over the rows read may take in its thread. */
+const THREAD_TIMEOUT_MS = 120000;
+/** A string of a task's steps longer than this is kept cut (a python stage's function body may run to 40 000). */
+const HOW_STRING_MAX = 1000;
 
 // the fields of a tool's input whose strings say WHAT is computed (a name, a source, an event, a
 // metric, a column, a value) — not how (a function, a stage, a direction)
 const MEANINGFUL = new Set(['source', 'event', 'event_name', 'events', 'metric', 'metrics', 'measure', 'column', 'property', 'dimension', 'entity', 'semantic_model', 'value', 'group_by', 'keep', 'on', 'name', 'description', 'label', 'experiment', 'analysis']);
 
-// the words that say nothing of a task's subject, in the two languages its texts are written in
-const STOP = new Set(['by', 'of', 'the', 'and', 'or', 'per', 'for', 'in', 'on', 'to', 'over', 'with', 'from', 'at', 'as', 'is', 'an', 'по', 'на', 'за', 'для', 'из', 'без', 'от', 'до', 'при', 'не']);
+// what in a tool's input names stored work rather than saying how something is computed — a context,
+// a task, a table, a checkpoint and the context it is built in
+const LEADS_TO_DATA = new Set(['context_id', 'from_task', 'task_id', 'task_ids', 'table', 'cancel', 'offset', 'from_checkpoint', 'checkpoints', 'owner', 'base', 'building']);
 
-/** An English plural said as its singular (installs → install), so the two forms are one word. */
-const singular = (w) => (w.length > 3 && /^[a-z]+s$/.test(w) && !/(ss|us|is)$/.test(w) ? w.slice(0, -1) : w);
+// a context's or a task's id (twelve hex digits, a server-made name may carry one: pipe_<name>_<id>_c2)
+const AN_ID = /(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])/gi;
 
-// what in a tool's input names stored work rather than saying how something is computed
-const LEADS_TO_DATA = new Set(['context_id', 'from_task', 'task_id', 'task_ids', 'table', 'cancel', 'offset']);
+/** A text with every id spelled in it blanked: an id is its owner's key, and nothing kept here may hand one on. */
+export function withoutIds(text) {
+  return String(text).replace(AN_ID, '<id>');
+}
 
-/** How a task computed what it did — its input without anything that names stored work (a context, a task, a table). */
+/**
+ * How a task computed what it did — its input without anything that names stored work (a context, a
+ * task, a table, a checkpoint), every id spelled in a string blanked, and a long string kept cut.
+ */
 export function howOf(input) {
   if (Array.isArray(input)) return input.map(howOf);
+  if (typeof input === 'string') {
+    const s = withoutIds(input);
+    return s.length > HOW_STRING_MAX ? `${s.slice(0, HOW_STRING_MAX)}… (${s.length - HOW_STRING_MAX} more characters)` : s;
+  }
   if (!input || typeof input !== 'object') return input;
   return Object.fromEntries(Object.entries(input).filter(([k]) => !LEADS_TO_DATA.has(k)).map(([k, v]) => [k, howOf(v)]));
 }
 
-/** The words of a text: letters and digits, lower case, a snake_case name also taken apart. */
-export function words(text) {
-  const out = [];
-  const keep = (p) => p.length > 1 && !/^\d+$/.test(p) && !STOP.has(p);
-  for (const w of String(text || '').toLowerCase().match(/[\p{L}\p{N}_]+/gu) || []) {
-    if (keep(w)) out.push(singular(w));
-    // a word written with underscores also says each of its words
-    const inner = w.includes('_') ? w.match(/[\p{L}\p{N}]+/gu) || [] : [];
-    out.push(...inner.filter(keep).map(singular));
-  }
-  return out;
+/** The name and the note a context says it is for, or nulls. */
+function aboutOf(ctx) {
+  const state = ctx?.state || {};
+  const notes = Object.values(state.task_notes || {});
+  return {
+    name: state.draft?.name || (Array.isArray(state.tasks) && state.tasks.length ? state.tasks[state.tasks.length - 1] : null),
+    description: state.draft?.description || notes[notes.length - 1] || null,
+  };
 }
 
 /**
  * One line that says what a task computes, from what the server knows of it: its context's name and
  * description, the tool, and the meaningful strings of its input. Nothing of the user's own words —
- * the server never sees them — and nothing it would have to guess.
+ * the server never sees them — nothing it would have to guess, and no id.
  */
 export function taskText({ tool, ctx = null, input = null }) {
   const state = ctx?.state || {};
-  const name = state.draft?.name || (Array.isArray(state.tasks) && state.tasks.length ? state.tasks[state.tasks.length - 1] : null);
-  const notes = Object.values(state.task_notes || {});
-  const description = state.draft?.description || notes[notes.length - 1] || null;
+  const { name, description } = aboutOf(ctx);
   const seen = new Set();
   const said = [];
   const walk = (v, key) => {
@@ -88,127 +98,16 @@ export function taskText({ tool, ctx = null, input = null }) {
     } else if (typeof v === 'number' || typeof v === 'boolean') {
       if (key === 'value' && !seen.has(String(v))) { seen.add(String(v)); said.push(String(v)); }
     } else if (Array.isArray(v)) v.forEach((x) => walk(x, key));
-    else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) if (k !== 'sql' && k !== 'body') walk(x, k);
+    else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) if (k !== 'sql' && k !== 'body' && !LEADS_TO_DATA.has(k)) walk(x, k);
   };
   walk(input, null);
   const window = input?.time_range ? [input.time_range.start, input.time_range.end].filter(Boolean).join('..') : null;
-  return [
+  return withoutIds([
     name ? `${String(name).replace(/_/g, ' ')}${description ? `: ${description}` : ''}` : description,
     `${tool}${state.draft?.source ? ` over ${state.draft.source}` : ''}`,
     said.length ? said.join(', ') : null,
     window ? `window ${window}` : null,
-  ].filter(Boolean).join(' — ');
-}
-
-/**
- * Local vectors for a set of texts: each text's words weighted by tf (log) × idf over the set, hashed
- * into LOCAL_DIMS signed buckets, unit length — and `of(text)`, the vector of another text (a phrase
- * searched for) by the same weights.
- */
-export function localVectors(texts) {
-  const df = new Map();
-  for (const t of texts) for (const w of new Set(words(t))) df.set(w, (df.get(w) || 0) + 1);
-  const n = texts.length;
-  const of = (text) => {
-    const v = new Float64Array(LOCAL_DIMS);
-    const tf = new Map();
-    for (const w of words(text)) tf.set(w, (tf.get(w) || 0) + 1);
-    for (const [w, c] of tf) {
-      const idf = Math.log((n + 1) / ((df.get(w) || 0) + 1)) + 1 / (n + 1);
-      const h = createHash('md5').update(w).digest();
-      v[h.readUInt32LE(0) % LOCAL_DIMS] += (h[4] & 1 ? 1 : -1) * (1 + Math.log(c)) * idf;
-    }
-    return normalized(v);
-  };
-  return { vectors: texts.map(of), of };
-}
-
-function normalized(v) {
-  let s = 0;
-  for (const x of v) s += x * x;
-  const n = Math.sqrt(s) || 1;
-  return Array.from(v, (x) => x / n);
-}
-
-/** A deterministic random number source (mulberry32), so a clustering is the same on every run. */
-function seeded(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/**
- * The best of several spherical k-means runs (seeds 1..restarts): the one whose points lie closest to
- * their centres — one run can settle in a poor split, and which one it is depends on the order of the
- * points.
- */
-export function bestKmeans(vectors, k, { restarts = 6 } = {}) {
-  let best = null;
-  for (let seed = 1; seed <= restarts; seed += 1) {
-    const c = kmeans(vectors, k, { seed });
-    const cohesion = vectors.reduce((a, v, i) => a + cosineSimilarity(v, c.centres[c.assign[i]]), 0);
-    if (!best || cohesion > best.cohesion + 1e-12) best = { ...c, cohesion };
-  }
-  return best;
-}
-
-/**
- * Spherical k-means (cosine) with k-means++ seeding from a fixed seed: unit vectors in, for each
- * vector its cluster, and each cluster's centre (unit length).
- */
-export function kmeans(vectors, k, { iterations = 30, seed = 1 } = {}) {
-  const n = vectors.length;
-  const rnd = seeded(seed);
-  const centres = [vectors[Math.floor(rnd() * n)]];
-  while (centres.length < k) {
-    const d = vectors.map((v) => Math.max(0, 1 - Math.max(...centres.map((c) => cosineSimilarity(v, c)))) ** 2);
-    const total = d.reduce((a, b) => a + b, 0);
-    if (total <= 0) break;
-    let r = rnd() * total;
-    let i = 0;
-    while (i < n - 1 && (r -= d[i]) > 0) i += 1;
-    centres.push(vectors[i]);
-  }
-  let assign = new Array(n).fill(0);
-  for (let it = 0; it < iterations; it += 1) {
-    const next = vectors.map((v) => { let best = 0; let bs = -Infinity; centres.forEach((c, j) => { const s = cosineSimilarity(v, c); if (s > bs) { bs = s; best = j; } }); return best; });
-    const moved = next.some((c, i) => c !== assign[i]);
-    assign = next;
-    for (let j = 0; j < centres.length; j += 1) {
-      const members = vectors.filter((_, i) => assign[i] === j);
-      if (!members.length) continue;
-      const sum = new Float64Array(members[0].length);
-      for (const m of members) for (let d = 0; d < m.length; d += 1) sum[d] += m[d];
-      centres[j] = normalized(sum);
-    }
-    if (!moved && it > 0) break;
-  }
-  return { assign, centres };
-}
-
-/** The mean silhouette of a clustering (cosine distance): how much closer each point is to its own cluster than to the next. */
-export function silhouette(vectors, assign) {
-  const k = Math.max(-1, ...assign) + 1;
-  if (k < 2) return 0;
-  let total = 0;
-  for (let i = 0; i < vectors.length; i += 1) {
-    const dist = new Array(k).fill(0); const cnt = new Array(k).fill(0);
-    for (let j = 0; j < vectors.length; j += 1) {
-      if (i === j) continue;
-      dist[assign[j]] += 1 - cosineSimilarity(vectors[i], vectors[j]); cnt[assign[j]] += 1;
-    }
-    const own = assign[i];
-    if (cnt[own] === 0) continue; // a singleton scores 0
-    const a = dist[own] / cnt[own];
-    const b = Math.min(...dist.map((d, c) => (c === own || !cnt[c] ? Infinity : d / cnt[c])));
-    total += b === Infinity ? 0 : (b - a) / Math.max(a, b);
-  }
-  return total / vectors.length;
+  ].filter(Boolean).join(' — '));
 }
 
 /** The window of a time_range as epoch milliseconds { since, until }, read as every time_range is. */
@@ -221,7 +120,31 @@ function windowOf(tr) {
   };
 }
 
-const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+/**
+ * Compute `op` over the rows read in a thread of its own: their texts and times, and their vectors
+ * (where the embedder made them) packed into one buffer handed over rather than copied.
+ */
+function inThread(op, payload, vectors = null, query = null) {
+  let packed = null;
+  const transferList = [];
+  if (vectors) {
+    const dims = vectors[0]?.length || 0;
+    const all = new Float32Array(vectors.length * dims);
+    vectors.forEach((v, i) => all.set(v, i * dims));
+    packed = { buffer: all.buffer, dims, n: vectors.length, ...(query ? { query } : {}) };
+    transferList.push(all.buffer);
+  }
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./task-themes-worker.js', import.meta.url), { workerData: { op, payload, packed }, transferList });
+    let settled = false;
+    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(timer); fn(v); };
+    const timer = setTimeout(() => { void worker.terminate(); done(reject, new ToolError(`the task index took longer than ${THREAD_TIMEOUT_MS / 1000}s over this window — ask for a shorter time_range`, { stage: 'tasks' })); }, THREAD_TIMEOUT_MS);
+    timer.unref?.();
+    worker.once('message', (m) => done(m.ok ? resolve : reject, m.ok ? m.result : new Error(m.error)));
+    worker.once('error', (e) => done(reject, e));
+    worker.once('exit', (code) => done(reject, new Error(`the task index thread ended (${code}) without an answer`)));
+  });
+}
 
 export class TaskIndex {
   /**
@@ -236,7 +159,8 @@ export class TaskIndex {
     this.toolOf = toolOf;
     this.logger = logger;
     this.pending = new Set(); // ids waiting for the embedder
-    this.flushing = null;
+    this.flushing = null; // the one embedding run, when one runs
+    this.timer = null;
   }
 
   /** The model a vector is made by on this deployment (the name each row is stored with). */
@@ -247,33 +171,47 @@ export class TaskIndex {
   /** Keep a task that just started. Never throws, never waits: a task does not depend on its record. */
   record({ id, tool, ctx = null, input = null, at = Date.now() }) {
     try {
-      const text = taskText({ tool: this.toolOf(tool) || tool, ctx, input });
-      this.store.taskLog.put({ id, at, tool: this.toolOf(tool) || tool, source: ctx?.state?.draft?.source ?? input?.source ?? null, text, how: input ? howOf(input) : null });
+      const said = this.toolOf(tool) || tool;
+      this.store.taskLog.put({ id, at, tool: said, source: ctx?.state?.draft?.source ?? input?.source ?? null, text: taskText({ tool: said, ctx, input }), how: input ? howOf(input) : null });
       if (this.embedder) { this.pending.add(id); this._schedule(); }
     } catch (e) { this.logger(`✗ task ${id} not indexed: ${e?.message || e}`); }
   }
 
-  /** Tasks started before the index existed (or before this deployment's model) — kept from the job registry. */
+  /**
+   * Tasks started before the index existed, kept from the job registry — those whose context still
+   * says what they were for: one that does not would be a line of its tool's name alone, the same for
+   * every such task, and only crowd the themes.
+   */
   backfill(jobs = [], ctxOf = () => null) {
     for (const j of jobs) {
-      if (!j?.id || this.store.taskLog.has(j.id)) continue;
-      this.record({ id: j.id, tool: j.tool || 'task', ctx: j.contextId ? ctxOf(j.contextId) : null, at: j.startedAt || Date.now() });
+      if (!j?.id || !j.contextId || this.store.taskLog.has(j.id)) continue;
+      const ctx = ctxOf(j.contextId);
+      const { name, description } = aboutOf(ctx);
+      if (!name && !description) continue;
+      this.record({ id: j.id, tool: j.tool || 'task', ctx, at: j.startedAt || Date.now() });
     }
   }
 
   _schedule() {
-    if (this.flushing) return;
-    const t = setTimeout(() => { this.flushing = this._flush().catch((e) => this.logger(`✗ embedding tasks: ${e?.message || e}`)).finally(() => { this.flushing = null; if (this.pending.size) this._schedule(); }); }, 200);
-    t.unref?.();
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this._embedPending().catch((e) => this.logger(`✗ embedding tasks: ${e?.message || e}`)).then(() => { if (this.pending.size) this._schedule(); });
+    }, 200);
+    this.timer.unref?.();
   }
 
-  /** Embed what waits (and any row of another model), batch by batch. */
+  /** The one embedding run: joined while it runs, so a row is never sent to the embedder twice at once. */
+  _embedPending() {
+    if (!this.flushing) this.flushing = this._flush().finally(() => { this.flushing = null; });
+    return this.flushing;
+  }
+
+  /** Embed every row without a vector of this deployment's model (what waits among them), batch by batch. */
   async _flush() {
     if (!this.embedder) return;
-    const missing = this.store.taskLog.missing(this.model, 10000);
-    const ids = new Set([...this.pending, ...missing.map((r) => r.id)]);
     this.pending.clear();
-    const rows = missing.filter((r) => ids.has(r.id));
+    const rows = this.store.taskLog.missing(this.model, 10000);
     for (let i = 0; i < rows.length; i += EMBED_BATCH) {
       const batch = rows.slice(i, i + EMBED_BATCH);
       const vecs = await this.embedder.embed(batch.map((r) => r.text), { dimensions: TASK_DIMS });
@@ -282,33 +220,49 @@ export class TaskIndex {
   }
 
   /**
-   * Every row of the window with its vector — the embedder's (embedding first what still waits), or
-   * the local one made over the window's texts — and `vectorOf(text)`, a phrase's vector by the same model.
+   * The rows of the window, with the embedder's vectors and the vector of each phrase asked — or, where
+   * there is no embedder or it cannot be reached now, the rows with no vector (the thread makes local
+   * ones) and a note saying so. A row the embedder has not reached yet is counted, never silently left out.
    */
-  async _rows(timeRange) {
+  async _read(timeRange, phrase) {
     const { since, until } = windowOf(timeRange);
-    if (!this.embedder) {
-      const rows = this.store.taskLog.range({ since, until });
-      const local = localVectors(rows.map((r) => r.text));
-      return { rows: rows.map((r, i) => ({ ...r, vector: local.vectors[i] })), vectorOf: async (text) => local.of(text) };
+    let note = null;
+    if (this.embedder) {
+      try {
+        // what an earlier run is embedding is waited for, then everything still without a vector
+        if (this.flushing) await this.flushing.catch(() => {});
+        await this._embedPending();
+        const q = phrase ? normalized((await this.embedder.embed([phrase], { dimensions: TASK_DIMS }))[0]) : null;
+        const rows = this.store.taskLog.range({ since, until, model: this.model });
+        const all = this.store.taskLog.count({ since, until });
+        return { rows, q, model: this.model, ...(all > rows.length ? { not_embedded: all - rows.length } : {}) };
+      } catch (e) {
+        this.logger(`✗ the embedder could not be reached: ${e?.message || e}`);
+        note = `the embedder could not be reached (${e?.message || e}), so the tasks were compared by their words`;
+      }
     }
-    if (this.flushing) await this.flushing;
-    await this._flush();
-    const vectorOf = async (text) => normalized((await this.embedder.embed([text], { dimensions: TASK_DIMS }))[0]);
-    return { rows: this.store.taskLog.range({ since, until, model: this.model }), vectorOf };
+    return { rows: this.store.taskLog.range({ since, until }), q: null, model: LOCAL_MODEL, ...(note ? { note } : {}) };
   }
 
   /** What a task is said as here: what it computed, when and (where asked) how — never a way back to it. */
-  _shown(r, score, { how = false } = {}) {
-    return { at: new Date(r.at).toISOString(), tool: r.tool, ...(r.source ? { source: r.source } : {}), task: r.text, ...(score != null ? { similarity: Math.round(score * 1000) / 1000 } : {}), ...(how && r.how ? { how: r.how } : {}) };
+  _shown(r, score, how) {
+    return { at: new Date(r.at).toISOString(), tool: r.tool, ...(r.source ? { source: r.source } : {}), task: r.text, ...(score != null ? { similarity: Math.round(score * 1000) / 1000 } : {}), ...(how ? { how } : {}) };
   }
 
-  /** The tasks most like a phrase, within a window. */
+  /** What every answer says of the read: the model, and what it could not compare. */
+  _said(read) {
+    return { model: read.model, ...(read.not_embedded ? { not_embedded: read.not_embedded } : {}), ...(read.note ? { note: read.note } : {}) };
+  }
+
+  /** The tasks most like a phrase, within a window — each with how it was computed. */
   async similar({ search, time_range: timeRange, limit = 10 }) {
-    const { rows, vectorOf } = await this._rows(timeRange);
-    const q = await vectorOf(search);
-    const ranked = rows.map((r) => ({ r, s: cosineSimilarity(q, r.vector) })).sort((a, b) => b.s - a.s || b.r.at - a.r.at).slice(0, limit);
-    return { model: this.model, searched: rows.length, tasks: ranked.map(({ r, s }) => this._shown(r, s, { how: true })) };
+    const read = await this._read(timeRange, search);
+    const { rows } = read;
+    const ranked = rows.length
+      ? await inThread('similar', { texts: rows.map((r) => r.text), ats: rows.map((r) => r.at), query: search, limit }, read.model === LOCAL_MODEL ? null : rows.map((r) => r.vector), read.q ? { field: 'queryVector', vector: read.q } : null)
+      : [];
+    const hows = this.store.taskLog.hows(ranked.map(({ i }) => rows[i].id));
+    return { ...this._said(read), searched: rows.length, tasks: ranked.map(({ i, s }) => this._shown(rows[i], s, hows.get(rows[i].id))) };
   }
 
   /**
@@ -317,54 +271,20 @@ export class TaskIndex {
    * its size, its share, its days, the words that set it apart and its most typical tasks.
    */
   async themes({ time_range: timeRange, about = null, min_similarity: minSimilarity = null, clusters = null }) {
-    const read = await this._rows(timeRange);
-    let { rows } = read;
-    const total = rows.length;
-    if (about) {
-      const q = await read.vectorOf(about);
-      const floor = minSimilarity ?? (this.embedder ? 0.3 : 0.1);
-      rows = rows.filter((r) => cosineSimilarity(q, r.vector) >= floor);
-    }
-    const out = { model: this.model, tasks_in_window: total, ...(about ? { about, tasks_about: rows.length } : {}) };
-    if (rows.length < 2) return { ...out, themes: rows.length ? [this._theme(rows, rows[0].vector, total)] : [] };
-    const vectors = rows.map((r) => r.vector);
-    let best;
-    if (clusters) best = bestKmeans(vectors, Math.min(clusters, rows.length));
-    else {
-      const most = Math.min(12, Math.floor(rows.length / 3));
-      // the silhouette compares every pair: over a large window it is measured on an evenly spaced sample
-      const step = Math.max(1, Math.ceil(rows.length / SILHOUETTE_SAMPLE));
-      const sampled = vectors.map((_, i) => i).filter((i) => i % step === 0);
-      for (let k = 2; k <= most; k += 1) {
-        const c = bestKmeans(vectors, k);
-        const s = silhouette(sampled.map((i) => vectors[i]), sampled.map((i) => c.assign[i]));
-        if (!best || s > best.score) best = { ...c, score: s };
-      }
-      if (!best) best = { assign: rows.map(() => 0), centres: [normalized(vectors.reduce((a, v) => a.map((x, d) => x + v[d]), new Array(vectors[0].length).fill(0)))] };
-    }
-    const groups = best.centres.map((c, j) => ({ centre: c, members: rows.filter((_, i) => best.assign[i] === j) })).filter((g) => g.members.length);
-    const themes = groups.map((g) => this._theme(g.members, g.centre, rows.length, rows)).sort((a, b) => b.tasks - a.tasks);
-    return { ...out, themes };
-  }
-
-  /** One theme: its size and share, its days, the words that set it apart, its most typical tasks. */
-  _theme(members, centre, of, all = members) {
-    const freq = (rs) => { const m = new Map(); for (const r of rs) for (const w of new Set(words(r.text))) m.set(w, (m.get(w) || 0) + 1); return m; };
-    const inside = freq(members); const everywhere = freq(all);
-    // the tool and the source name no subject, and a word most tasks of the window say sets no theme apart
-    const plumbing = new Set(all.flatMap((r) => words(`${r.tool || ''} ${r.source || ''}`)));
-    const terms = [...inside].filter(([w, n]) => n >= Math.min(2, members.length) && !plumbing.has(w) && (everywhere.get(w) || 0) < 0.8 * all.length)
-      .map(([w, n]) => [w, (n / members.length) * Math.log((all.length + 1) / (everywhere.get(w) || 1))])
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8).map(([w]) => w);
-    const days = new Map();
-    for (const r of members) days.set(day(r.at), (days.get(day(r.at)) || 0) + 1);
-    const typical = [...members].sort((a, b) => cosineSimilarity(centre, b.vector) - cosineSimilarity(centre, a.vector) || b.at - a.at).slice(0, EXAMPLES);
+    const read = await this._read(timeRange, about);
+    const { rows } = read;
+    const out = { ...this._said(read), tasks_in_window: rows.length };
+    if (!rows.length) return { ...out, ...(about ? { about, tasks_about: 0 } : {}), themes: [] };
+    const floor = minSimilarity ?? (read.q ? 0.3 : 0.1);
+    const found = await inThread('themes', {
+      texts: rows.map((r) => r.text), ats: rows.map((r) => r.at), tools: rows.map((r) => r.tool), sources: rows.map((r) => r.source),
+      about, minSimilarity: floor, clusters,
+    }, read.model === LOCAL_MODEL ? null : rows.map((r) => r.vector), read.q ? { field: 'aboutVector', vector: read.q } : null);
     return {
-      tasks: members.length,
-      share: Math.round((members.length / of) * 1000) / 1000,
-      terms,
-      days: [...days].sort((a, b) => a[0].localeCompare(b[0])).map(([d, n]) => ({ day: d, tasks: n })),
-      examples: typical.map((r) => this._shown(r)),
+      ...out,
+      ...(about ? { about, tasks_about: found.tasks_about } : {}),
+      themes: found.themes.map(({ examples, ...t }) => ({ ...t, examples: examples.map((i) => this._shown(rows[i])) })),
     };
   }
 }
+

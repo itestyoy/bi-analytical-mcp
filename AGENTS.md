@@ -822,9 +822,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   re-embedded for another), or without one a local TF-IDF vector over the tasks read. semantic_index's
   `{ tasks }` view reads it — the tasks like a phrase, or the themes of a period (narrowed to a phrase,
   clustered by k-means at the count that separates best) — and answers what each computed, when and
-  (a found task) how — its input without what names stored work (`howOf`) — NEVER a task id, a context
-  id or a table: another task's rows may not fit the question at hand, so nothing found here can be
-  read back, built on or drawn; its method may help. The store's `task_log` is kept across a reset.
+  (a found task) how — its input without what names stored work (`howOf`: a context, a task, a table,
+  a checkpoint), every id spelled in a kept string blanked (`withoutIds`) and a long one cut — NEVER a
+  task id, a context id or a table: another task's rows may not fit the question at hand, so nothing
+  found here can be read back, built on or drawn; its method may help. What is computed over the rows
+  read — the local vectors, a search's ranking, a period's clustering (on a sample of a long window,
+  every task then put in its nearest cluster) — runs in a thread of its own (src/task-themes.js, its
+  worker src/task-themes-worker.js), never on the server's; an embedder that cannot be reached leaves
+  the read to the local vectors and says so, and an embedding run is one at a time. A task from before
+  the index is taken from the job registry only where its context still says what it was for. The
+  store's `task_log` is kept across a reset.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

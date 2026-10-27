@@ -27,6 +27,7 @@ const MENTIONED_SHOWN = 3; // …and that many of them are listed per kind, besi
 const RECIPE_BESIDE_NAME = 0.9; // beside a match of the data's own names, a loose recipe below this is left out
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
+const NAMES_SHOWN = 10; // events, properties and columns shown per list — the rest counted under `more`
 
 export class CatalogSearch {
   constructor({ catalog, recipes, valueIndex }) {
@@ -177,13 +178,20 @@ export class CatalogSearch {
     };
     // (where nothing matches closely, a few resemblances per list are enough to say so)
     for (const k of Object.keys(lists)) lists[k] = near(lists[k]).slice(0, best < WEAK_MATCH ? WEAK_SHOWN : undefined);
+    // (a short or common word names many things: the best of each list are shown, the rest counted —
+    // a longer word, or the source's own view, narrows them)
+    const more = {};
+    for (const k of ['event_names', 'property_matches', 'column_matches']) {
+      if (lists[k].length > NAMES_SHOWN) { more[k] = lists[k].length - NAMES_SHOWN; lists[k] = lists[k].slice(0, NAMES_SHOWN); }
+    }
     // a recipe is a task type, not a name of the data: beside a name the word does match (an event, a
     // value), a recipe whose title only resembles it is left out — an exact one, or a close one, stays
     const named = ['event_names', 'property_matches', 'column_matches', 'value_matches'].some((k) => lists[k].length);
     if (named) lists.recipe_matches = lists.recipe_matches.filter((m) => m.match === 'exact' || (m.score ?? 0) >= RECIPE_BESIDE_NAME);
     const recommendations = this._recommend({ query, fuzzy, ...lists });
+    if (Object.keys(more).length) recommendations.unshift(`'${query}' names more than is shown (more: ${Object.entries(more).map(([k, n]) => `${n} ${k}`).join(', ')}) — a longer word narrows it, and semantic_index({ request: { source, event } }) lists what one event carries.`);
 
-    return { query, fuzzy, ...lists, recommendations };
+    return { query, fuzzy, ...lists, ...(Object.keys(more).length ? { more } : {}), recommendations: recommendations.slice(0, 4) };
   }
 
   /** Concrete next-move guidance from the matches (≤4), with a did-you-mean note. */

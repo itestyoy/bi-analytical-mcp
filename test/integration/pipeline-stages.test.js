@@ -1853,12 +1853,14 @@ test('15. the complex properties are discoverable with their declared shape', op
   assert.ok(!keys.complex, 'an object column is not an array');
   assert.match(keys.description, /JSON object/);
 
-  // the model view lists all three as real columns of the source, so a pipeline can name them
+  // the source's view counts them among the properties held in a column of their own — listed where
+  // they are carried (the event's view above), not again beside the source's own columns
   const model = await engine.semantic_index({ source: 'crashlytics' });
   const cols = new Set((model.columns || []).map((c) => String(c.name ?? c)));
   for (const n of ['breadcrumbs_of_event_data', 'stack_frames_of_event_data', 'custom_keys_of_event_data']) {
-    assert.ok(cols.has(n), `${n} is a referenceable column (got: ${[...cols].join(', ')})`);
+    assert.ok(!cols.has(n), `${n} is not repeated among the source's own columns`);
   }
+  assert.ok(model.property_columns >= 3, 'they are counted as property columns');
 });
 
 // ════════════ CALLER TEXT IS NEVER JINJA (was jinja-inert.test.js) ═════════════════════════════

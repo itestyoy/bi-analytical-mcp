@@ -18,6 +18,8 @@ import { keyRef, keyView } from './value-index-views.js';
 const REF_KEYS = new Set(Object.values(REFS).flatMap((r) => r.fields));
 /** How many payload property names a source's view lists before it says how many there are. */
 const PAYLOAD_LISTED = 60;
+const VALUES_SHOWN = 10; // values a search lists unless its limit says
+const BUNDLES_SHOWN = 10; // apps a search lists, the rest counted
 
 /** A column an example names: a categorical one where the model has one — a time or a validity bound
  *  reads as an odd first cut, and has no values to list. */
@@ -246,12 +248,19 @@ export const semanticIndexMethods = {
         out.bundle_column = c.bundleColumn(k);
         out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { source: '${k}', bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
       }
-      const flat = c.eventProps(k).filter((p) => c.eventPropertySpec(p, k)?.column).length;
+      const held = new Set(c.eventProps(k).filter((p) => c.eventPropertySpec(p, k)?.column).map((p) => c.eventPropertySpec(p, k).column.toLowerCase()));
+      const flat = held.size;
+      // a property held in a column of its own is listed where it is carried — its event's view, a search —
+      // not again here: on a wide source those columns are most of the table, and every one is in the schema
+      if (flat) {
+        out.columns = out.columns.filter((col) => !held.has(col.name.toLowerCase()));
+        out.property_columns = flat;
+      }
       // the payload properties with no column of their own are named here too — by name only, each drilled on
       // its own — so a property is found from the source as well as from an event that carries it
       const payload = c.eventProps(k).filter((p) => !c.eventPropertySpec(p, k)?.column);
       if (payload.length) out.payload_properties = payload.length > PAYLOAD_LISTED ? [...payload.slice(0, PAYLOAD_LISTED), `… ${payload.length} in all — semantic_index({ request: { search } }) finds one`] : payload;
-      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } }), one drilled as { source: '${k}', property }); a column of its own (the event column, the app column) is drilled as { source: '${k}', column }.${flat ? ` A property held in a column of its own (${flat} of them here, listed under columns too) is named { property } — the spelling every tool takes, the semantic layer's included; a pipeline also reads it as { column }, its stored value (an array kept as JSON text is text there: { property } reads it as the array).` : ''} The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
+      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } }), one drilled as { source: '${k}', property }); a column of its own (the event column, the app column) is drilled as { source: '${k}', column }.${flat ? ` A property held in a column of its own (${flat} of them here — property_columns; each event's view lists the ones it carries, a search finds one) is named { property } — the spelling every tool takes, the semantic layer's included; a pipeline also reads it as { column }, its stored value (an array kept as JSON text is text there: { property } reads it as the array).` : ''} The \`columns\` above and those properties are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
     } else {
       // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
       // keys them by (this model, column), so each source has its own value space.
@@ -633,7 +642,7 @@ export const semanticIndexMethods = {
    */
   async _indexSearch(input) {
     const c = this.catalog;
-    const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
+    const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? VALUES_SHOWN });
     // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
     // used, recorded as an alias, resolves straight back to the real field it described.
     // (as many notes as limit asks, 5 unless it says: a note is long, and the best ones lead)
@@ -665,8 +674,10 @@ export const semanticIndexMethods = {
       const bundleHits = this.valueIndex.bundles().filter((b) => b.bundle.toLowerCase().includes(q));
       if (bundleHits.length) {
         // one match per (source, app): the same app is a different row set in each source
-        res.bundle_matches = bundleHits.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count, view: `semantic_index({ request: { source: '${b.source}', bundle: '${b.bundle}' } })` }));
-        (res.recommendations ||= []).push(`'${input.search}' matches app(s) ${[...new Set(bundleHits.map((b) => b.bundle))].join(', ')} — semantic_index({ request: { source, bundle } }) shows which properties are populated vs EMPTY for an app in that source.`);
+        res.bundle_matches = bundleHits.slice(0, BUNDLES_SHOWN).map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count, view: `semantic_index({ request: { source: '${b.source}', bundle: '${b.bundle}' } })` }));
+        if (bundleHits.length > BUNDLES_SHOWN) (res.more ||= {}).bundle_matches = bundleHits.length - BUNDLES_SHOWN;
+        const apps = [...new Set(bundleHits.map((b) => b.bundle))];
+        (res.recommendations ||= []).push(`'${input.search}' matches ${apps.length > 3 ? `${apps.length} apps` : `app(s) ${apps.join(', ')}`} — semantic_index({ request: { source, bundle } }) shows which properties are populated vs EMPTY for an app in that source.`);
       }
     }
     return res;

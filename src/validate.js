@@ -317,6 +317,17 @@ function describe(e, ctx = {}) {
           return `${at} must be the name of a column of the rows here — ${how}`;
         }
       }
+      // a value written as an object under its own name ({ search: { search, limit } }): the fields go side
+      // by side, the inner object's beside the others
+      if (want !== 'object' && want !== 'array') {
+        const used = valueAt(ctx.input, e.instancePath);
+        const key = /[^/]*$/.exec(e.instancePath)[0];
+        if (used && typeof used === 'object' && !Array.isArray(used) && Object.hasOwn(used, key)) {
+          const parent = valueAt(ctx.input, e.instancePath.replace(/\/[^/]*$/, ''));
+          const flat = { ...Object.fromEntries(Object.entries(parent || {}).filter(([k]) => k !== key)), ...used };
+          return `${at} must be ${want} — the fields stand side by side, not inside one of them: write ${JSON.stringify(flat)}`;
+        }
+      }
       return `${at} must be ${want}`;
     }
     case 'minimum': return `${at} must be >= ${e.params.limit}`;

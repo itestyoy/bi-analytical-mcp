@@ -24,7 +24,7 @@ test('semantic_index({ status }): idle state before any sync', async () => {
   assert.equal(out.value_index.last_run, null);
   assert.equal(out.value_index.seconds_since_last_sync, null);
   assert.equal(out.tasks.total, 0);
-  assert.deepEqual(out.tasks.running, []);
+  assert.equal(out.tasks.running, 0);
   assert.ok(out.recommendations.some((r) => /not run yet/i.test(r)), 'guides the AI that the index is empty');
 });
 
@@ -228,4 +228,25 @@ test('semantic_index({ views }): several drill-ins in one call, each as it answe
   await assert.rejects(() => e.semantic_index({ views: [{ status: true }, { source: 'users' }] }), /invalid input/);
   await assert.rejects(() => e.semantic_index({ views: [{ source: 'users' }] }), /invalid input/);
   await assert.rejects(() => e.semantic_index({ views: [{ source: 'users' }, { source: 'events', event: 'no_such_event' }] }), /invalid input/);
+});
+
+test('semantic_index: an answer is bounded — a search shows the best of each list and counts the rest, a source does not repeat its property columns', async () => {
+  const e = engine();
+  // a word every payload property holds: the best ten are shown, the others counted
+  const props = e.catalog.eventProps('events').filter((p) => p.includes('of_event_data'));
+  assert.ok(props.length > 10, `the fixture names more than ten (${props.length})`);
+  const found = await e.semantic_index({ search: 'of_event_data' });
+  assert.equal(found.property_matches.length, 10);
+  assert.ok(found.property_matches.length + found.more.property_matches >= props.length, 'the rest counted, none lost');
+  // values: ten unless limit says
+  for (let i = 0; i < 15; i += 1) e.valueIndex.upsertProperty('events', `p${i}`, { distinctCount: 1, totalCount: 1, values: [{ value: `bundled_${i}`, freq: 1 }] });
+  assert.equal((await e.semantic_index({ search: 'bundled' })).value_matches.length, 10);
+  assert.equal((await e.semantic_index({ search: 'bundled', limit: 15 })).value_matches.length, 15);
+  // the source's view: its own columns; the properties held in a column of their own are counted
+  const view = await e.semantic_index({ source: 'events' });
+  const held = e.catalog.eventProps('events').filter((p) => e.catalog.eventPropertySpec(p, 'events')?.column);
+  assert.ok(held.length > 0);
+  assert.equal(view.property_columns, held.length);
+  assert.ok(!view.columns.some((c) => held.includes(c.name)), 'no property column repeated');
+  assert.ok(view.columns.some((c) => c.name === view.time), 'the time axis is there');
 });

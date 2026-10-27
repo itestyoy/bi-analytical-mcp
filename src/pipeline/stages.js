@@ -175,7 +175,8 @@ export const STAGES = {
       if (leaf && e.column !== undefined && Object.keys(e).length === 1) {
         requireCol(cols, e.column);
         const t = cols.get(e.column).type;
-        if (!isArrayPropertyType(t)) throw new Error(`unnest: '${e.column}' is ${t || 'not typed'}, not an array column — make one with json_parse_array (expr: { fn: "json_parse_array", args: [{ column: "${e.column}" }] }), or unnest an array event property as { property }`);
+        // (a column of no known type — a raw's that says none — passes, as an array function's argument does)
+        if (t && t !== 'unknown' && !isArrayPropertyType(t)) throw new Error(`unnest: '${e.column}' is ${t}, not an array column — make one with json_parse_array (expr: { fn: "json_parse_array", args: [{ column: "${e.column}" }] }), or unnest an array event property as { property }`);
         const { read, type } = element(true, elementType(t));
         return { op: { op: 'unnest', column: e.column, key: null, as: p.name, field: p.field, type: read, encoding: 'native' }, cols: newCol(cols, p.name, type, `unnest '${p.name}'`, 'adding the element') };
       }

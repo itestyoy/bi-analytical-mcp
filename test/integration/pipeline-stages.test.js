@@ -120,6 +120,26 @@ test('pipeline json_parse_array + unnest: parse a flat JSON-string column then e
   assert.equal(r.rows.reduce((s, x) => s + num(x.n), 0), 53);
 });
 
+// A column a raw makes says no type (its SQL is the caller's): unnest takes it as the array it is, as an
+// array function does — every row once under 'all', a completed level once more under 'done'.
+test('pipeline unnest: a raw-made array column of no stated type is exploded', opts, async (t) => {
+  if (skip(t)) return;
+  const scope = { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_completed' }, { value: 'level_started' }] }] };
+  const truth = await show([scope, { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
+  assert.equal(truth.ok, true, JSON.stringify(truth));
+  const of = Object.fromEntries(truth.rows.map((x) => [String(x.event_name), num(x.n)]));
+  const r = await show([
+    scope,
+    { stage: 'compute', name: 'cohorts', expr: { fn: 'raw', sql: "CASE WHEN {1} = 'level_completed' THEN ['all', 'done'] ELSE ['all'] END", args: [{ column: 'event_name' }] } },
+    { stage: 'unnest', expr: { column: 'cohorts' }, name: 'cohort' },
+    { stage: 'aggregate', group_by: ['cohort'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.cohort), num(x.n)]));
+  assert.ok(of.level_completed > 0 && of.level_started > 0);
+  assert.deepEqual(by, { all: of.level_completed + of.level_started, done: of.level_completed });
+});
+
 // #2: array primitives — last element ("последнее слово") and indexed element.
 test('pipeline array_last / element_at: last & first word per completed level', opts, async (t) => {
   if (skip(t)) return;
@@ -1853,12 +1873,14 @@ test('15. the complex properties are discoverable with their declared shape', op
   assert.ok(!keys.complex, 'an object column is not an array');
   assert.match(keys.description, /JSON object/);
 
-  // the model view lists all three as real columns of the source, so a pipeline can name them
+  // the source's view counts them among the properties held in a column of their own — listed where
+  // they are carried (the event's view above), not again beside the source's own columns
   const model = await engine.semantic_index({ source: 'crashlytics' });
   const cols = new Set((model.columns || []).map((c) => String(c.name ?? c)));
   for (const n of ['breadcrumbs_of_event_data', 'stack_frames_of_event_data', 'custom_keys_of_event_data']) {
-    assert.ok(cols.has(n), `${n} is a referenceable column (got: ${[...cols].join(', ')})`);
+    assert.ok(!cols.has(n), `${n} is not repeated among the source's own columns`);
   }
+  assert.ok(model.property_columns >= 3, 'they are counted as property columns');
 });
 
 // ════════════ CALLER TEXT IS NEVER JINJA (was jinja-inert.test.js) ═════════════════════════════

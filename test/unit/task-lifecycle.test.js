@@ -68,7 +68,7 @@ test('a mistake is refused IN the call — no task is started for it', async () 
   const e = engine(orderedRunner());
   const created = await startDeclare(e, TASK);
   await assert.rejects(() => e.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['no_such_metric'] }] }), /unknown metric/);
-  assert.equal(e._listTasks().tasks.length, 1, 'only the declaration\'s task exists');
+  assert.equal(e.jobs.list().length, 1, 'only the declaration\'s task exists');
 });
 
 test('query_model\'s read pages what the task holds, reads a build\'s task too, and an unknown task is unknown_task', async () => {
@@ -255,7 +255,7 @@ test('the steps after the metrics step are checked against the result\'s columns
   const e = engine(tailRunner([]));
   const { context_id } = await startDeclare(e, TASK);
   const daily = (...after) => ({ steps: [DAILY, ...after] });
-  const before = e._listTasks().tasks.length;
+  const before = e.jobs.list().length;
   // (a refusal names the step as the query numbers it: the metrics step is steps[0])
   for (const key of ['nonsense', 'metric_time__day', 'metric_time']) {
     await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'order_by', keys: [{ key }] }) }),
@@ -288,7 +288,7 @@ test('the steps after the metrics step are checked against the result\'s columns
   // a metric of the query is { metric }: one it does not have is refused with the result's columns
   await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'nope' }, { value: 1 }] }] }) }),
     (err) => err.field === 'steps' && /^steps\[1\]: \{ metric: 'nope' \} is no metric of this query — its result has metric_time_day, cnt/.test(err.message));
-  assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
+  assert.equal(e.jobs.list().length, before, 'no task was started for any of them');
 });
 
 // WHERE A STEP OF A METRIC QUERY STANDS (STAGE_PLACES.metric_scope / metric_result): one metrics step;
@@ -307,7 +307,7 @@ test('a metric query has one metrics step, only where steps before it, and the r
   // (each place's own words, as the tables say them)
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const scope = STAGE_PLACES.metric_scope;
-  const before = e._listTasks().tasks.length;
+  const before = e.jobs.list().length;
   // no metrics step, or two
   await assert.rejects(() => query({ stage: 'limit', limit: 3 }), refused(/^steps: a metric query is one metrics step .* these steps have none, and this context holds no table of a pipeline to read without one .*\. This context defines: cnt/));
   await assert.rejects(() => query(byCountry, { stage: 'limit', limit: 3 }, byCountry), refused(/^steps\[2\]: a metric query has one metrics step, and steps\[0\] is one — list every metric in it, or make the other a query of its own/));
@@ -322,7 +322,7 @@ test('a metric query has one metrics step, only where steps before it, and the r
   await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'platform' }, 'ios'))), refused(/^steps\[1\]: \{ source: 'users', column: 'platform' \} is no group_by item of this query, so the result does not carry it: add it to the metrics step's group_by, or filter the rows by it in a where step before the metrics step/));
   // a metric the context does not offer is named at its step
   await assert.rejects(() => query({ stage: 'metrics', metrics: ['nope'] }), refused(/^steps\[0\]: unknown metric in context: 'nope'/));
-  assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
+  assert.equal(e.jobs.list().length, before, 'no task was started for any of them');
   // what is taken: several where steps before it (all of them hold), a where after it on the result's column
   assert.ok(isStartedTask(await query(where(is({ source: 'users', column: 'platform' }, 'ios')), where({ fn: 'neq', args: [{ source: 'users', column: 'country' }, { value: 'DE' }] }), byCountry)));
   assert.ok(isStartedTask(await query(byCountry, where(is({ column: 'users_country' }, 'US')), { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] })));
@@ -630,12 +630,12 @@ test('a batch answers with its task_ids only; its members run side by side, and 
 test('one mistake refuses the whole batch, naming the query — and nothing in it is started', async () => {
   const e = engine(orderedRunner());
   const created = await startDeclare(e, TASK);
-  const before = e._listTasks().tasks.length;
+  const before = e.jobs.list().length;
   await assert.rejects(
     () => e.query_model({ context_id: created.context_id, queries: [{ steps: [CNT] }, { steps: [{ stage: 'metrics', metrics: ['no_such_metric'] }] }] }),
     (err) => err.field.startsWith('queries[1]') && /queries\[1\]: steps\[0\]: unknown metric/.test(err.message),
   );
-  assert.equal(e._listTasks().tasks.length, before, 'no task was started for the batch');
+  assert.equal(e.jobs.list().length, before, 'no task was started for the batch');
 });
 
 test('a batch takes any number of queries, and each mode takes only its own fields', async () => {

@@ -490,8 +490,8 @@ test('context() lists and describes a path-analysis context by its eventstreams 
   };
   // a description is kept with its eventstream (a context stored before kept one for the context: shown as it was)
   ctx.state.retentioneering.eventstreams.es2 = { ...ctx.state.retentioneering.eventstreams.es, description: 'level paths', steps: [] };
-  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === ctx.id);
-  assert.equal(listed.description, 'onboarding paths');
+  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.description === 'onboarding paths');
+  assert.equal('context_id' in listed, false);
   assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps_count: 1, materialized_through: 0 }, { name: 'es2', description: 'level paths', source: 'events', steps_count: 0, materialized_through: 0 }]);
   const d = await e.context({ action: 'describe', context_id: ctx.id });
   assert.equal(d.engine, 'retentioneering');

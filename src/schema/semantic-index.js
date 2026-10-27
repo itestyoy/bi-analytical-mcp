@@ -4,6 +4,7 @@
 import { RESEARCH_DOMAINS } from '../research-guides.js';
 import { refForms, REF_PLACES } from './refs.js';
 import { aboutSchema, aboutDefs } from './memory.js';
+import { timeRange } from '../schema-kit.js';
 
 /**
  * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the
@@ -72,7 +73,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     view('{ search }', 'Events, properties, columns, values and recipes by word.', ['search'], {
       search: field.search,
       fuzzy: field.fuzzy,
-      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Matches of each kind: values (default 20), saved notes (default 5, at most 20).' },
+      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Values shown (default 10) and saved notes (default 5, at most 20); events, properties and columns show the best 10, the rest counted under `more`.' },
     }),
     view('{ notes }', 'The saved findings, newest first.', ['notes'], {
       notes: { const: true },
@@ -104,6 +105,31 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     }),
     view('{ guide }', 'How to approach a question.', ['guide'], {
       guide: field.guide,
+    }),
+    // what has been asked of this server (src/task-index.js): a record of the questions, never a way to their data
+    view('{ tasks }', 'What has been asked of this server: the past tasks most like a phrase (what each computed, when and how), or the themes of a period — never their data.', ['tasks'], {
+      tasks: {
+        anyOf: [
+          {
+            title: 'tasks like a phrase', type: 'object', additionalProperties: false, required: ['search'],
+            properties: {
+              search: { type: 'string', minLength: 1, description: 'What to find tasks like, in any language.' },
+              time_range: timeRange('Only the tasks started within it.'),
+              limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 10.' },
+            },
+          },
+          {
+            title: 'the themes of a period', type: 'object', additionalProperties: false, required: ['themes'],
+            properties: {
+              themes: { const: true },
+              time_range: timeRange('The period; omitted, every task kept.'),
+              about: { type: 'string', minLength: 1, description: 'Only the tasks like this phrase (e.g. "ad revenue"), clustered.' },
+              min_similarity: { type: 'number', minimum: 0, maximum: 1, description: 'How like `about` a task must be (default 0.3 with the deployment\'s embedder, 0.1 without).' },
+              clusters: { type: 'integer', minimum: 2, maximum: 20, description: 'Omitted, the number that separates them best.' },
+            },
+          },
+        ],
+      },
     }),
   ];
   return {

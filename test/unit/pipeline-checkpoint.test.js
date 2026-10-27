@@ -152,7 +152,7 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
   assert.equal(step.steps_recomputed, 1);
 
   // Dropping the owner would take that table with it → refused, naming the consumer.
-  await assert.rejects(() => e.context({ action: 'delete', context_id }), new RegExp(`${fork.context_id}.*${c1.model}`));
+  await assert.rejects(() => e.context({ action: 'delete', context_id }), new RegExp(`1 other draft\\(s\\) read ${c1.model}`));
   assert.ok(e.ctxs.has(context_id), 'nothing was dropped');
   // Forced: the fork's inherited checkpoint is retired, so it recomputes from the source.
   // (the answer says what went: the context, its pipeline, the tasks whose results went with it)

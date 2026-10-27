@@ -290,7 +290,7 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   assert.equal(checked.ok, true, JSON.stringify(checked));
   assert.deepEqual(checked.checked, []);
   // the list names each build and says what it holds
-  const listed = Object.fromEntries((await engine.context({ action: 'list', limit: 50 })).contexts.map((c) => [c.context_id, c]));
+  const listed = Object.fromEntries(engine.ctxs.list().map((c) => [c.context_id, c]));
   assert.equal(listed[s.context_id].name, 'fork_src');
   assert.ok(listed[s.context_id].holds.some((h) => /built table/.test(h)), JSON.stringify(listed[s.context_id]));
   // a build whose one step is its semantic layer holds that layer, built
@@ -298,7 +298,7 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   // a step edited after the build: the table is the earlier steps' — the list and a read of it say so
   // (the rows read are still the build's: one per player who did a tutorial)
   await engine.build_model({ action: 'edit_step', context_id: s.context_id, index: 2, step: { ...perPlayer, measures: [{ name: 'n', expr: { fn: 'count' } }] } });
-  const relisted = (await engine.context({ action: 'list', limit: 50 })).contexts.find((c) => c.context_id === s.context_id);
+  const relisted = engine.ctxs.list().find((c) => c.context_id === s.context_id);
   assert.ok(relisted.holds.some((h) => /older than the steps/.test(h)), JSON.stringify(relisted));
   const stale = await engine.query_model({ context_id: s.context_id, steps: [{ stage: 'limit', limit: 1000 }] });
   assert.equal(stale.rows.length, num(p));

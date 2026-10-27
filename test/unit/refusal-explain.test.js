@@ -101,3 +101,15 @@ test('a request of its own written among views, raw in a read, and a source name
   assert.throws(() => e._ctx('users'), /'users' is a source of the catalog, not a context/);
   assert.throws(() => e._ctx('abc123'), /No context has that id/);
 });
+
+test('a value written as an object under its own name is told the flat request', () => {
+  const e = engine();
+  const one = refusal(e, 'semantic_index', { search: { limit: 20, search: 'rewarded' } });
+  assert.match(one, /side by side/);
+  assert.match(one, /\{"limit":20,"search":"rewarded"\}/);
+  const many = refusal(e, 'semantic_index', { views: [{ source: 'events' }, { search: { search: 'w' } }, { recipe: { recipe: 'nday_retention' } }] });
+  assert.match(many, /\{"search":"w"\}/);
+  assert.match(many, /\{"recipe":"nday_retention"\}/);
+  // and what that writes is taken
+  assert.equal(refusal(e, 'semantic_index', { search: 'rewarded', limit: 20 }), null);
+});

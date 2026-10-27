@@ -36,10 +36,10 @@ test('a declaration whose only metric reads a measure on the slowly-changing use
   assert.equal(contexts(), before, 'no context is created for a refused declaration');
 });
 
-test('an id that names no context says how to list those that exist', async () => {
+test('an id that names no context says where a context id comes from — never a list of others', async () => {
   await assert.rejects(
     engine.query_model({ context_id: 'nope12345678', steps: [{ stage: 'limit', limit: 1 }] }),
-    /unknown context_id: nope12345678\. No context has that id .*context\(\{ request: \{ action: 'list' \} \}\)/,
+    /unknown context_id: nope12345678\. No context has that id .*the context_id its build answered/,
   );
   const r = await engine.context({ action: 'delete', context_id: 'zzzzzzzzzzzz' });
   assert.equal(r.removed, false);

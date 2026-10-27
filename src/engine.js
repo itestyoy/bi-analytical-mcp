@@ -46,6 +46,7 @@ import { CORE_TOOLS } from './tools/core.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore } from './memory.js';
+import { TaskIndex } from './task-index.js';
 import { openStore } from './store.js';
 import { ErrorLog, readGenerated } from './error-log.js';
 import { getDialect } from './dialects/index.js';
@@ -210,7 +211,10 @@ export class Engine {
     this.ctxs = contextManager || new ContextManager({});
     this._contextCatalogs = new Map(); // context id → the catalog its layer is read over (_catalogOf)
     // the task runtime (src/task-runner.js): the engine's tools and a feature's start and read tasks through it
-    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a) });
+    // WHAT HAS BEEN ASKED OF THIS SERVER, by meaning (src/task-index.js): every task's line of text and
+    // its vector — semantic_index({ request: { tasks } }); never a way back to a task's data
+    this.taskIndex = new TaskIndex({ store: this.store, embedder, toolOf: (kind) => this.tasks?.toolOf(kind) || kind, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} task-index ${m}`) });
+    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a), onStart: (id, tool, ctx, input) => this.taskIndex.record({ id, tool, ctx, input }) });
     // WHAT A FEATURE MAY USE OF THE ENGINE (src/features.js), besides its task runtime (engine.tasks),
     // the dbt project's contexts (engine.ctxs), the catalog and the job registry: the one surface it
     // is written against, so an engine method can change without reaching into a feature
@@ -288,7 +292,7 @@ export class Engine {
       : this.project ? ` — the dbt project's own semantic models are contexts named after them: ${this.project.contexts.join(', ')}` : '';
     // the way out: a context that is gone (deleted, retired after idling) or was never made is not
     // guessed at — the list names those that exist
-    const wayOut = ". No context has that id (deleted, retired after idling, or never created): context({ request: { action: 'list' } }) lists those that exist";
+    const wayOut = ". No context has that id (deleted, retired after idling, or never created): a context a build made is reached by the context_id its build answered — if it is lost, start the build again";
     // a model of the catalog named as a context: its rows are read by a build, its columns grouped by
     // in a metric query — said instead of the list of contexts
     const model = typeof id === 'string' && this.catalog.models?.[id]
@@ -522,7 +526,7 @@ export class Engine {
     const consumers = this._checkpointConsumers(input.context_id);
     if (consumers.length && !input.force) {
       throw new ToolError(
-        `context ${input.context_id} cannot be dropped: ${consumers.map((c) => `draft ${c.consumer} reads ${c.model}`).join('; ')} — that table is built HERE, so dropping this context leaves them with an unresolvable model. `
+        `context ${input.context_id} cannot be dropped: ${new Set(consumers.map((c) => c.consumer)).size} other draft(s) read ${[...new Set(consumers.map((c) => c.model))].join(', ')} — that table is built HERE, so dropping this context leaves them with an unresolvable model. `
         + `Drop those drafts first, or pass force: true (they will then have to recompute that prefix from the source).`,
         { stage: 'validate', field: 'context_id' },
       );
@@ -548,7 +552,7 @@ export class Engine {
         ...(kept ? { note: `${kept} task result(s) held in memory stay readable by task_ids (marked context_gone) until they age out; the tables its builds stored are removed.` } : {}),
       };
     }
-    return { ...out, context_id: input.context_id, reason: "no context has this id (deleted already, retired after idling, or never created) — context({ request: { action: 'list' } }) lists those that exist" };
+    return { ...out, context_id: input.context_id, reason: 'no context has this id (deleted already, retired after idling, or never created)' };
   }
 
   /**
@@ -571,13 +575,21 @@ export class Engine {
    */
   _listContexts({ limit = CONTEXT_PAGE, offset = 0, search } = {}) {
     const needle = typeof search === 'string' && search.trim() ? search.trim().toLowerCase() : null;
+    // every context is listed with what it holds and why — but a context a build made WITHOUT its id:
+    // the id (and a table's name, which carries it) is the key to its tables, handed only to whoever
+    // built it. The dbt project's own contexts keep theirs: their names are what everyone queries.
+    const keyless = (entry) => {
+      if (this.ctxs.get(entry.context_id)?.state?.engine === 'project') return entry;
+      const { context_id: _key, ...rest } = entry;
+      return { ...rest, holds: (rest.holds || []).map((h) => h.replace(/^a built table \([^)]*\)/, 'a built table')) };
+    };
     const all = this.ctxs.list()
       .map((entry) => {
         // one context a feature cannot describe (state an earlier version stored) is listed with
         // why — it never takes the list of every other context down with it
         let brief = null;
-        try { brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief; } catch (e) { return { ...entry, unreadable: e?.message || String(e) }; }
-        return brief ? { ...entry, ...brief } : entry;
+        try { brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief; } catch (e) { return keyless({ ...entry, unreadable: e?.message || String(e) }); }
+        return keyless(brief ? { ...entry, ...brief } : entry);
       })
       .filter((entry) => !needle || JSON.stringify(entry).toLowerCase().includes(needle))
       .sort((a, b) => a.idle_ms - b.idle_ms);
@@ -701,7 +713,8 @@ export class Engine {
             checkpoints: (draft.checkpoints || []).map((cp) => ({ at: cp.at, model: cp.model, owner: cp.owner, built_at: cp.built_at, ...(cp.carries_source ? { carries_source: cp.carries_source } : {}) })),
           },
         } : {}),
-        ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
+        // how many other drafts read a table built here — not which: their ids are their owners' keys
+        ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { read_by_other_drafts: new Set(Object.values(ctx.state.checkpoint_consumers).flat()).size } : {}),
         ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_model({ request: { context_id: '${ctx.id}', steps } }) to filter or regroup them; build on them with build_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
@@ -731,10 +744,6 @@ export class Engine {
       groupable: this._groupableSplit(ctx).now,
       files: this.ctxs.generatedFiles(ctx.id),
     };
-  }
-
-  _listTasks() {
-    return { tasks: this.jobs.list().map((t) => (t.tool ? { ...t, tool: this.tasks.toolOf(t.tool) } : t)) };
   }
 
   /** Reclaim idle, lease-free contexts (bounds workspace growth). */

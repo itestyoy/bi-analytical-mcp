@@ -806,6 +806,32 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (semantic build / query / preview, the pipeline draft and its materialization, reading a task back,
   semantic_index's catalog views) stay the engine's own methods, one file per family under src/engine/.
   A new concern with a dependency set of its own is a service, not another mixin.
+- A TASK'S AND A CONTEXT'S ID IS ITS OWNER'S KEY (HARD RULE). Contexts and tasks carry no owner, so
+  whoever holds an id can read, extend or drop what it names; an id is handed only to whoever started
+  the work (the answer of the call that did). Everything else about the work may be said; its ids may
+  not: `context({ action: "list" })` lists every context with what it holds and why, a context a build
+  made without its id or a table's name (which carries the id) — the dbt project's own contexts keep
+  their names, which everyone queries; semantic_index's `{ status }` says a task by its tool, status
+  and age; a context's describe counts the drafts that read its tables instead of naming them; the
+  task index (below) answers no id. The one exception is `explore_errors`, kept whole for debugging.
+- WHAT HAS BEEN ASKED IS KEPT BY MEANING, NEVER AS A WAY TO THE DATA (src/task-index.js, `engine.taskIndex`):
+  every task a tool starts is recorded as it starts (the task runtime's `onStart`) — one line of text
+  that says what it computes (its context's name and description, the source, the events, metrics,
+  columns and values its input names, its window) and a vector of it: the deployment's embedder's
+  (MEMORY_EMBEDDINGS, at `TASK_DIMS`, after the start and never in its way, stored with its model and
+  re-embedded for another), or without one a local TF-IDF vector over the tasks read. semantic_index's
+  `{ tasks }` view reads it — the tasks like a phrase, or the themes of a period (narrowed to a phrase,
+  clustered by k-means at the count that separates best) — and answers what each computed, when and
+  (a found task) how — its input without what names stored work (`howOf`: a context, a task, a table,
+  a checkpoint), every id spelled in a kept string blanked (`withoutIds`) and a long one cut — NEVER a
+  task id, a context id or a table: another task's rows may not fit the question at hand, so nothing
+  found here can be read back, built on or drawn; its method may help. What is computed over the rows
+  read — the local vectors, a search's ranking, a period's clustering (on a sample of a long window,
+  every task then put in its nearest cluster) — runs in a thread of its own (src/task-themes.js, its
+  worker src/task-themes-worker.js), never on the server's; an embedder that cannot be reached leaves
+  the read to the local vectors and says so, and an embedding run is one at a time. A task from before
+  the index is taken from the job registry only where its context still says what it was for. The
+  store's `task_log` is kept across a reset.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

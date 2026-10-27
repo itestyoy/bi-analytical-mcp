@@ -34,8 +34,9 @@ export function cosineSimilarity(a, b) {
 
 /**
  * Build an embedder from the environment, or return null when none is configured (the
- * caller then falls back to fuzzy). An embedder is { model, embed(texts) -> Promise<number[][]> }
- * returning one vector per input string, in order.
+ * caller then falls back to fuzzy). An embedder is { model, embed(texts, { dimensions }?) ->
+ * Promise<number[][]> } returning one vector per input string, in order; `dimensions` shortens a
+ * text-embedding-3 vector (the model's own option — the other models take no such option).
  */
 export function createEmbedder({ env = process.env, logger = (m) => console.error(`[mcp] ${new Date().toISOString()} embeddings ${m}`) } = {}) {
   const provider = String(env.MEMORY_EMBEDDINGS || '').trim().toLowerCase();
@@ -49,7 +50,7 @@ export function createEmbedder({ env = process.env, logger = (m) => console.erro
   return {
     kind: 'openai',
     model,
-    async embed(texts) {
+    async embed(texts, { dimensions } = {}) {
       const input = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t ?? ''));
       if (!input.length) return [];
       const ac = new AbortController();
@@ -58,7 +59,7 @@ export function createEmbedder({ env = process.env, logger = (m) => console.erro
         const res = await fetch(`${baseUrl}/embeddings`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({ model, input }),
+          body: JSON.stringify({ model, input, ...(dimensions && /^text-embedding-3/.test(model) ? { dimensions } : {}) }),
           signal: ac.signal,
         });
         if (!res.ok) throw new Error(`embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);

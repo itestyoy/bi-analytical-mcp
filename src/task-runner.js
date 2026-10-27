@@ -34,14 +34,16 @@ export class TaskRunner {
    * @param sideOf   (tool) → the side that tool's tasks belong to (null: none)
    * @param readers  { <side>: the query tool that reads that side's tasks back }
    * @param onFailure (id, tool, ctx, input, error) — a task that ended in an error (the error log)
+   * @param onStart  (id, tool, ctx, input) — a task that started (the task index)
    */
-  constructor({ jobs, ctxs, sideOf, readers, kindTools = {}, onFailure = () => {} }) {
+  constructor({ jobs, ctxs, sideOf, readers, kindTools = {}, onFailure = () => {}, onStart = () => {} }) {
     this.jobs = jobs;
     this.kindTools = kindTools; // a kind of task a tool starts on two sides → the tool it is said as
     this.ctxs = ctxs;
     this.sideOf = sideOf;
     this.readers = readers;
     this.onFailure = onFailure;
+    this.onStart = onStart;
     this.queue = new Map(); // context id → the promise the next task on it waits for
     this.runs = new Map(); // task id → its settled promise
     this.controls = new Map(); // task id → its AbortController
@@ -124,6 +126,8 @@ export class TaskRunner {
   /** Start `work(id)` as a task of `tool` on `ctx` (null: no context). Returns the task id. */
   start(ctx, tool, work, { input = null, batch = null } = {}) {
     const id = this.jobs.create({ ...(ctx ? { contextId: ctx.id } : {}), tool });
+    // what the task computes is recorded as it starts; a record that fails takes nothing from the task
+    try { this.onStart(id, tool, ctx, input); } catch { /* best effort */ }
     if (ctx) this.ctxs.acquire(ctx.id);
     // a member of a batch waits for what was queued before the BATCH, and runs beside the other members
     const before = batch ? batch.before : ctx ? this.queue.get(ctx.id) : null;

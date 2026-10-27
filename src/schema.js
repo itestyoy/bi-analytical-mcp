@@ -228,7 +228,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     type: 'object',
     description: 'list | describe | delete the contexts.',
     anyOf: [
-      form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: 'list: most recently used first.', properties: {
+      form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: 'list: most recently used first; a context a build made without its id.', properties: {
         limit: { type: 'integer', minimum: 1, maximum: 100, description: `Default ${CONTEXT_PAGE}.` },
         offset: { type: 'integer', minimum: 0 },
         search: { type: 'string', minLength: 1 },

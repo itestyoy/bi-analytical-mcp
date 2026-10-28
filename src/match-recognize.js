@@ -20,7 +20,7 @@ import { registerStage } from './pipeline.js';
 import { getDialect } from './dialects/index.js';
 import { comparison } from './conditions.js';
 import { strEnum, conditionSlot } from './schema-kit.js';
-import { partitionItem, partitionColumn } from './pipeline/sql.js';
+import { partitionItem, partitionColumn, availableColumns } from './pipeline/sql.js';
 import { conditionListSql, eachNode, propertyTypes } from './pipeline/compute.js';
 import { currentConditions } from './earlier-spelling.js';
 
@@ -109,7 +109,7 @@ function requireSourceColumns(catalog, spec, source, availableCols) {
   if (!missing.length) return;
   throw new Error(
     `match_recognize reads ${missing.map(([col, why]) => `${why} ('${col}')`).join(', ')} of '${source}', not available at this stage `
-    + `(available: ${[...availableCols.keys()].join(', ')}) — these rows are no longer that source's events, so there is no sequence to search. `
+    + `(${availableColumns(availableCols, null)}) — these rows are no longer that source's events, so there is no sequence to search. `
     + `Put the funnel BEFORE the stage that dropped them (a funnel over a materialized prefix works only while that prefix still carries the event columns).`,
   );
 }
@@ -179,7 +179,7 @@ function resolve(catalog, spec, dialect, availableCols, source) {
     if (names.has(c.name)) throw new Error(`capture '${c.name}': the funnel already outputs a column of that name — name it otherwise`);
     if (working.has(c.name)) throw new Error(`capture '${c.name}': the funnel uses that name for a working column of its own — name it otherwise`);
     names.add(c.name);
-    if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (available: ${[...prepCols.keys()].join(', ')}) — an event property is read into a column first, with a compute stage ({ property })`);
+    if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (${availableColumns(prepCols, c.column)}) — an event property is read into a column first, with a compute stage ({ property })`);
     // a copy of a column is stored as that column is (its `physical` mark: a boolean is compared with a text flag as text)
     const from = prepCols.get(c.column);
     propCaptures.push({ id: c.name, idx: stepIdx(c.step, `capture '${c.name}'`), property: c.column, type: from?.type || 'unknown', physical: !!from?.physical, isColumn: true });

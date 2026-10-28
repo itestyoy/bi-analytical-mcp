@@ -230,14 +230,30 @@ export function addCol(cols, name, type) {
   return out;
 }
 
+const AVAILABLE_SHOWN = 40; // columns a refusal lists in full; past that, those like the name asked for
+
+/**
+ * The columns a refusal names beside a name that is not one of them: all of them where they are few, else
+ * those whose name holds it (or a word of it), and how many there are — a wide source has hundreds.
+ */
+export function availableColumns(cols, name) {
+  const all = [...(cols.keys ? cols.keys() : cols)];
+  if (all.length <= AVAILABLE_SHOWN) return `available: ${all.join(', ')}`;
+  const q = String(name ?? '').toLowerCase();
+  const words = q.match(/[a-z0-9]+/g) || [];
+  const like = q ? all.filter((c) => c.toLowerCase().includes(q) || words.some((w) => w.length > 2 && c.toLowerCase().includes(w))).slice(0, 10) : [];
+  if (like.length) return `${all.length} columns here; those like '${name}': ${like.join(', ')}`;
+  return `${all.length} columns here${q ? `, none like '${name}'` : ''}; the first ${AVAILABLE_SHOWN}: ${all.slice(0, AVAILABLE_SHOWN).join(', ')}, …`;
+}
+
 export function requireCol(cols, name) {
   if (cols.has(name)) return;
   // a column named by a reference is a metrics step's result's — anywhere else a column is its name
-  if (name !== null && typeof name === 'object') throw new Error(`pipeline: ${JSON.stringify(name)} names a column of a metrics step's result by what the query grouped or computed — here name the column itself (available: ${[...cols.keys()].join(', ')})`);
+  if (name !== null && typeof name === 'object') throw new Error(`pipeline: ${JSON.stringify(name)} names a column of a metrics step's result by what the query grouped or computed — here name the column itself (${availableColumns(cols, null)})`);
   // '*' is SQL's spelling for "the rows themselves"; here a count with no argument counts the rows, so
   // say that instead of listing every column and leaving the caller to guess what a SQL habit translates to
   if (name === '*') {
     throw new Error("pipeline: '*' is not a column — a count with no argument counts the ROWS ({ fn: 'count' })");
   }
-  throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
+  throw new Error(`pipeline: unknown column '${name}' at this stage (${availableColumns(cols, name)})`);
 }

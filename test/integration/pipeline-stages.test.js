@@ -140,6 +140,29 @@ test('pipeline unnest: a raw-made array column of no stated type is exploded', o
   assert.deepEqual(by, { all: of.level_completed + of.level_started, done: of.level_completed });
 });
 
+// coalesce folds its arguments into one value of one type: a constant beside a text column is written as
+// text (false → 'false'), so every row where the text is missing reads 'false' — and a text the result is
+// is no condition for not to negate (that SQL once reached the warehouse and failed there).
+test('pipeline coalesce: a constant beside text is that text; not over text is refused', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await show([
+    { stage: 'compute', name: 'ad', expr: { fn: 'coalesce', args: [{ property: 'ad_type_of_event_data' }, { value: false }] } },
+    { stage: 'compute', name: 'missing', expr: { fn: 'is_null', args: [{ property: 'ad_type_of_event_data' }] } },
+    { stage: 'aggregate', group_by: ['missing'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'falses', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'ad' }, { value: 'false' }] }], then: { value: 1 } }] }] } }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.missing), { n: num(x.n), falses: num(x.falses) }]));
+  assert.ok(by.true.n > 0, 'some rows carry no ad type');
+  assert.equal(by.true.falses, by.true.n, 'every one of them reads false');
+  assert.equal(by.false.falses, 0, 'a row with an ad type keeps it');
+  assert.throws(() => renderPipeline(stageCatalog, 'duckdb', 'events', [
+    { stage: 'where', conditions: [{ fn: 'not', args: [{ fn: 'coalesce', args: [{ property: 'ad_type_of_event_data' }, { value: false }] }] }] },
+  ]), /not takes conditions/);
+  assert.throws(() => renderPipeline(stageCatalog, 'duckdb', 'events', [
+    { stage: 'compute', name: 'x', expr: { fn: 'coalesce', args: [{ property: 'ad_type_of_event_data' }, { column: 'device_time' }] } },
+  ]), /its arguments are text and a moment/);
+});
+
 // #2: array primitives — last element ("последнее слово") and indexed element.
 test('pipeline array_last / element_at: last & first word per completed level', opts, async (t) => {
   if (skip(t)) return;

@@ -7,6 +7,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderRead } from '../../src/pipeline.js';
+import { requireCol } from '../../src/pipeline/sql.js';
 import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
@@ -112,4 +113,18 @@ test('a value written as an object under its own name is told the flat request',
   assert.match(many, /\{"recipe":"nday_retention"\}/);
   // and what that writes is taken
   assert.equal(refusal(e, 'semantic_index', { search: 'rewarded', limit: 20 }), null);
+});
+
+test('a request of its own written beside another view is told so; an unknown column on a wide table names those like it', () => {
+  const e = engine();
+  const search = refusal(e, 'semantic_index', { source: 'events', search: 'abc' });
+  assert.match(search, /\{ search \} is a request of its own, which takes no source/);
+  const guide = refusal(e, 'semantic_index', { source: 'events', guide: 'research' });
+  assert.match(guide, /\{ guide \} is a request of its own/);
+  // a wide table: the columns like the name, not every one of them
+  const cols = new Map(Array.from({ length: 200 }, (_, i) => [`field_${i}_of_event_data`, { type: 'string' }]));
+  cols.set('network_of_additional_info_of_event_data', { type: 'string' });
+  const wide = (() => { try { requireCol(cols, 'network'); return null; } catch (err) { return err.message; } })();
+  assert.match(wide, /201 columns here; those like 'network': network_of_additional_info_of_event_data/);
+  assert.ok(wide.length < 400, `bounded (${wide.length} characters)`);
 });

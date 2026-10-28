@@ -137,6 +137,32 @@ function commonType(types, fallback) {
  *  missing — SQL's ||, on every warehouse (DuckDB's concat() would skip a NULL, BigQuery's returns one);
  *  a part that is not known to be text read as its text by the dialect's cast (BigQuery's || takes text
  *  alone). The one writer of a concatenation: concat's, and the eventstream's keys. */
+/** What a type is said as where arguments of two types meet. */
+const TYPE_SAID = { int: 'a number', numeric: 'a number', float: 'a number', boolean: 'a flag (true / false)', string: 'text', time: 'a moment', time_of_day: 'a time of day' };
+const saidOf = (t) => TYPE_SAID[t] || t;
+
+/** The one type of arguments that are folded into one value (coalesce, least, greatest): arguments of two
+ *  known kinds — text and a flag, a number and text — are refused here, since no warehouse picks one of
+ *  them; a constant is written in the type it stands for ({ value: 'false' } beside text). */
+function oneType(fn, t, at, fallback) {
+  const type = commonType(t, fallback);
+  if (type !== 'unknown' || !t.some((x) => x && x !== 'unknown')) return type;
+  const kinds = [...new Set(t.filter((x) => x && x !== 'unknown').map(saidOf))];
+  if (kinds.length < 2) return type;
+  throw new Error(`${at} ${fn}: its arguments are ${kinds.join(' and ')} — they are folded into one value, so one type: cast one of them ({ fn: "cast", args: [<it>], type }), or write a constant as the type beside it (a flag stored as text is { value: 'false' })`);
+}
+
+/** The arguments folded into one value (coalesce, least, greatest) in one type: a constant is written in
+ *  the type of the first argument that is not one (false beside text is 'false'), as a comparison writes
+ *  it; then two known kinds left are refused (oneType). → { a: their SQL, type } */
+function foldedArgs(fn, r, d, at, fallback) {
+  const anchor = r.find((x) => !x.constant && x.type && x.type !== 'unknown')?.type;
+  const retype = (x) => x.constant && x.value !== null && anchor && (anchor === 'string' || anchor === 'boolean' || isNumericType(anchor));
+  const a = r.map((x, i) => (retype(x) ? d.sqlLiteral(typedValue(anchor, x.value, `${at} ${fn} args[${i}]`)) : x.sql));
+  const t = r.map((x) => (x.constant && x.value !== null && anchor ? anchor : x.type));
+  return { a, type: oneType(fn, t, at, fallback) };
+}
+
 /** least / greatest of the arguments, missing where any of them is (one rule on every warehouse). */
 const pickedSql = (fn, a) => `CASE WHEN ${a.map((x) => `(${x}) IS NULL`).join(' OR ')} THEN NULL ELSE ${fn}(${a.join(', ')}) END`;
 
@@ -368,11 +394,11 @@ export const FNS = {
   unix_date: { args: 1, sql: ({ d, a }) => ({ expr: d.unixDateExpr(a[0]), type: 'int' }) },
   hll_extract: { args: 1, title: '[sketch] → the distinct count of one sketch', sql: ({ d, a, t, at }) => { needsSketch('hll_extract', t[0], at); return { expr: d.hllExtract(a[0]), type: 'int' }; } },
   json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: arrayColumnType('string') }) }, // STRING JSON array → native array of its texts (then unnest)
-  coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
+  coalesce: { args: { min: 2 }, sql: ({ d, r, at }) => { const { a, type } = foldedArgs('coalesce', r, d, at, 'string'); return { expr: `coalesce(${a.join(', ')})`, type }; } },
   // (missing where any argument is, on every warehouse: DuckDB's least / greatest skip a NULL, BigQuery's
   // return one — so a clamp of a missing value stays missing instead of becoming its bound)
-  least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: pickedSql('least', a), type: commonType(t, 'numeric') }) },
-  greatest: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: pickedSql('greatest', a), type: commonType(t, 'numeric') }) },
+  least: { args: { min: 2 }, sql: ({ d, r, at }) => { const { a, type } = foldedArgs('least', r, d, at, 'numeric'); return { expr: pickedSql('least', a), type }; } },
+  greatest: { args: { min: 2 }, sql: ({ d, r, at }) => { const { a, type } = foldedArgs('greatest', r, d, at, 'numeric'); return { expr: pickedSql('greatest', a), type }; } },
   concat: { args: { min: 1 }, sql: ({ d, r }) => ({ expr: concatSql(d, r), type: 'string' }) },
   // the dialect's one conversion, told what the value is where it is known: a number, a flag or a text
   // converts to int alike on every warehouse — the number it holds, rounded half away from zero. A raw's

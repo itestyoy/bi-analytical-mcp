@@ -112,6 +112,20 @@ function hoisted(ctx, instancePath, used) {
   return own ? ` — { ${used} } is a request of its own, not one of ${m[1]}: a call of its own with { ${used}: … }` : null;
 }
 
+/**
+ * A request of its own written beside another's fields ({ source, search }, { source, guide }): the form
+ * whose own key it is, said as a call of its own. → the hint, or null.
+ */
+function ownRequest(ctx, instancePath, used) {
+  if (instancePath || !ctx.schema) return null;
+  const root = ctx.schema;
+  const forms = Array.isArray(root.anyOf) ? root.anyOf.map((b) => deref(root, b)) : [];
+  const own = forms.find((f) => (f?.required || []).length === 1 && f.required[0] === used);
+  if (!own) return null;
+  const with_ = Object.keys(ctx.input || {}).filter((k) => k !== used && !own.properties?.[k]);
+  return ` — { ${used} } is a request of its own${with_.length ? `, which takes no ${with_.join(', ')}` : ''}: a call of its own with { ${used}: … }${own.properties ? ` (it takes ${Object.keys(own.properties).join(', ')})` : ''}`;
+}
+
 /** What a value spelled another tool's way needs besides its name here. */
 const SPELLING_NOTE = {
   alpha: 'confidence = 1 − alpha: alpha 0.05 is confidence 0.95',
@@ -273,7 +287,7 @@ function describe(e, ctx = {}) {
       // what a metric query said beside its steps is said IN them: a field of a step, not of the request
       const inStep = !alt && node?.properties?.steps ? STEP_FIELDS[used] : null;
       // a field of the request written in each member of a list beside it (a batch's context_id)
-      const top = !alt && !inStep ? hoisted(ctx, e.instancePath, used) : null;
+      const top = !alt && !inStep ? hoisted(ctx, e.instancePath, used) || ownRequest(ctx, e.instancePath, used) : null;
       return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}'${SPELLING_NOTE[used] ? ` (${SPELLING_NOTE[used]})` : ''}` : inStep ? ` — ${inStep}` : top || takes}`;
     }
     case 'enum': {

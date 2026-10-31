@@ -655,12 +655,15 @@ export const semanticIndexMethods = {
     if (semantic) {
       res.semantic_matches = semantic.matches;
       if (semantic.more) res.more = { ...(res.more || {}), semantic_matches: semantic.more };
-      const named = Object.values(semantic.matches).flat().some((m) => m.match === 'exact');
-      const first = semantic.matches.semantic_models?.[0] || semantic.matches.metrics?.[0] || semantic.matches.dimensions?.[0];
-      const said = first.metric !== undefined ? `the metric '${first.metric}'` : first.dimension !== undefined ? `the dimension '${first.dimension}'` : `the semantic model '${first.context_id}'`;
+      // what the word names, first: a semantic model, else a metric, else a dimension — by its name; else one whose description holds it
+      const all = ['semantic_models', 'metrics', 'dimensions'].flatMap((k) => semantic.matches[k] || []);
+      const named = all.some((m) => m.match === 'exact');
+      const first = all.find((m) => m.match === 'exact') || all[0];
+      const what = first.metric !== undefined ? `the metric '${first.metric}'` : first.dimension !== undefined ? `the dimension '${first.dimension}'` : `the semantic model '${first.context_id}'`;
+      const said = first.match === 'exact' ? `names ${what}` : `appears in ${what}`;
       // (a name of the project's layer is what the word meant: the catalog's resemblances are not news then)
       res.recommendations = [
-        `'${input.search}' names ${said} of the dbt project's own semantic layer — context '${first.context_id}', ready to query (nothing to build). Its details: ${first.details}; a query: ${first.query || this._projectCalls(first.context_id).query}.`,
+        `'${input.search}' ${said} of the dbt project's own semantic layer — context '${first.context_id}', ready to query (nothing to build). Its details: ${first.details}; a query: ${first.query || this._projectCalls(first.context_id).query}.`,
         ...(res.recommendations || []).filter((r) => !named || !(r.startsWith('No exact match') || r.startsWith('Nothing in the catalog matches') || r.startsWith('No catalog match'))),
       ].slice(0, 4);
     }

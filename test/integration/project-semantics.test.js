@@ -174,6 +174,9 @@ test('each of the project\'s semantic models is read at start as a context named
   assert.deepEqual([byMetric[0].context_id, ...byMetric[0].also_in].sort(), [ACQ, EV], 'a metric of two semantic models: one line, both contexts');
   assert.deepEqual((await engine.semantic_index({ search: 'campaign', fuzzy: false })).semantic_matches.dimensions.map((d) => [d.dimension, d.context_id]), [['campaign', ACQ]]);
   assert.equal((await engine.semantic_index({ search: 'no_such_word_anywhere', fuzzy: false })).semantic_matches, undefined);
+  // a word only a description holds is mentioned there, not what the metric is named
+  const snapshot = (await engine.semantic_index({ search: 'snapshot', fuzzy: false })).semantic_matches.metrics;
+  assert.deepEqual(snapshot.map((m) => [m.metric, m.match]), [['project_impressions_last_day', 'mentioned']]);
   assert.deepEqual((await engine.semantic_index({ source: 'events' })).project_semantic_models.map((r) => [r.context_id, r.metrics]), [[EV, names(EV).length]], 'the events source points at the semantic model over its table');
   assert.ok(o.contexts.every((c) => c.details.includes(`context_id: '${c.context_id}'`)), 'the overview says how to see each one');
   const cost = [{ stage: 'metrics', metrics: ['project_cost'] }];

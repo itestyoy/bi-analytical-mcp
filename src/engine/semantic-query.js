@@ -565,8 +565,11 @@ export const semanticQueryMethods = {
     const hits = this._projectIndex.index.search(query, { threshold: fuzzy ? 0.6 : 1.01, fuzzy });
     const kinds = { semantic_models: [], metrics: [], dimensions: [] };
     const seen = new Map(); // a metric of several semantic models is in the context of each: one line, every context named
-    for (const { item: x, score, match } of hits) {
-      const at = { score: Math.round(score * 1000) / 1000, match };
+    // a word found only in the description is mentioned there, not what the thing is named — as the catalog's lists say it
+    const q = String(query).toLowerCase();
+    for (const { item: x, score, match: found } of hits) {
+      const match = found === 'exact' && !x.name.toLowerCase().includes(q) ? 'mentioned' : found;
+      const at = { score: match === 'mentioned' ? 0.8 : Math.round(score * 1000) / 1000, match };
       if (x.kind === 'semantic_model') {
         const served = this._projectServed().find((c) => c.id === x.id);
         kinds.semantic_models.push({ context_id: x.id, ...(x.text ? { description: cut(x.text) } : {}), metrics: served?.metrics.length ?? 0, ...at, ...this._projectCalls(x.id) });
@@ -584,7 +587,10 @@ export const semanticQueryMethods = {
     const more = {};
     for (const k of Object.keys(kinds)) {
       const list = kinds[k];
-      const close = list.some((m) => m.match === 'exact' || m.match === 'prefix') ? list.filter((m) => m.match === 'exact' || m.match === 'prefix') : list.filter((m) => m.score >= 0.8).slice(0, 3);
+      const named = list.filter((m) => m.match === 'exact' || m.match === 'prefix');
+      // (beside the names that hold the word, a few whose description does)
+      const mentioned = list.filter((m) => m.match === 'mentioned').slice(0, 3);
+      const close = named.length || mentioned.length ? [...named, ...mentioned] : list.filter((m) => m.score >= 0.8).slice(0, 3);
       if (close.length > SEMANTIC_SHOWN) more[k] = close.length - SEMANTIC_SHOWN;
       kinds[k] = close.slice(0, SEMANTIC_SHOWN);
     }

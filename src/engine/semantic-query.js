@@ -7,7 +7,7 @@
 // answer, the task). Methods of the Engine (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
-import { rankFuzzy } from '../fuzzy.js';
+import { rankFuzzy, FuzzyIndex } from '../fuzzy.js';
 import { measureRefs, inputMetrics } from '../compile.js';
 import { PARTITION_DIM, renderContext } from '../yaml-render.js';
 import { whereSql, referenceComparisons } from '../predicate.js';
@@ -33,6 +33,8 @@ const refShown = (r) => (r.source !== undefined ? `${r.source}.${r.column ?? r.p
 
 /** The sides query_model reads back: a metric query's and a stored table read's. */
 const QUERY_SIDES = ['semantic', 'pipeline'];
+const SEMANTIC_SHOWN = 10; // the project's semantic models, metrics and dimensions a search lists of each kind
+const OVERVIEW_METRICS = 30; // metrics the overview names per context of the project's layer, the rest counted
 
 /** A query without a metrics step reads a stored table: it takes its steps, limit and dry_run — what
  *  belongs to a metric query alone is refused, naming it. */
@@ -522,6 +524,82 @@ export const semanticQueryMethods = {
     return this.project.layer.metrics.filter((m) => m.semantic_models.includes(ctx.state.semantic_model));
   },
 
+  /** The contexts of the project's own layer served now: each with its semantic model and its metrics. */
+  _projectServed() {
+    if (!this.project) return [];
+    const layer = this.project.layer;
+    return this.project.contexts.filter((id) => this.ctxs.has(id)).map((id) => {
+      const ctx = this.ctxs.get(id);
+      return { id, sm: layer.semantic_models.find((x) => x.name === ctx.state.semantic_model), metrics: this._projectMetricsOf(ctx) };
+    });
+  },
+
+  /** How a context of the project's own layer is read further — its details (one metric's with `metric`) — and queried. */
+  _projectCalls(id, metric = null) {
+    return {
+      details: `context({ request: { action: 'describe', context_id: '${id}'${metric ? `, metric: '${metric}'` : ''} } })`,
+      query: `query_model({ request: { context_id: '${id}', steps: [{ stage: 'metrics', metrics: ['${metric || '<metric>'}'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start, end } } })`,
+    };
+  },
+
+  /**
+   * The project's own semantic models, metrics and dimensions a word names — what a { search } finds of
+   * them beside the catalog's: each with the context it is queried in and the call that shows its details.
+   * The best of each kind are listed (SEMANTIC_SHOWN), the rest counted. → { matches, more } or null.
+   */
+  _projectSearch(query, fuzzy) {
+    if (!this.project) return null;
+    if (this._projectIndex?.project !== this.project) {
+      const items = [];
+      for (const { id, sm, metrics } of this._projectServed()) {
+        items.push({ kind: 'semantic_model', id, name: id, text: sm?.description || '' });
+        for (const m of metrics) items.push({ kind: 'metric', id, name: m.name, text: [m.label, m.description].filter(Boolean).join(' '), m });
+        for (const d of sm?.dimensions || []) items.push({ kind: 'dimension', id, name: d.name, text: [d.label, d.description].filter(Boolean).join(' '), d });
+      }
+      this._projectIndex = {
+        project: this.project,
+        index: new FuzzyIndex(items, { keys: [{ name: 'name', weight: 2, get: (x) => x.name }, { name: 'desc', weight: 1, get: (x) => x.text }], tiebreak: (x) => `${x.kind}.${x.name}.${x.id}` }),
+      };
+    }
+    const cut = (text) => (text && text.length > 200 ? `${text.slice(0, 200)}…` : text);
+    const hits = this._projectIndex.index.search(query, { threshold: fuzzy ? 0.6 : 1.01, fuzzy });
+    const kinds = { semantic_models: [], metrics: [], dimensions: [] };
+    const seen = new Map(); // a metric of several semantic models is in the context of each: one line, every context named
+    for (const { item: x, score, match } of hits) {
+      const at = { score: Math.round(score * 1000) / 1000, match };
+      if (x.kind === 'semantic_model') {
+        const served = this._projectServed().find((c) => c.id === x.id);
+        kinds.semantic_models.push({ context_id: x.id, ...(x.text ? { description: cut(x.text) } : {}), metrics: served?.metrics.length ?? 0, ...at, ...this._projectCalls(x.id) });
+      } else if (x.kind === 'metric') {
+        if (seen.has(x.name)) { seen.get(x.name).also_in.push(x.id); continue; }
+        const row = { metric: x.name, context_id: x.id, also_in: [], ...(x.m.label ? { label: x.m.label } : {}), ...(x.m.description ? { description: cut(x.m.description) } : {}), ...at, ...this._projectCalls(x.id, x.name) };
+        seen.set(x.name, row);
+        kinds.metrics.push(row);
+      } else {
+        kinds.dimensions.push({ dimension: x.name, context_id: x.id, ...(x.d.description ? { description: cut(x.d.description) } : {}), ...at, details: this._projectCalls(x.id).details });
+      }
+    }
+    for (const row of kinds.metrics) if (!row.also_in.length) delete row.also_in;
+    // as the catalog's lists: a word that names something exactly is answered by that, not by what only resembles it
+    const more = {};
+    for (const k of Object.keys(kinds)) {
+      const list = kinds[k];
+      const close = list.some((m) => m.match === 'exact' || m.match === 'prefix') ? list.filter((m) => m.match === 'exact' || m.match === 'prefix') : list.filter((m) => m.score >= 0.8).slice(0, 3);
+      if (close.length > SEMANTIC_SHOWN) more[k] = close.length - SEMANTIC_SHOWN;
+      kinds[k] = close.slice(0, SEMANTIC_SHOWN);
+    }
+    const matches = Object.fromEntries(Object.entries(kinds).filter(([, v]) => v.length));
+    return Object.keys(matches).length ? { matches, ...(Object.keys(more).length ? { more } : {}) } : null;
+  },
+
+  /** The contexts of the project's own layer that read a dbt model — what a source's view points to. */
+  _projectOver(dbtModel) {
+    if (!this.project || !dbtModel) return [];
+    const sources = this.project.layer.sources || {};
+    return this._projectServed().filter(({ sm }) => sm && sources[sm.name] === dbtModel)
+      .map(({ id, sm, metrics }) => ({ context_id: id, ...(sm.description ? { description: sm.description.length > 200 ? `${sm.description.slice(0, 200)}…` : sm.description } : {}), metrics: metrics.length, details: this._projectCalls(id).details }));
+  },
+
   /** What one context of the project's own layer offers — or, with no id, what they all do: the
    *  semantic model it is (its dimensions and entities), and its metrics, each with the semantic models
    *  whose dimensions cut it and the entities it is grouped by. */
@@ -555,11 +633,14 @@ export const semanticQueryMethods = {
     return {
       note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it, listed here with its metrics by name: context({ request: { action: 'describe', context_id } }) gives its dimensions and each metric's definition and meta, and with metric one metric's full group_by — everything it can be grouped by. Query one with query_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A.`,
       // (by name only: every request that reads the overview carries it — the details are one describe away)
-      contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map((id) => {
-        const ctx = this.ctxs.get(id);
-        const sm = layer.semantic_models.find((x) => x.name === ctx.state.semantic_model);
-        return { context_id: id, ...(sm?.description ? { description: sm.description } : {}), metrics: this._projectMetricsOf(ctx).map((m) => m.name) };
-      }),
+      // (a context of hundreds of metrics lists the first OVERVIEW_METRICS and counts the rest: a { search }
+      // finds any of them by word, and its details list them all)
+      contexts: this._projectServed().map(({ id, sm, metrics }) => ({
+        context_id: id, ...(sm?.description ? { description: sm.description } : {}),
+        metrics: metrics.slice(0, OVERVIEW_METRICS).map((m) => m.name),
+        ...(metrics.length > OVERVIEW_METRICS ? { metrics_total: metrics.length } : {}),
+        details: this._projectCalls(id).details,
+      })),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
       // joins the project declares that no reference could name — a model joined through several keys,
       // a hop onto no single model: left out, each with how to declare it so it is served

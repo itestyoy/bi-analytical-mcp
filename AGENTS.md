@@ -910,8 +910,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   layer only: its copy of the project leaves the project's semantic keys out
   (`withoutSemanticLayer`, src/context-manager.js) — the latest spec allows one semantic model per
   dbt model, and a name of one layer could shadow the other's. The overview
-  (`semantic_index().project_semantic_layer.contexts`) lists each context with its metrics by name — every
-  request that reads it carries it; context({ action: "describe", context_id }) gives its dimensions and
+  (`semantic_index().project_semantic_layer.contexts`) lists each context with its metrics by name (the first
+  30, the rest counted — every request that reads it carries it) and the call that shows its details; a
+  `{ search }` finds its semantic models, metrics and dimensions by word (`semantic_matches`, each with its
+  context and that call), and a source's view names the contexts over its table (`project_semantic_models`); context({ action: "describe", context_id }) gives its dimensions and
   each metric with its definition and meta (the project's notes on reading it), the cut most of them share
   said once (`metrics_group_by`) and a metric's own where it differs, and with `metric` one metric's
   definition and its full group_by.

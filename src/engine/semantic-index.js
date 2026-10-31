@@ -303,6 +303,12 @@ export const semanticIndexMethods = {
         { call: `semantic_index({ request: { source: '${k}', column: '${exampleColumn(m) || '<column>'}' } })`, why: "drill a column's full value/frequency distribution" },
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'find where a known attribute value occurs' },
       ];
+    // the dbt project's own semantic models over the same table: ready metrics, one call away
+    const ready = this._projectOver(m.dbt_model);
+    if (ready.length) {
+      out.project_semantic_models = ready;
+      out.project_semantic_note = `The dbt project's own semantic layer has ready metrics over this table (${ready.map((r) => `'${r.context_id}': ${r.metrics}`).join(', ')}) — each a context queried without a build; its details call lists every metric and what it is cut by.`;
+    }
     // Saved findings about this model (memory tool) — surface them where they belong (compact).
     this.notes.attach(out, { kind: 'model', source: k });
     return out;
@@ -643,6 +649,21 @@ export const semanticIndexMethods = {
   async _indexSearch(input) {
     const c = this.catalog;
     const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? VALUES_SHOWN });
+    // The dbt project's own semantic models, metrics and dimensions the word names — each a context of its
+    // own, queried without a build: said with the call that shows its details and the one that queries it
+    const semantic = this._projectSearch(input.search, input.fuzzy !== false);
+    if (semantic) {
+      res.semantic_matches = semantic.matches;
+      if (semantic.more) res.more = { ...(res.more || {}), semantic_matches: semantic.more };
+      const named = Object.values(semantic.matches).flat().some((m) => m.match === 'exact');
+      const first = semantic.matches.semantic_models?.[0] || semantic.matches.metrics?.[0] || semantic.matches.dimensions?.[0];
+      const said = first.metric !== undefined ? `the metric '${first.metric}'` : first.dimension !== undefined ? `the dimension '${first.dimension}'` : `the semantic model '${first.context_id}'`;
+      // (a name of the project's layer is what the word meant: the catalog's resemblances are not news then)
+      res.recommendations = [
+        `'${input.search}' names ${said} of the dbt project's own semantic layer — context '${first.context_id}', ready to query (nothing to build). Its details: ${first.details}; a query: ${first.query || this._projectCalls(first.context_id).query}.`,
+        ...(res.recommendations || []).filter((r) => !named || !(r.startsWith('No exact match') || r.startsWith('Nothing in the catalog matches') || r.startsWith('No catalog match'))),
+      ].slice(0, 4);
+    }
     // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
     // used, recorded as an alias, resolves straight back to the real field it described.
     // (as many notes as limit asks, 5 unless it says: a note is long, and the best ones lead)
@@ -663,7 +684,7 @@ export const semanticIndexMethods = {
     // so "not found" is not mistaken for "does not exist".
     // (said where nothing else answered the word either: a name found in the catalog or a saved note is
     // what the word meant, not a missing value)
-    const found = ['event_names', 'property_matches', 'column_matches', 'value_matches', 'recipe_matches', 'memory_matches'].some((k) => res[k]?.length);
+    const found = ['event_names', 'property_matches', 'column_matches', 'value_matches', 'recipe_matches', 'memory_matches'].some((k) => res[k]?.length) || !!res.semantic_matches;
     if (!found) {
       (res.recommendations ||= []).push('No indexed value matched. Indexed values are the top-N most frequent per property — a RARE value may not be indexed; confirm presence with a direct filter/query before concluding it does not exist.');
     }

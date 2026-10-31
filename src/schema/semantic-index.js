@@ -70,7 +70,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
   // views of the refs the place takes (REF_PLACES.index_view), in its order
   const drill = [
     ...REF_PLACES.index_view.takes.flatMap((kind) => refViews[kind]),
-    view('{ search }', 'Events, properties, columns, values and recipes by word.', ['search'], {
+    view('{ search }', 'Events, properties, columns, values, recipes and the dbt project\'s own semantic models and metrics, by word.', ['search'], {
       search: field.search,
       fuzzy: field.fuzzy,
       limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Values shown (default 10) and saved notes (default 5, at most 20); events, properties and columns show the best 10, the rest counted under `more`.' },

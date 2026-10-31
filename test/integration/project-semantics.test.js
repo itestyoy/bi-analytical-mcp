@@ -163,6 +163,19 @@ test('each of the project\'s semantic models is read at start as a context named
     assert.deepEqual(presets.enum, [ACQ, EV], tool);
     assert.ok(built.pattern, tool);
   }
+  // semantic_index points at them: a search by a semantic model's name, by a metric's, by a dimension's —
+  // each with its context and the call that shows its details — and the source a model reads names it
+  const byModel = (await engine.semantic_index({ search: ACQ })).semantic_matches;
+  assert.equal(byModel.semantic_models[0].context_id, ACQ);
+  assert.equal(byModel.semantic_models[0].metrics, names(ACQ).length);
+  assert.ok(byModel.semantic_models[0].details.includes(`context_id: '${ACQ}'`));
+  const byMetric = (await engine.semantic_index({ search: 'project_events_per_click', fuzzy: false })).semantic_matches.metrics;
+  assert.deepEqual(byMetric.map((m) => m.metric), ['project_events_per_click']);
+  assert.deepEqual([byMetric[0].context_id, ...byMetric[0].also_in].sort(), [ACQ, EV], 'a metric of two semantic models: one line, both contexts');
+  assert.deepEqual((await engine.semantic_index({ search: 'campaign', fuzzy: false })).semantic_matches.dimensions.map((d) => [d.dimension, d.context_id]), [['campaign', ACQ]]);
+  assert.equal((await engine.semantic_index({ search: 'no_such_word_anywhere', fuzzy: false })).semantic_matches, undefined);
+  assert.deepEqual((await engine.semantic_index({ source: 'events' })).project_semantic_models.map((r) => [r.context_id, r.metrics]), [[EV, names(EV).length]], 'the events source points at the semantic model over its table');
+  assert.ok(o.contexts.every((c) => c.details.includes(`context_id: '${c.context_id}'`)), 'the overview says how to see each one');
   const cost = [{ stage: 'metrics', metrics: ['project_cost'] }];
   await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_model({ context_id: 'Not-An-Id', steps: cost })), /context_id/);
   // the parsed copy they share is nobody's to address, nor listed

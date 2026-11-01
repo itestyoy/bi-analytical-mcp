@@ -17,11 +17,13 @@
 //   view         the card it draws: 'result' (the result view) or a feature's view — on every answer
 //                its view model finds something in, or, for an appsOnly tool, on the answer it drew
 //   appsOnly     offered to a client that renders MCP Apps only; `appCallable` — the card itself calls it
+//   resultCard   offered only where the deployment switches result cards on (MCP_RESULT_CARDS); `exportFile` —
+//                only where it names an export location (EXPORT_URI)
 //   output       the JSON Schema of its answer, where the answer has one shape (src/schema/outputs.js): listed
 //                as outputSchema, and every successful answer carries structuredContent — never on a tool with a view
 
 const NAME = /^[a-z][a-z0-9_]*$/;
-const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'appsOnly', 'appCallable', 'feature', 'resultCard']);
+const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'appsOnly', 'appCallable', 'feature', 'resultCard', 'exportFile']);
 
 /** A tool definition, checked: a missing or mistyped field is a defect found at start, not in a call. */
 export function defineTool(def) {

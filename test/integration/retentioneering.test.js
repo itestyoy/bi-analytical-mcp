@@ -785,7 +785,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   // as a restart), the query tool of the core does not read a path-analysis context, and a refused start
   // leaves no context behind
   await assert.rejects(engine.build_model({ action: 'start', name: 'from_rete', from_task: againStart.task_id }),
-    (e) => e.field === 'from_task' && /was started by build_retentioneering_model, and a build starts only from a pipeline build or a metric query run with materialize: true/.test(e.message), 'T45: from an eventstream\'s task');
+    (e) => e.field === 'from_task' && /was started by build_retentioneering_model, and only a pipeline build or a metric query run with materialize: true holds a table to start from/.test(e.message), 'T45: from an eventstream\'s task');
   await assert.rejects(engine.query_model({ context_id: againStart.context_id, steps: [{ stage: 'limit', limit: 1 }] }), (e) => e.field === 'context_id' && /holds no semantic layer and no pipeline table/.test(e.message), 'T45: query_model on a path-analysis context');
   const contexts = () => engine.ctxs.list().length;
   const count = contexts();

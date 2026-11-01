@@ -8,6 +8,8 @@
 //   show(projectDir, sql, limit, timeout) → { ok, rows, columns, stdout?, stderr?, error? }
 //   relationColumns(projectDir, model)    → { ok, columns: [{ name, dtype }] }  (the project's mcp_relation_columns
 //                                           macro; dtype an array's own type — ARRAY<…> — not its element's)
+//   execute(projectDir, model, statements) → { ok, columns, rows }  (statements run in turn — an export, a DDL —
+//                                           the last one's rows; the server's own macro, written into the project)
 //   query(projectDir, opts)               → { ok, command, columns, rows } | explain: { ok, sql, plan? }
 //                                           (`mf query`, run by MetricFlow kept warm — below)
 //   validate(projectDir)                  → { ok, stdout, stderr }  (`mf validate-configs`, a process of its own)

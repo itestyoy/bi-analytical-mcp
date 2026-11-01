@@ -60,6 +60,7 @@ import { semanticBuildMethods } from './engine/semantic-build.js';
 import { semanticQueryMethods } from './engine/semantic-query.js';
 import { semanticPreviewMethods } from './engine/semantic-preview.js';
 import { taskResultMethods } from './engine/task-results.js';
+import { exportMethods } from './engine/export.js';
 import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
 import { RESEARCH_GUIDES } from './research-guides.js';
@@ -87,7 +88,7 @@ export const TASK_KINDS = {
 const DESCRIBED_TASKS = 5;
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false, exportUri = null }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -159,8 +160,11 @@ export class Engine {
     // (the result cards — display_model_result and the card's own drill_result — are offered only where the
     // deployment asks for them, MCP_RESULT_CARDS: off, neither tool nor its schema exists)
     this.resultCards = !!resultCards;
-    for (const def of CORE_TOOLS) if (def.resultCard && !this.resultCards) delete this.schemas[def.name];
-    this.tools = toolRegistry([...CORE_TOOLS.filter((def) => this.resultCards || !def.resultCard), ...featureToolDefinitions(features)]);
+    // where export writes a result's files (EXPORT_URI); without one there is no export tool
+    this.exportUri = exportUri || null;
+    const offered = (def) => (this.resultCards || !def.resultCard) && (this.exportUri || !def.exportFile);
+    for (const def of CORE_TOOLS) if (!offered(def)) delete this.schemas[def.name];
+    this.tools = toolRegistry([...CORE_TOOLS.filter(offered), ...featureToolDefinitions(features)]);
     for (const def of this.tools.values()) {
       if (def.feature) {
         if (Object.prototype.hasOwnProperty.call(this.schemas, def.name) || typeof this[def.name] === 'function') throw new Error(`feature tool '${def.name}' collides with a core tool`);
@@ -390,21 +394,7 @@ export class Engine {
    * against: the build's own source, else the one the caller names, else the query's single fact.
    */
   _taskBase(input) {
-    const job = this.jobs.get(input.from_task);
-    if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: UNKNOWN_TASK });
-    // a task of another part of the server (a feature's) holds no table a pipeline reads: said as it is
-    if (!['semantic', 'pipeline'].includes(this.tasks.sideOf(job.tool))) throw new ToolError(`task ${job.id} was started by ${job.tool}, and a build starts only from a pipeline build or a metric query run with materialize: true — build the rows you need with build_model from the source instead`, { stage: 'validate', field: 'from_task' });
-    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start from it`, { stage: 'validate', field: 'from_task' });
-    if (job.status !== 'ready' || !job.table) {
-      // a query over a pipeline model reads that model's table and stores nothing: the table it read
-      // is the one to start from, the query's steps given again as the draft's
-      const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
-      const why = job.status === 'error' ? 'it failed'
-        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") with the query's steps as the draft's (steps)` : ': start from the pipeline build\'s task, or continue that draft'}`
-          : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
-      throw new ToolError(`task ${job.id} holds no stored table to start from — ${why}`, { stage: 'validate', field: 'from_task' });
-    }
-    if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) throw new ToolError(`the table of task ${job.id} (${job.table}) is gone — its context or model was deleted; run it again`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
+    const job = this._storedTaskTable(input.from_task, 'from_task', { use: 'start from', starts: 'start the pipeline from', alternative: 'build the rows you need with build_model from the source instead' });
     if (input.time_range) throw new ToolError('time_range bounds a catalog source — a task\'s table was computed under its own window already; filter it with a where step instead', { stage: 'validate', field: 'time_range' });
     const kept = this.tasks.held(job.id);
     const owner = this.ctxs.get(job.contextId).state;
@@ -418,6 +408,31 @@ export class Engine {
     // what the task read: a metric query's own sources (its provenance) — not every model its context holds
     const read = kept?.provenance?.source ? [].concat(kept.provenance.source) : owner.usedModels || [];
     return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source, read: [...new Set(read)] };
+  }
+
+  /**
+   * THE STORED TABLE OF A FINISHED TASK — what a build starting from it (from_task) and an export read:
+   * a pipeline build's, or a metric query's run with materialize: true. Anything else is refused at
+   * `field`, saying why and what holds one. `say` words the refusals for the call: `use` (what is done
+   * with the table), `starts` (the unknown-task line), `alternative` (where a feature's task is sent).
+   */
+  _storedTaskTable(id, field, say) {
+    const job = this.jobs.get(id);
+    if (!job) throw new ToolError(`unknown task_id '${id}' — ${say.starts} a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field, code: UNKNOWN_TASK });
+    // a task of another part of the server (a feature's) holds no table a pipeline reads: said as it is
+    if (!['semantic', 'pipeline'].includes(this.tasks.sideOf(job.tool))) throw new ToolError(`task ${job.id} was started by ${job.tool}, and only a pipeline build or a metric query run with materialize: true holds a table to ${say.use} — ${say.alternative}`, { stage: 'validate', field });
+    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then ${say.use} it`, { stage: 'validate', field });
+    if (job.status !== 'ready' || !job.table) {
+      // a query over a pipeline model reads that model's table and stores nothing: the table it read
+      // is the one to start from, the query's steps given again as the draft's
+      const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
+      const why = job.status === 'error' ? 'it failed'
+        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: ${say.use} that build's task ("${built}")${field === 'from_task' ? ' with the query\'s steps as the draft\'s (steps)' : ''}` : ': use the pipeline build\'s task'}`
+          : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
+      throw new ToolError(`task ${job.id} holds no stored table to ${say.use} — ${why}`, { stage: 'validate', field });
+    }
+    if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) throw new ToolError(`the table of task ${job.id} (${job.table}) is gone — its context or model was deleted; run it again`, { stage: 'validate', field, code: RESULT_GONE });
+    return job;
   }
 
   /** Make a task's table readable from this draft's context, and keep its owner from being dropped under it. */
@@ -822,4 +837,4 @@ export class Engine {
   }
 }
 
-mixin(Engine, semanticIndexMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods);
+mixin(Engine, semanticIndexMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods, exportMethods);

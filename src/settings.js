@@ -80,6 +80,9 @@ export const SETTING_GROUPS = [
   ['result cards (MCP Apps)', [
     S('MCP_RESULT_CARDS', 'flag', 'on: offer display_model_result and drill_result — a model result drawn as a card. Off, neither exists;\nthe A/B test card of experiment is drawn either way.', { default: false, shown: 'on' }),
   ]],
+  ['export (a result as a CSV file)', [
+    S('EXPORT_URI', 'string', 'Where export writes a result\'s CSV: gs://<bucket>/<prefix> on BigQuery (a link to each file opens after Google\nsign-in, for an account that may read the bucket), a folder on this machine on DuckDB. Empty: no export tool.', { shown: 'gs://my-bucket/betti-exports' }),
+  ]],
   ['path analysis (retentioneering)', [
     S('MCP_RETENTIONEERING', 'flag', 'on: switch the feature on. Off, none of it exists.', { default: false, shown: 'on' }),
     S('MCP_RETENTIONEERING_ENV', 'string', 'Its environment.', { default: 'retentioneering' }),

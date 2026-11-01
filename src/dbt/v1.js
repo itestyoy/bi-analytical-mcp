@@ -5,7 +5,7 @@
 // overlay project dir, so target/ is naturally isolated. NOT `dbt sl query` (that is dbt
 // platform/remote and incompatible with local per-context isolation).
 
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -17,6 +17,7 @@ import { warehouseOf } from './warehouse.js';
 import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
 import yaml from 'js-yaml';
+import { readPaths } from '../catalog/project.js';
 
 const CUMULATIVE_FLAG = 'require_nested_cumulative_type_params';
 
@@ -125,6 +126,26 @@ function restorePercentiles(file) {
     if (changed) writeFileSync(file, JSON.stringify(manifest));
   } catch { /* an unreadable manifest is MetricFlow's to report */ }
 }
+
+/** The server's own macro behind execute(): every statement but the last run, the last one's rows logged
+ *  as one line, each value as its text. Written into the project by execute(), never by its authors. */
+const EXECUTE_MACRO = 'mcp_execute';
+const EXECUTE_MACRO_SQL = `{# Written by the analytics server (execute in its dbt client) — not part of the project. #}
+{% macro ${EXECUTE_MACRO}(model_name, statements) %}
+  {% if execute %}
+    {% set rel = ref(model_name) %}
+    {% set named = [] %}
+    {% for s in statements %}
+      {% do named.append(s | replace('__MCP_RELATION__', rel | string) | replace('__MCP_DATABASE__', rel.database | string) | replace('__MCP_SCHEMA__', rel.schema | string)) %}
+    {% endfor %}
+    {% for s in named[:-1] %}{% do run_query(s) %}{% endfor %}
+    {% set res = run_query(named[-1]) %}
+    {% set rows = [] %}
+    {% for r in res.rows %}{% set cells = [] %}{% for v in r %}{% do cells.append(none if v is none else v | string) %}{% endfor %}{% do rows.append(cells) %}{% endfor %}
+    {{ log("MCP_ROWS:" ~ tojson({"columns": res.column_names | list, "rows": rows}), info=True) }}
+  {% endif %}
+{% endmacro %}
+`;
 
 export class DbtV1 {
   constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
@@ -293,6 +314,24 @@ export class DbtV1 {
     const m = stripAnsi(r.stdout).match(/MCP_COLS:(\[[^\n]*\])/);
     if (!m) return { ok: false, stdout: r.stdout };
     try { return { ok: true, columns: JSON.parse(m[1]) }; } catch { return { ok: false, stdout: r.stdout }; }
+  }
+
+  /**
+   * STATEMENTS RUN IN TURN against the warehouse — an EXPORT, a DDL, what `show` cannot run since it
+   * expects a query — and the rows of the LAST one answered. They run through the server's own macro
+   * (EXECUTE_MACRO, written into the project's first macro path), which names `modelName`'s relation in
+   * them: __MCP_RELATION__ the relation as the adapter writes it, __MCP_DATABASE__ / __MCP_SCHEMA__ its
+   * parts. → { ok, columns, rows } | { ok: false, stdout, stderr, error }
+   */
+  async execute(projectDir, modelName, statements) {
+    const dir = join(projectDir, readPaths(projectDir, 'macro-paths', ['macros'])[0]);
+    const file = join(dir, `${EXECUTE_MACRO}.sql`);
+    if (!existsSync(file) || readFileSync(file, 'utf8') !== EXECUTE_MACRO_SQL) { mkdirSync(dir, { recursive: true }); writeFileSync(file, EXECUTE_MACRO_SQL); }
+    const r = await this._dbt(projectDir, ['run-operation', EXECUTE_MACRO, '--args', JSON.stringify({ model_name: modelName, statements })]);
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, ...(r.cancelled ? { cancelled: true } : {}) };
+    const m = stripAnsi(r.stdout).match(/MCP_ROWS:(\{[^\n]*\})/);
+    if (!m) return { ok: false, stdout: r.stdout, stderr: r.stderr };
+    try { const out = JSON.parse(m[1]); return { ok: true, columns: out.columns.map((name) => ({ name })), rows: out.rows.map((row) => Object.fromEntries(out.columns.map((c, i) => [c, row[i]]))) }; } catch { return { ok: false, stdout: r.stdout }; }
   }
 
   /**

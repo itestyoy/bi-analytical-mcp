@@ -261,6 +261,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
         limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS },
       },
     },
+    export: {
+      type: 'object', additionalProperties: false, required: ['task_id'],
+      description: 'Write a finished result\'s table as CSV files; the answer links each file.',
+      properties: {
+        task_id: { type: 'string', pattern: TASK_ID, description: 'A pipeline build, or a metric query run with materialize: true.' },
+        name: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$', description: 'The file name, without .csv. Default: the build\'s name.' },
+      },
+    },
     semantic_index: semanticIndexSchema(catalog, { project, places: TOOL_PLACES.semantic_index.ref }),
     explore_errors: (() => {
       const errorFields = {

@@ -750,6 +750,20 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   NEVER 404: hosts were seen stuck on that until the connector was re-added by hand. A session idle
   for MCP_SESSION_IDLE_SECONDS is closed.
 
+- A RESULT LEAVES AS A FILE THE WAREHOUSE WRITES, NEVER THROUGH THE CONVERSATION (src/engine/export.js):
+  `export({ task_id, name? })` — offered only where the deployment names an export location
+  (`EXPORT_URI`: gs://<bucket>/<prefix> on BigQuery, a folder of the machine on DuckDB; unset, no tool,
+  no schema — `exportFile` on its definition, as `resultCard` gates the cards) — writes the stored table
+  of a finished task (`_storedTaskTable`, the same check from_task makes: a pipeline build, or a metric
+  query run with materialize: true) as CSV with a header, by the warehouse itself (`exportCsv` of each
+  dialect: EXPORT DATA, then the files listed with their rows through an external table dropped after;
+  COPY on DuckDB), run through the dbt client's `execute` (statements in turn, the last one's rows, by a
+  macro the client writes into the project). It is a task of the pipeline side (read with query_model),
+  under a folder of a random name — a link names neither the task nor the context — and answers each
+  file's link: `https://storage.cloud.google.com/…`, which opens only after Google sign-in for an
+  account that may read the bucket, so the link grants nothing and is shown as it is. BigQuery may split
+  a result into several files: each is listed, with its rows. Data Access audit logs on the bucket break
+  that sign-in download (403): leave them off there.
 - RESEARCH GUIDES ARE METHOD, NOT DATA (`src/research-guides.js`): how to run an investigation
   (sequence, checks, report) and what matters in product, monetization and UA — served by
   semantic_index({ guide: "research" | "research/<domain>" }) — reserved names that buildGuide
@@ -849,7 +863,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   from the profile), MetricFlow kept warm (python/mf_server.py) lets go of it after every request, and
   a batch's members run one after another there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
-  the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
+  the CLI): one contract (parse / run / seed / show / relationColumns / execute / query / validate / warehouse
   / semanticSpec / semanticManifest / semanticModelSources / groupBys / pythonModelsOn / unparsedSqlConfig) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.

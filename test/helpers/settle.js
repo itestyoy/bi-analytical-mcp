@@ -42,7 +42,7 @@ function refusal(r) {
   return Object.assign(new Error(r.error.message), { stage: r.error.stage, field: r.error.field, code: r.error.code });
 }
 
-const TASK_TOOLS = new Set(['query_model', '_buildPipeline', 'build_model']);
+const TASK_TOOLS = new Set(['query_model', '_buildPipeline', 'build_model', 'export']);
 
 /** The engine, with every started task settled into its result. */
 export function settle(engine) {

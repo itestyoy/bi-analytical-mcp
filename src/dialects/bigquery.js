@@ -16,6 +16,31 @@ const BLANK_CHARS = ' \t\n\v\f\r';
 
 
 export class BigQueryDialect extends Dialect {
+  /**
+   * EXPORT DATA writes the table to Cloud Storage as one file or several (BigQuery decides how many); an
+   * external table over them, every column read as text, lists them with their rows (_FILE_NAME), and is
+   * dropped after. The service account BigQuery runs as writes and reads the bucket.
+   */
+  exportCsv({ folder, name, columns, scratch }) {
+    const files = this.sqlLiteral(`${folder}/${name}-*.csv`);
+    const listing = `\`__MCP_DATABASE__.__MCP_SCHEMA__.${this.ident(scratch)}\``;
+    return {
+      statements: [
+        `EXPORT DATA OPTIONS (uri = ${files}, format = 'CSV', overwrite = true, header = true) AS SELECT * FROM __MCP_RELATION__`,
+        `CREATE OR REPLACE EXTERNAL TABLE ${listing} (${columns.map((c) => `${this.quoteIdent(c)} STRING`).join(', ')}) OPTIONS (format = 'CSV', uris = [${files}], skip_leading_rows = 1, allow_quoted_newlines = true)`,
+        `SELECT _FILE_NAME AS file, COUNT(*) AS row_count FROM ${listing} GROUP BY 1 ORDER BY 1`,
+      ],
+      cleanup: [`DROP EXTERNAL TABLE IF EXISTS ${listing}`],
+    };
+  }
+
+  /** A gs:// object as the address that opens it after Google sign-in, for an account that may read it. */
+  downloadLink(file) {
+    const m = /^gs:\/\/([^/]+)\/(.+)$/.exec(String(file));
+    if (!m) throw new Error(`not a Cloud Storage object: ${file}`);
+    return `https://storage.cloud.google.com/${m[1]}/${m[2].split('/').map(encodeURIComponent).join('/')}`;
+  }
+
   /** BigQuery quotes an identifier in backticks. */
   quoteIdent(name) {
     return `\`${this.ident(name)}\``;

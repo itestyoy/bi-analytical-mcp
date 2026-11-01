@@ -82,6 +82,19 @@ export class Dialect {
     return name;
   }
 
+  /**
+   * A STORED TABLE WRITTEN AS CSV FILES under `folder` (the export destination, EXPORT_URI), each file
+   * named `<name>-<n>.csv` with a header row: the statements that write them and then list them — the
+   * last one's rows are { file, row_count }, one per file written that holds rows — and those that clear
+   * what the listing needed (`cleanup`). `columns` are the table's column names, `scratch` a name the
+   * listing may create a relation under. The statements name the table as __MCP_RELATION__ (and its
+   * dataset as __MCP_DATABASE__.__MCP_SCHEMA__) — the dbt client's execute() puts it in.
+   */
+  exportCsv(_args) { throw new Error(`export is not written for the ${this.name} warehouse`); }
+
+  /** The address a person opens one exported file at. */
+  downloadLink(_file) { throw new Error(`export is not written for the ${this.name} warehouse`); }
+
   /** A validated identifier, quoted — a column a caller named may be a keyword (group, order). */
   quoteIdent(name) {
     return `"${this.ident(name)}"`;

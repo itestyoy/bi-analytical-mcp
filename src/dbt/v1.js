@@ -10,10 +10,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { inIsolatedTarget } from '../request-context.js';
-import { runProcess, runWarm } from './process.js';
+import { runProcess, runWarm, runWithInput } from './process.js';
 import { metricflowServer, mfOutcome } from './metricflow-server.js';
-import { assetPath } from '../runtime-assets.js';
-import { warehouseOf } from './warehouse.js';
+import { assetPath, missingAssetMessage } from '../runtime-assets.js';
+import { warehouseOf, profileOutput } from './warehouse.js';
 import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
 import yaml from 'js-yaml';
@@ -128,24 +128,32 @@ function restorePercentiles(file) {
 }
 
 /** The server's own macro behind execute(): every statement but the last run, the last one's rows logged
- *  as one line, each value as its text. Written into the project by execute(), never by its authors. */
+ *  as one line, each value as its text, with the parts of the model's relation — the relation alone when
+ *  there is no statement. Written into the project by execute(), never by its authors. */
 const EXECUTE_MACRO = 'mcp_execute';
 const EXECUTE_MACRO_SQL = `{# Written by the analytics server (execute in its dbt client) — not part of the project. #}
 {% macro ${EXECUTE_MACRO}(model_name, statements) %}
   {% if execute %}
     {% set rel = ref(model_name) %}
+    {% set columns = [] %}
+    {% set rows = [] %}
     {% set named = [] %}
     {% for s in statements %}
       {% do named.append(s | replace('__MCP_RELATION__', rel | string) | replace('__MCP_DATABASE__', rel.database | string) | replace('__MCP_SCHEMA__', rel.schema | string)) %}
     {% endfor %}
-    {% for s in named[:-1] %}{% do run_query(s) %}{% endfor %}
-    {% set res = run_query(named[-1]) %}
-    {% set rows = [] %}
-    {% for r in res.rows %}{% set cells = [] %}{% for v in r %}{% do cells.append(none if v is none else v | string) %}{% endfor %}{% do rows.append(cells) %}{% endfor %}
-    {{ log("MCP_ROWS:" ~ tojson({"columns": res.column_names | list, "rows": rows}), info=True) }}
+    {% if named %}
+      {% for s in named[:-1] %}{% do run_query(s) %}{% endfor %}
+      {% set res = run_query(named[-1]) %}
+      {% for c in res.column_names %}{% do columns.append(c) %}{% endfor %}
+      {% for r in res.rows %}{% set cells = [] %}{% for v in r %}{% do cells.append(none if v is none else v | string) %}{% endfor %}{% do rows.append(cells) %}{% endfor %}
+    {% endif %}
+    {{ log("MCP_ROWS:" ~ tojson({"relation": {"database": rel.database, "schema": rel.schema, "identifier": rel.identifier}, "columns": columns, "rows": rows}), info=True) }}
   {% endif %}
 {% endmacro %}
 `;
+
+/** The most BigQuery writes as ONE file: 1 GB of the table's logical data. */
+const ONE_FILE_BYTES = 1_000_000_000;
 
 export class DbtV1 {
   constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
@@ -321,7 +329,8 @@ export class DbtV1 {
    * expects a query — and the rows of the LAST one answered. They run through the server's own macro
    * (EXECUTE_MACRO, written into the project's first macro path), which names `modelName`'s relation in
    * them: __MCP_RELATION__ the relation as the adapter writes it, __MCP_DATABASE__ / __MCP_SCHEMA__ its
-   * parts. → { ok, columns, rows } | { ok: false, stdout, stderr, error }
+   * parts; no statement answers the relation alone. → { ok, relation: { database, schema, identifier },
+   * columns, rows } | { ok: false, stdout, stderr, error }
    */
   async execute(projectDir, modelName, statements) {
     const dir = join(projectDir, readPaths(projectDir, 'macro-paths', ['macros'])[0]);
@@ -331,7 +340,32 @@ export class DbtV1 {
     if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, ...(r.cancelled ? { cancelled: true } : {}) };
     const m = stripAnsi(r.stdout).match(/MCP_ROWS:(\{[^\n]*\})/);
     if (!m) return { ok: false, stdout: r.stdout, stderr: r.stderr };
-    try { const out = JSON.parse(m[1]); return { ok: true, columns: out.columns.map((name) => ({ name })), rows: out.rows.map((row) => Object.fromEntries(out.columns.map((c, i) => [c, row[i]]))) }; } catch { return { ok: false, stdout: r.stdout }; }
+    try {
+      const out = JSON.parse(m[1]);
+      return { ok: true, relation: out.relation, columns: out.columns.map((name) => ({ name })), rows: out.rows.map((row) => Object.fromEntries(out.columns.map((c, i) => [c, row[i]]))) };
+    } catch { return { ok: false, stdout: r.stdout }; }
+  }
+
+  /**
+   * THE MODEL'S TABLE AS ONE CSV FILE at `uri` (a gs:// object, no wildcard), by a BigQuery extract job
+   * (python/bq_extract.py on dbt-bigquery's own client, built from this project's profile) — for a table
+   * of up to ONE_FILE_BYTES of logical data, the most BigQuery writes as one file. A bigger one is not
+   * written: `too_big`, for the caller to write in parts. → { ok, file, rows, bytes } | { ok: false,
+   * too_big?, error?, stdout?, stderr? }
+   */
+  async extractCsv(projectDir, modelName, uri) {
+    const script = assetPath('bqExtract');
+    if (!script) return { ok: false, error: missingAssetMessage('bqExtract') };
+    const python = this.metricflowPython;
+    if (!python) return { ok: false, error: 'no Python with the BigQuery client is configured (the MetricFlow environment)' };
+    const output = profileOutput(projectDir, this.profilesDir);
+    if (output?.type !== 'bigquery') return { ok: false, error: 'the project\'s profile is not a BigQuery one' };
+    const rel = await this.execute(projectDir, modelName, []);
+    if (!rel.ok) return rel;
+    const { database, schema, identifier } = rel.relation;
+    const input = JSON.stringify({ output, table: `${database}.${schema}.${identifier}`, uri, max_bytes: ONE_FILE_BYTES });
+    const r = await runWithInput(python, [script], input, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
+    try { return JSON.parse(r.stdout); } catch { return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, ...(r.cancelled ? { cancelled: true } : {}) }; }
   }
 
   /**

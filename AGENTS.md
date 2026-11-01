@@ -755,14 +755,18 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (`EXPORT_URI`: gs://<bucket>/<prefix> on BigQuery, a folder of the machine on DuckDB; unset, no tool,
   no schema — `exportFile` on its definition, as `resultCard` gates the cards) — writes the stored table
   of a finished task (`_storedTaskTable`, the same check from_task makes: a pipeline build, or a metric
-  query run with materialize: true) as CSV with a header, by the warehouse itself (`exportCsv` of each
-  dialect: EXPORT DATA, then the files listed with their rows through an external table dropped after;
-  COPY on DuckDB), run through the dbt client's `execute` (statements in turn, the last one's rows, by a
-  macro the client writes into the project). It is a task of the pipeline side (read with query_model),
+  query run with materialize: true) as CSV with a header, by the warehouse itself — ONE file,
+  `<name>.csv`, wherever the warehouse can write one: on BigQuery up to 1 GB by an extract job (the dbt
+  client's `extractCsv` — python/bq_extract.py on dbt-bigquery's own client, authenticated from the
+  project's profile output, `profileOutput`; the dialect's `oneFileJob`), a bigger result in parts by
+  `exportCsv` (EXPORT DATA, then the files listed with their rows through an external table dropped
+  after); COPY on DuckDB — the statements run through the dbt client's `execute` (statements in turn,
+  the last one's rows and the model's relation, by a macro the client writes into the project). It is a
+  task of the pipeline side (read with query_model),
   under a folder of a random name — a link names neither the task nor the context — and answers each
   file's link: `https://storage.cloud.google.com/…`, which opens only after Google sign-in for an
-  account that may read the bucket, so the link grants nothing and is shown as it is. BigQuery may split
-  a result into several files: each is listed, with its rows. Data Access audit logs on the bucket break
+  account that may read the bucket, so the link grants nothing and is shown as it is. A result written
+  in parts lists each file, with its rows. Data Access audit logs on the bucket break
   that sign-in download (403): leave them off there.
 - RESEARCH GUIDES ARE METHOD, NOT DATA (`src/research-guides.js`): how to run an investigation
   (sequence, checks, report) and what matters in product, monetization and UA — served by
@@ -863,7 +867,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   from the profile), MetricFlow kept warm (python/mf_server.py) lets go of it after every request, and
   a batch's members run one after another there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
-  the CLI): one contract (parse / run / seed / show / relationColumns / execute / query / validate / warehouse
+  the CLI): one contract (parse / run / seed / show / relationColumns / execute / extractCsv / query / validate / warehouse
   / semanticSpec / semanticManifest / semanticModelSources / groupBys / pythonModelsOn / unparsedSqlConfig) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.

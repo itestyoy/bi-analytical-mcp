@@ -17,7 +17,9 @@ const BLANK_CHARS = ' \t\n\v\f\r';
 
 export class BigQueryDialect extends Dialect {
   /**
-   * EXPORT DATA writes the table to Cloud Storage as one file or several (BigQuery decides how many); an
+   * EXPORT DATA writes the table to Cloud Storage as one file or several (BigQuery decides how many, each
+   * named with a number — so a table of up to 1 GB is written as one file by an extract job first:
+   * oneFileJob); an
    * external table over them, every column read as text, lists them with their rows (_FILE_NAME), and is
    * dropped after. The service account BigQuery runs as writes and reads the bucket.
    */
@@ -33,6 +35,9 @@ export class BigQueryDialect extends Dialect {
       cleanup: [`DROP EXTERNAL TABLE IF EXISTS ${listing}`],
     };
   }
+
+  /** An extract job writes a table of up to 1 GB as ONE file under the name asked for; SQL cannot. */
+  get oneFileJob() { return true; }
 
   /** A gs:// object as the address that opens it after Google sign-in, for an account that may read it. */
   downloadLink(file) {

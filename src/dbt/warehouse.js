@@ -18,6 +18,33 @@ function renderEnv(value, env) {
   return value.replace(/\{\{\s*env_var\(\s*['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]*)['"]\s*)?\)\s*\}\}/g, (_m, name, dflt) => env[name] ?? dflt ?? '');
 }
 
+/** A profile value with every env_var rendered — a nested mapping or list value by value. */
+function renderDeep(value, env) {
+  if (Array.isArray(value)) return value.map((v) => renderDeep(v, env));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, renderDeep(v, env)]));
+  return renderEnv(value, env);
+}
+
+/**
+ * The OUTPUT of the profile the project at `projectDir` runs with (profiles in `profilesDir`, else the
+ * project dir, as dbt reads them) — the target in use, its env_var() values rendered — or null. What a
+ * client of the warehouse that is not dbt authenticates with, as dbt does (python/bq_extract.py).
+ */
+export function profileOutput(projectDir, profilesDir, env = process.env) {
+  try {
+    const project = yaml.load(readFileSync(join(projectDir, 'dbt_project.yml'), 'utf8')) || {};
+    const profilesPath = join(profilesDir || projectDir, 'profiles.yml');
+    if (!existsSync(profilesPath)) return null;
+    const profiles = yaml.load(readFileSync(profilesPath, 'utf8')) || {};
+    const profile = profiles[project.profile] || Object.values(profiles)[0] || {};
+    const target = env.DBT_TARGET || renderEnv(profile.target, env);
+    const output = profile.outputs?.[target] || Object.values(profile.outputs || {})[0] || null;
+    return output ? renderDeep(output, env) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * { adapter, singleWriter, turn } for the project at `projectDir` with profiles in `profilesDir`
  * (falls back to the project dir, as dbt does). Unknown → { adapter: null, singleWriter: false }.

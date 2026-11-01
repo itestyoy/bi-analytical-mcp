@@ -155,15 +155,19 @@ metric query run with `materialize: true` — as CSV with a header row, and answ
 (read it with `query_model({ request: { task_ids } })`). The warehouse writes the files itself, so the
 rows never pass through the conversation.
 
-- **BigQuery**: `EXPORT_URI=gs://<bucket>/<prefix>`. The statement is `EXPORT DATA`, so the service
-  account dbt runs as needs to create, read and list objects in that bucket, and the bucket must be in
-  a location BigQuery can export the dataset to. BigQuery decides how many files a result becomes (one
-  for a small one): every file is listed with its rows. Each link is
+- **BigQuery**: `EXPORT_URI=gs://<bucket>/<prefix>`. A result of up to 1 GB (the table's logical size)
+  is written as ONE file, `<name>.csv`, by an extract job (what `bq extract` runs — dbt-bigquery's own
+  client on the MetricFlow environment, authenticated from the same `profiles.yml` output as dbt). A
+  bigger one is written by `EXPORT DATA` in parts, `<name>-<n>.csv` (BigQuery decides how many), each
+  listed with its rows. So the service account dbt runs as needs to create, read and list objects in
+  that bucket (and to run jobs and read the table, which it does already), and the bucket must be in a
+  location BigQuery can export the dataset to. Each link is
   `https://storage.cloud.google.com/<bucket>/<object>` — it opens after Google sign-in, for an account
   with read access to the bucket (Storage Object Viewer — give it to a group). The link is no secret.
   Keep **Data Access audit logs off** for that bucket: with them on, Cloud Storage refuses this
   sign-in download (403). A lifecycle rule on the bucket (delete after N days) keeps it from growing.
-- **DuckDB**: `EXPORT_URI` is a folder of the machine the server runs on; the link is a `file://` path.
+- **DuckDB**: `EXPORT_URI` is a folder of the machine the server runs on; the result is one `<name>.csv`
+  there, and the link is a `file://` path.
 
 Unset, there is no export tool at all.
 

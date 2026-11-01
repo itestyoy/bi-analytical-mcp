@@ -83,14 +83,20 @@ export class Dialect {
   }
 
   /**
-   * A STORED TABLE WRITTEN AS CSV FILES under `folder` (the export destination, EXPORT_URI), each file
-   * named `<name>-<n>.csv` with a header row: the statements that write them and then list them — the
+   * A STORED TABLE WRITTEN AS CSV FILES under `folder` (the export destination, EXPORT_URI) — one,
+   * `<name>.csv`, where the warehouse writes one; else `<name>-<n>.csv` — each with a header row (a
+   * warehouse that writes one file only by a job of its own says so: `oneFileJob`, below): the
+   * statements that write them and then list them — the
    * last one's rows are { file, row_count }, one per file written that holds rows — and those that clear
    * what the listing needed (`cleanup`). `columns` are the table's column names, `scratch` a name the
    * listing may create a relation under. The statements name the table as __MCP_RELATION__ (and its
    * dataset as __MCP_DATABASE__.__MCP_SCHEMA__) — the dbt client's execute() puts it in.
    */
   exportCsv(_args) { throw new Error(`export is not written for the ${this.name} warehouse`); }
+
+  /** Whether a table of a size that fits is written as ONE file by the dbt client's extractCsv — a job
+   *  of the warehouse's own, not SQL — before exportCsv's statements are tried (BigQuery). */
+  get oneFileJob() { return false; }
 
   /** The address a person opens one exported file at. */
   downloadLink(_file) { throw new Error(`export is not written for the ${this.name} warehouse`); }

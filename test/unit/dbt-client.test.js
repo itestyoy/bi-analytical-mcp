@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDbt, detectDbtMajor } from '../../src/dbt/index.js';
-import { warehouseOf } from '../../src/dbt/warehouse.js';
+import { warehouseOf, profileOutput } from '../../src/dbt/warehouse.js';
 import { tempDir } from '../helpers/temp-dir.js';
 
 /** A project dir with a profile of `type` (and a DuckDB path read from DUCKDB_PATH). */
@@ -33,6 +33,32 @@ test('the warehouse is read from the project\'s profile: DuckDB takes turns by i
   const bq = project('bigquery');
   assert.deepEqual(warehouseOf(bq, bq, {}), { adapter: 'bigquery', singleWriter: false, turn: null });
   assert.deepEqual(warehouseOf(tempDir('none'), undefined, {}).adapter, null, 'no profile: unknown, no turn');
+});
+
+test('the profile output a client other than dbt authenticates with is the target in use, every env_var rendered, nested ones too', () => {
+  const dir = tempDir('profile');
+  writeFileSync(join(dir, 'dbt_project.yml'), 'name: p\nprofile: p\n');
+  writeFileSync(join(dir, 'profiles.yml'), [
+    'p:', '  target: "{{ env_var(\'T\', \'dev\') }}"', '  outputs:',
+    '    dev:', '      type: bigquery', '      project: "{{ env_var(\'BQ_PROJECT\') }}"', '      location: EU',
+    '      keyfile_json:', '        client_email: "{{ env_var(\'SA\') }}"', '      scopes: ["{{ env_var(\'SCOPE\', \'s\') }}"]',
+    '    prod:', '      type: duckdb', '',
+  ].join('\n'));
+  assert.deepEqual(profileOutput(dir, dir, { BQ_PROJECT: 'proj', SA: 'sa@x' }),
+    { type: 'bigquery', project: 'proj', location: 'EU', keyfile_json: { client_email: 'sa@x' }, scopes: ['s'] });
+  assert.equal(profileOutput(dir, dir, { T: 'prod' }).type, 'duckdb');
+  assert.equal(profileOutput(tempDir('none'), undefined, {}), null, 'no profile: none');
+});
+
+test('a one-file extract is a BigQuery job: on another warehouse it is refused before anything runs', async () => {
+  const duck = project('duckdb');
+  const dir = tempDir('noextract');
+  const ran = join(dir, 'ran');
+  const c = createDbt({ version: 1, dbtBin: bin(dir, `touch ${ran}`), pythonBin: bin(dir, `touch ${ran}`), profilesDir: duck });
+  const r = await c.extractCsv(duck, 'm', 'gs://b/f.csv');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /not a BigQuery one/);
+  assert.throws(() => readFileSync(ran), 'neither dbt nor Python was started');
 });
 
 test('on a single-writer warehouse the client runs one process at a time; elsewhere they run together', async () => {

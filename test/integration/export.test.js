@@ -31,7 +31,7 @@ before(async () => {
 after(async () => { engine?.runner?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-const PER_EVENT = { action: 'start', name: 'Per event: Jan', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] };
+const PER_EVENT = { action: 'start', name: 'per_event_jan', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] };
 
 test('a build\'s table is written as one CSV file — its rows the table\'s, every value', opts, async (t) => {
   if (skip(t)) return;
@@ -41,11 +41,10 @@ test('a build\'s table is written as one CSV file — its rows the table\'s, eve
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.equal(out.files.length, 1);
   // the file is named after what the build was for, never its context's id
-  assert.equal(out.files[0].file, 'per_event_jan-0.csv');
+  assert.equal(out.files[0].file, 'per_event_jan.csv');
   const csv = parseCsv(readFileSync(fileURLToPath(out.url), 'utf8'));
-  const [header, ...rows] = csv;
-  assert.deepEqual(header, ['event_name', 'n', 'players']);
-  const fromFile = Object.fromEntries(rows.map(([e, n, p]) => [e, [Number(n), Number(p)]]));
+  assert.deepEqual(csv.columns.map((c) => c.name), ['event_name', 'n', 'players']);
+  const fromFile = Object.fromEntries(csv.rows.map((r) => [r.event_name, [Number(r.n), Number(r.players)]]));
   const fromTable = Object.fromEntries(build.rows.map((r) => [r.event_name, [Number(r.n), Number(r.players)]]));
   assert.deepEqual(fromFile, fromTable, 'every row of the table, every value');
   assert.equal(out.exported_rows, build.rows.length);

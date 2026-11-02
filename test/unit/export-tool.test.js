@@ -31,3 +31,26 @@ test('export takes a task id and a file name, nothing else', async () => {
   await assert.rejects(e.export_result({ task_id: 'aaaaaaaaaaaa', format: 'xlsx' }), /format/);
   await assert.rejects(e.export_result({ task_id: 'aaaaaaaaaaaa' }), (err) => err.field === 'task_id' && /unknown task_id/.test(err.message));
 });
+
+test('the export limit is a setting of at most 1000 MB, 500 by default — one BigQuery writes as one file', async () => {
+  const { setting } = await import('../../src/settings.js');
+  assert.equal(setting('EXPORT_MAX_MB', { env: {} }), 500);
+  assert.equal(setting('EXPORT_MAX_MB', { env: { EXPORT_MAX_MB: '200' } }), 200);
+  assert.equal(setting('EXPORT_MAX_MB', { env: { EXPORT_MAX_MB: '5000' } }), 500, 'past the one-file limit: the default');
+  assert.equal(setting('EXPORT_MAX_MB', { env: { EXPORT_MAX_MB: '0' } }), 500);
+});
+
+test('on BigQuery a table bigger than the limit is refused before anything is written, with its size and how to narrow it', async () => {
+  const e = engine({ exportUri: 'gs://bucket/exports', exportMaxBytes: 500e6 });
+  e.catalog.dialect = 'bigquery';
+  const asked = [];
+  e.runner = { execute: async () => assert.fail('no statement runs'), extractCsv: async (_dir, table, uri, maxBytes) => { asked.push({ table, uri, maxBytes }); return { ok: false, too_big: true, bytes: 812_345_678 }; } };
+  const out = await e._exportWork({ id: 'aaaaaaaaaaaa' }, { table: 'm' }, 'per_event', 'csv');
+  assert.equal(out.ok, false);
+  assert.equal(out.error.stage, 'validate');
+  assert.match(out.error.message, /813 MB, more than the 500 MB/);
+  assert.match(out.error.message, /narrow it/);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].maxBytes, 500e6, 'the limit is handed to the job, which reads the size first');
+  assert.match(asked[0].uri, /^gs:\/\/bucket\/exports\/\d{4}-\d\d-\d\d-[0-9a-f]{16}\/per_event\.csv$/);
+});

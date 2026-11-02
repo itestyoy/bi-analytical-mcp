@@ -152,9 +152,6 @@ const EXECUTE_MACRO_SQL = `{# Written by the analytics server (execute in its db
 {% endmacro %}
 `;
 
-/** The most BigQuery writes as ONE file: 1 GB of the table's logical data. */
-const ONE_FILE_BYTES = 1_000_000_000;
-
 export class DbtV1 {
   constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
     this.dbtBin = dbtBin;
@@ -348,12 +345,12 @@ export class DbtV1 {
 
   /**
    * THE MODEL'S TABLE AS ONE CSV FILE at `uri` (a gs:// object, no wildcard), by a BigQuery extract job
-   * (python/bq_extract.py on dbt-bigquery's own client, built from this project's profile) — for a table
-   * of up to ONE_FILE_BYTES of logical data, the most BigQuery writes as one file. A bigger one is not
-   * written: `too_big`, for the caller to write in parts. → { ok, file, rows, bytes } | { ok: false,
-   * too_big?, error?, stdout?, stderr? }
+   * (python/bq_extract.py on dbt-bigquery's own client, built from this project's profile) — only where
+   * the table's logical size (its own metadata, read first) is at most `maxBytes`, which may not pass the
+   * 1 GB BigQuery writes as one file. A bigger one is not written: `too_big`, with its size. → { ok,
+   * file, rows, bytes } | { ok: false, too_big?, bytes?, error?, stdout?, stderr? }
    */
-  async extractCsv(projectDir, modelName, uri) {
+  async extractCsv(projectDir, modelName, uri, maxBytes) {
     const script = assetPath('bqExtract');
     if (!script) return { ok: false, error: missingAssetMessage('bqExtract') };
     const python = this.metricflowPython;
@@ -363,7 +360,7 @@ export class DbtV1 {
     const rel = await this.execute(projectDir, modelName, []);
     if (!rel.ok) return rel;
     const { database, schema, identifier } = rel.relation;
-    const input = JSON.stringify({ output, table: `${database}.${schema}.${identifier}`, uri, max_bytes: ONE_FILE_BYTES });
+    const input = JSON.stringify({ output, table: `${database}.${schema}.${identifier}`, uri, max_bytes: maxBytes });
     const r = await runWithInput(python, [script], input, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
     try { return JSON.parse(r.stdout); } catch { return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, ...(r.cancelled ? { cancelled: true } : {}) }; }
   }

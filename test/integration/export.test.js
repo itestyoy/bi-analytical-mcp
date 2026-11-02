@@ -39,16 +39,14 @@ test('a build\'s table is written as one CSV file — its rows the table\'s, eve
   assert.equal(build.status, 'done', JSON.stringify(build));
   const out = await engine.export_result({ task_id: build.task_id });
   assert.equal(out.ok, true, JSON.stringify(out));
-  assert.equal(out.files.length, 1);
   // the file is named after what the build was for, never its context's id
-  assert.equal(out.files[0].file, 'per_event_jan.csv');
+  assert.equal(out.file, 'per_event_jan.csv');
   const csv = parseCsv(readFileSync(fileURLToPath(out.url), 'utf8'));
   assert.deepEqual(csv.columns.map((c) => c.name), ['event_name', 'n', 'players']);
   const fromFile = Object.fromEntries(csv.rows.map((r) => [r.event_name, [Number(r.n), Number(r.players)]]));
   const fromTable = Object.fromEntries(build.rows.map((r) => [r.event_name, [Number(r.n), Number(r.players)]]));
   assert.deepEqual(fromFile, fromTable, 'every row of the table, every value');
   assert.equal(out.exported_rows, build.rows.length);
-  assert.equal(out.files[0].rows, build.rows.length);
 });
 
 test('a result that is not stored as a table is refused, saying what holds one', opts, async (t) => {

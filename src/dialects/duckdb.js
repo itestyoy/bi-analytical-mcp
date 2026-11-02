@@ -4,6 +4,7 @@
 // (a value that does not parse, a malformed JSON row), this dialect answers as BigQuery does: NULL for
 // that row, a result for the rest — never a failed statement.
 
+import { pathToFileURL } from 'node:url';
 import { Dialect, isNumericType, isTimeType } from './base.js';
 import { isBooleanType } from '../catalog/column-types.js';
 
@@ -38,6 +39,23 @@ const keyPath = (key) => `'$."${key}"'`;
 
 
 export class DuckDBDialect extends Dialect {
+  /** COPY writes the table as ONE file, `<name>.csv`, in a folder on this machine; read_csv counts its rows. */
+  exportCsv({ folder, name }) {
+    const file = this.sqlLiteral(`${folder}/${name}.csv`);
+    return {
+      statements: [
+        `COPY (SELECT * FROM __MCP_RELATION__) TO ${file} (HEADER, DELIMITER ',')`,
+        `SELECT filename AS file, count(*) AS row_count FROM read_csv(${file}, header = true, all_varchar = true, filename = true) GROUP BY 1 ORDER BY 1`,
+      ],
+      cleanup: [],
+    };
+  }
+
+  /** A file on this machine as its file:// address. */
+  downloadLink(file) {
+    return pathToFileURL(String(file)).href;
+  }
+
   get name() { return 'duckdb'; }
 
   /** A pipeline is lowered to chained CTEs: plain SQL any parser reads. */

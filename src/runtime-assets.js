@@ -56,6 +56,11 @@ export const RUNTIME_ASSETS = {
     repoPath: 'src/apps/retentioneering-view/dist/retentioneering-view.html',
     why: 'the MCP Apps view of a path analysis (ui://betti/retentioneering-view.html) — the BUILT single file (npm run build:app); served only while the retentioneering feature is on',
   },
+  bqExtract: {
+    path: join(ROOT, 'python', 'bq_extract.py'),
+    repoPath: 'python/bq_extract.py',
+    why: 'the export tool\'s one-file write on BigQuery — an extract job, on dbt-bigquery\'s own client, that writes a result of up to 1 GB as ONE CSV file; without it every export on BigQuery is written in parts by EXPORT DATA',
+  },
   mfServer: {
     path: join(ROOT, 'python', 'mf_server.py'),
     repoPath: 'python/mf_server.py',

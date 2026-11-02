@@ -4,8 +4,8 @@
 SQL's EXPORT DATA takes only a wildcard URI and writes as many files as BigQuery decides, each named
 with a number; an extract job (what `bq extract` runs) to a URI without a wildcard writes exactly one
 file under the name asked for — for a table of up to 1 GB of logical data, the limit BigQuery puts on
-one file. A bigger table is not extracted here: the answer says so, and the server writes it in parts
-with EXPORT DATA instead.
+one file. The table's size is read first, off its own metadata: one bigger than `max_bytes` (the
+deployment's export limit, at most that 1 GB) is not extracted, and the answer says how big it is.
 
 The client is dbt-bigquery's own, built from the dbt profile's output (env_var already rendered by the
 server), so it authenticates exactly as dbt does there — oauth, a key file, a key in the profile,

@@ -81,7 +81,8 @@ export const SETTING_GROUPS = [
     S('MCP_RESULT_CARDS', 'flag', 'on: offer display_model_result and drill_result — a model result drawn as a card. Off, neither exists;\nthe A/B test card of experiment is drawn either way.', { default: false, shown: 'on' }),
   ]],
   ['export (a result as a CSV file)', [
-    S('EXPORT_URI', 'string', 'Where export writes a result\'s CSV: gs://<bucket>/<prefix> on BigQuery (a link to each file opens after Google\nsign-in, for an account that may read the bucket), a folder on this machine on DuckDB. Empty: no export tool.', { shown: 'gs://my-bucket/betti-exports' }),
+    S('EXPORT_URI', 'string', 'Where export_result writes a result\'s file: gs://<bucket>/<prefix> on BigQuery (its link opens after Google\nsign-in, for an account that may read the bucket), a folder on this machine on DuckDB. Empty: no export tool.', { shown: 'gs://my-bucket/betti-exports' }),
+    S('EXPORT_MAX_MB', 'int', 'The largest result export_result writes, in MB of the table\'s logical size as BigQuery counts it: a bigger one is refused,\nsaying to narrow it. At most 1000 — the most BigQuery writes as one file. (A local DuckDB export is not measured.)', { default: 500, min: 1, max: 1000 }),
   ]],
   ['path analysis (retentioneering)', [
     S('MCP_RETENTIONEERING', 'flag', 'on: switch the feature on. Off, none of it exists.', { default: false, shown: 'on' }),
@@ -111,8 +112,8 @@ export function setting(name, { env = process.env, fallback } = {}) {
   const dflt = fallback !== undefined ? fallback : row.default;
   switch (row.kind) {
     case 'flag': return envFlag(name, dflt, env);
-    case 'number': return envNumber(name, dflt, { min: row.min ?? 0 }, env);
-    case 'int': return envInt(name, dflt, { min: row.min ?? 0 }, env);
+    case 'number': return envNumber(name, dflt, { min: row.min ?? 0, max: row.max ?? Infinity }, env);
+    case 'int': return envInt(name, dflt, { min: row.min ?? 0, max: row.max ?? Infinity }, env);
     case 'list': { const v = envString(name, undefined, env); return v === undefined ? dflt : String(v).split(',').map((x) => x.trim()).filter(Boolean); }
     case 'string': case 'raw': return envString(name, dflt, env);
     default: throw new Error(`'${name}' is read by ${row.kind === 'compose' ? 'docker compose' : 'the dbt profile'}, not by the server`);

@@ -751,22 +751,23 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   for MCP_SESSION_IDLE_SECONDS is closed.
 
 - A RESULT LEAVES AS A FILE THE WAREHOUSE WRITES, NEVER THROUGH THE CONVERSATION (src/engine/export.js):
-  `export({ task_id, name? })` — offered only where the deployment names an export location
+  `export_result({ task_id, format?, name? })` — `format` an enum, `csv` its one value and default
+  (`EXPORT_FORMATS`, src/schema.js) — offered only where the deployment names an export location
   (`EXPORT_URI`: gs://<bucket>/<prefix> on BigQuery, a folder of the machine on DuckDB; unset, no tool,
   no schema — `exportFile` on its definition, as `resultCard` gates the cards) — writes the stored table
   of a finished task (`_storedTaskTable`, the same check from_task makes: a pipeline build, or a metric
-  query run with materialize: true) as CSV with a header, by the warehouse itself — ONE file,
-  `<name>.csv`, wherever the warehouse can write one: on BigQuery up to 1 GB by an extract job (the dbt
-  client's `extractCsv` — python/bq_extract.py on dbt-bigquery's own client, authenticated from the
-  project's profile output, `profileOutput`; the dialect's `oneFileJob`), a bigger result in parts by
-  `exportCsv` (EXPORT DATA, then the files listed with their rows through an external table dropped
-  after); COPY on DuckDB — the statements run through the dbt client's `execute` (statements in turn,
-  the last one's rows and the model's relation, by a macro the client writes into the project). It is a
-  task of the pipeline side (read with query_model),
-  under a folder of a random name — a link names neither the task nor the context — and answers each
+  query run with materialize: true) — as ONE CSV file with a header, `<name>.csv`, by the warehouse
+  itself: on BigQuery by an extract job (the dbt client's `extractCsv` — python/bq_extract.py on
+  dbt-bigquery's own client, authenticated from the project's profile output, `profileOutput`; the
+  dialect's `oneFileJob`; SQL's EXPORT DATA names every file with a number), and only up to
+  `EXPORT_MAX_MB` (500 by default, at most the 1000 BigQuery writes as one file) of the table's logical
+  size, read off its metadata before anything is written — a bigger result is refused, saying to narrow
+  it, never split; COPY on DuckDB (`exportCsv`, not measured: DuckDB keeps no table size), run through
+  the dbt client's `execute` (statements in turn, the last one's rows and the model's relation, by a
+  macro the client writes into the project). It is a task of the pipeline side (read with query_model),
+  under a folder of a random name — a link names neither the task nor the context — and answers the
   file's link: `https://storage.cloud.google.com/…`, which opens only after Google sign-in for an
-  account that may read the bucket, so the link grants nothing and is shown as it is. A result written
-  in parts lists each file, with its rows. Data Access audit logs on the bucket break
+  account that may read the bucket, so the link grants nothing and is shown as it is. Data Access audit logs on the bucket break
   that sign-in download (403): leave them off there.
 - RESEARCH GUIDES ARE METHOD, NOT DATA (`src/research-guides.js`): how to run an investigation
   (sequence, checks, report) and what matters in product, monetization and UA — served by

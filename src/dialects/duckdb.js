@@ -39,16 +39,13 @@ const keyPath = (key) => `'$."${key}"'`;
 
 
 export class DuckDBDialect extends Dialect {
-  /** COPY writes the table as ONE file, `<name>.csv`, in a folder on this machine; read_csv counts its rows. */
-  exportCsv({ folder, name }) {
-    const file = this.sqlLiteral(`${folder}/${name}.csv`);
-    return {
-      statements: [
-        `COPY (SELECT * FROM __MCP_RELATION__) TO ${file} (HEADER, DELIMITER ',')`,
-        `SELECT filename AS file, count(*) AS row_count FROM read_csv(${file}, header = true, all_varchar = true, filename = true) GROUP BY 1 ORDER BY 1`,
-      ],
-      cleanup: [],
-    };
+  /** COPY writes the table as ONE file at `file`, then read_csv counts its rows. */
+  exportCsv({ file }) {
+    const at = this.sqlLiteral(file);
+    return [
+      `COPY (SELECT * FROM __MCP_RELATION__) TO ${at} (HEADER, DELIMITER ',')`,
+      `SELECT count(*) AS row_count FROM read_csv(${at}, header = true, all_varchar = true)`,
+    ];
   }
 
   /** A file on this machine as its file:// address. */

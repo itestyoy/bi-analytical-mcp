@@ -18,11 +18,11 @@ export function envFlag(name, fallback, env = process.env) {
   return ON.test(v) ? true : OFF.test(v) ? false : fallback;
 }
 
-export function envNumber(name, fallback, { min = 0 } = {}, env = process.env) {
+export function envNumber(name, fallback, { min = 0, max = Infinity } = {}, env = process.env) {
   const raw = env[name];
   if (raw == null || String(raw).trim() === '') return fallback;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= min ? n : fallback;
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
 }
 
 export function envInt(name, fallback, opts = {}, env = process.env) {

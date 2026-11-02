@@ -88,7 +88,7 @@ export const TASK_KINDS = {
 const DESCRIBED_TASKS = 5;
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false, exportUri = null }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false, exportUri = null, exportMaxBytes = 500e6 }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -162,6 +162,7 @@ export class Engine {
     this.resultCards = !!resultCards;
     // where export writes a result's files (EXPORT_URI); without one there is no export tool
     this.exportUri = exportUri || null;
+    this.exportMaxBytes = exportMaxBytes; // the largest table export_result writes (EXPORT_MAX_MB)
     const offered = (def) => (this.resultCards || !def.resultCard) && (this.exportUri || !def.exportFile);
     for (const def of CORE_TOOLS) if (!offered(def)) delete this.schemas[def.name];
     this.tools = toolRegistry([...CORE_TOOLS.filter(offered), ...featureToolDefinitions(features)]);

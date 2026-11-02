@@ -11,8 +11,8 @@
 //   execute(projectDir, model, statements) → { ok, columns, rows }  (statements run in turn — an export, a DDL —
 //                                           the last one's rows, and the model's relation; the server's own macro,
 //                                           written into the project)
-//   extractCsv(projectDir, model, uri)    → { ok, file, rows } | { ok: false, too_big? }  (BigQuery: the model's
-//                                           table as ONE CSV file, by an extract job — up to 1 GB)
+//   extractCsv(projectDir, model, uri, maxBytes) → { ok, file, rows } | { ok: false, too_big?, bytes? }  (BigQuery:
+//                                           the model's table as ONE CSV file, by an extract job — up to maxBytes)
 //   query(projectDir, opts)               → { ok, command, columns, rows } | explain: { ok, sql, plan? }
 //                                           (`mf query`, run by MetricFlow kept warm — below)
 //   validate(projectDir)                  → { ok, stdout, stderr }  (`mf validate-configs`, a process of its own)

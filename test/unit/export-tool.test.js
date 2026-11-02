@@ -15,19 +15,19 @@ const engine = (extra = {}) => new Engine({ catalog: loadCatalog(CATALOG), conte
 
 test('export is offered only where an export location is named — schema and tool alike', () => {
   const off = engine();
-  assert.equal(off.tools.has('export'), false);
-  assert.equal(off.schemas.export, undefined);
+  assert.equal(off.tools.has('export_result'), false);
+  assert.equal(off.schemas.export_result, undefined);
   const on = engine({ exportUri: tempDir('export-to') });
-  assert.equal(on.tools.has('export'), true);
-  assert.deepEqual(wireSchema(on.schemas.export).required, ['request']);
+  assert.equal(on.tools.has('export_result'), true);
+  assert.deepEqual(wireSchema(on.schemas.export_result).required, ['request']);
   // a task it starts is read back by query_model, as every pipeline task is
-  assert.equal(on.tasks.sideOf('export'), 'pipeline');
+  assert.equal(on.tasks.sideOf('export_result'), 'pipeline');
 });
 
 test('export takes a task id and a file name, nothing else', async () => {
   const e = engine({ exportUri: tempDir('export-to') });
-  await assert.rejects(e.export({}), /task_id/);
-  await assert.rejects(e.export({ task_id: 'aaaaaaaaaaaa', name: '../escape' }), /name/);
-  await assert.rejects(e.export({ task_id: 'aaaaaaaaaaaa', format: 'xlsx' }), /format/);
-  await assert.rejects(e.export({ task_id: 'aaaaaaaaaaaa' }), (err) => err.field === 'task_id' && /unknown task_id/.test(err.message));
+  await assert.rejects(e.export_result({}), /task_id/);
+  await assert.rejects(e.export_result({ task_id: 'aaaaaaaaaaaa', name: '../escape' }), /name/);
+  await assert.rejects(e.export_result({ task_id: 'aaaaaaaaaaaa', format: 'xlsx' }), /format/);
+  await assert.rejects(e.export_result({ task_id: 'aaaaaaaaaaaa' }), (err) => err.field === 'task_id' && /unknown task_id/.test(err.message));
 });

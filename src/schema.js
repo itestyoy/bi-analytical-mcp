@@ -24,6 +24,9 @@ import { memorySchema } from './schema/memory.js';
 import { analyzeContract, checkSplitContract, planContract, experimentSchema } from './schema/experiment.js';
 export { MAX_WAIT_SECONDS, transportSchema };
 
+/** The formats export_result writes, the first the default (src/engine/export.js writes each). */
+export const EXPORT_FORMATS = ['csv'];
+
 /**
  * THE INPUT CONTRACTS OF THE ENGINE'S OWN METHODS — not tools. A tool hands its input to one of these
  * methods, and the method holds it to the exact contract named `<tool>.<mode>` below — experiment's
@@ -261,12 +264,13 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
         limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS },
       },
     },
-    export: {
+    export_result: {
       type: 'object', additionalProperties: false, required: ['task_id'],
-      description: 'Write a finished result\'s table as CSV files; the answer links each file.',
+      description: 'Write a finished result\'s table as a file; the answer links it.',
       properties: {
         task_id: { type: 'string', pattern: TASK_ID, description: 'A pipeline build, or a metric query run with materialize: true.' },
-        name: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$', description: 'The file name, without .csv. Default: the build\'s name.' },
+        format: { enum: EXPORT_FORMATS, default: EXPORT_FORMATS[0], description: 'The file\'s format: csv (with a header row) — the default.' },
+        name: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$', description: 'The file name, without its extension. Default: the build\'s name.' },
       },
     },
     semantic_index: semanticIndexSchema(catalog, { project, places: TOOL_PLACES.semantic_index.ref }),

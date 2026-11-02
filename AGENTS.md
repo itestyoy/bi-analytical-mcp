@@ -751,11 +751,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   for MCP_SESSION_IDLE_SECONDS is closed.
 
 - A RESULT LEAVES AS A FILE THE WAREHOUSE WRITES, NEVER THROUGH THE CONVERSATION (src/engine/export.js):
-  `export({ task_id, name? })` — offered only where the deployment names an export location
+  `export_result({ task_id, format?, name? })` — `format` an enum, `csv` its one value and default
+  (`EXPORT_FORMATS`, src/schema.js) — offered only where the deployment names an export location
   (`EXPORT_URI`: gs://<bucket>/<prefix> on BigQuery, a folder of the machine on DuckDB; unset, no tool,
   no schema — `exportFile` on its definition, as `resultCard` gates the cards) — writes the stored table
   of a finished task (`_storedTaskTable`, the same check from_task makes: a pipeline build, or a metric
-  query run with materialize: true) as CSV with a header, by the warehouse itself — ONE file,
+  query run with materialize: true) — as CSV with a header, by the warehouse itself — ONE file,
   `<name>.csv`, wherever the warehouse can write one: on BigQuery up to 1 GB by an extract job (the dbt
   client's `extractCsv` — python/bq_extract.py on dbt-bigquery's own client, authenticated from the
   project's profile output, `profileOutput`; the dialect's `oneFileJob`), a bigger result in parts by

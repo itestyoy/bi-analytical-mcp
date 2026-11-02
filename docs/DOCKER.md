@@ -150,8 +150,9 @@ not per task. DuckDB has no table expiry, so nothing is set there.
 
 ## Export: a result as a CSV file (off unless `EXPORT_URI` is set)
 
-`export({ request: { task_id } })` writes the stored table of a finished task — a pipeline build, or a
-metric query run with `materialize: true` — as CSV with a header row, and answers a link to each file
+`export_result({ request: { task_id, format? } })` writes the stored table of a finished task — a
+pipeline build, or a metric query run with `materialize: true` — as a file in `format` (`csv`, the one
+format today and the default: with a header row), and answers a link to each file
 (read it with `query_model({ request: { task_ids } })`). The warehouse writes the files itself, so the
 rows never pass through the conversation.
 

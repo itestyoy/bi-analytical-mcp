@@ -16,6 +16,7 @@ import { basename, resolve } from 'node:path';
 import { ToolError } from '../validate.js';
 import { formatDbtError } from '../dbt/index.js';
 import { getDialect } from '../dialects/index.js';
+import { EXPORT_FORMATS } from '../schema.js';
 
 /** The relation a listing of the written files may be created under, removed after. */
 const SCRATCH_PREFIX = 'mcp_export_';
@@ -24,14 +25,15 @@ const SCRATCH_PREFIX = 'mcp_export_';
 const fileName = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^[_-]+|[_-]+$/g, '').slice(0, 64) || 'result';
 
 export const exportMethods = {
-  async export(input) {
-    this._validate('export', input);
+  async export_result(input) {
+    this._validate('export_result', input);
+    const format = input.format || EXPORT_FORMATS[0];
     if (!this.exportUri) throw new ToolError('export is not configured on this server (EXPORT_URI)', { stage: 'validate' });
     const job = this._storedTaskTable(input.task_id, 'task_id', { use: 'export', starts: 'export', alternative: 'build the rows you need with build_model, then export that build' });
     if (!this.runner?.execute) throw new ToolError('no query engine configured', { stage: 'query' });
     const ctx = this.ctxs.get(job.contextId);
     const name = fileName(input.name || ctx.state.draft?.name || (ctx.state.tasks || []).at(-1));
-    const id = this._startTask(ctx, 'export', (taskId) => this._exportWork(ctx, job, name, taskId), { input });
+    const id = this._startTask(ctx, 'export_result', (taskId) => this._exportWork(ctx, job, name, format, taskId), { input });
     return this.tasks.started(id);
   },
 
@@ -39,7 +41,7 @@ export const exportMethods = {
    * Write the table under a folder of its own — a random name, so a link says nothing of the work it
    * came from — list the files written with their rows, and answer a link to each.
    */
-  async _exportWork(ctx, job, name, taskId) {
+  async _exportWork(ctx, job, name, format, taskId) {
     const dialect = getDialect(this.catalog.dialect);
     const dir = this.ctxs.dir(ctx.id);
     const root = /^[a-z][a-z0-9+.-]*:\/\//i.test(this.exportUri) ? this.exportUri.replace(/\/+$/, '') : resolve(this.exportUri);
@@ -69,7 +71,7 @@ export const exportMethods = {
     const rows = files.reduce((n, f) => n + f.rows, 0);
     const cloud = folder.startsWith('gs://');
     return {
-      ok: true, status: 'done', format: 'csv', exported_rows: rows, files,
+      ok: true, status: 'done', format, exported_rows: rows, files,
       ...(files.length === 1 ? { url: files[0].url } : {}),
       access: cloud
         ? 'Each link opens after Google sign-in, for an account that may read the bucket; the link itself grants nothing, so it can be shared as it is.'

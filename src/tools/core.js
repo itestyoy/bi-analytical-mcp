@@ -83,14 +83,14 @@ export const CORE_TOOLS = [
     run: (engine, input) => engine.drill_result(input),
   }),
   defineTool({
-    name: 'export',
-    title: 'Export Result as CSV',
-    description: 'Write a finished result\'s table as a CSV file and get a link to it (a result too big for one file comes as several, each linked) — for a person who wants the rows in a spreadsheet, without the rows passing through the conversation. It takes a task whose result is stored as a table: a pipeline build, or a metric query run with materialize: true (run the query again with it if it was not). The warehouse writes the files to this deployment\'s export location; read the answer with query_model({ request: { task_ids } }). On Cloud Storage a link opens after Google sign-in, for an account that may read the bucket — the link grants nothing itself, so give it to the person as it is; there is no need to read the file back.',
+    name: 'export_result',
+    title: 'Export Result',
+    description: 'Write a finished result\'s table as a file — CSV, the one format today and the default — and get a link to it (a result too big for one file comes as several, each linked) — for a person who wants the rows in a spreadsheet, without the rows passing through the conversation. It takes a task whose result is stored as a table: a pipeline build, or a metric query run with materialize: true (run the query again with it if it was not). The warehouse writes the files to this deployment\'s export location; read the answer with query_model({ request: { task_ids } }). On Cloud Storage a link opens after Google sign-in, for an account that may read the bucket — the link grants nothing itself, so give it to the person as it is; there is no need to read the file back.',
     // writes new files each time; removes nothing
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     side: 'pipeline',
     exportFile: true,
-    run: (engine, input) => engine.export(input),
+    run: (engine, input) => engine.export_result(input),
   }),
   defineTool({
     name: 'context',

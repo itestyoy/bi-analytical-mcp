@@ -32,8 +32,32 @@ export const COMPLEX_SAMPLE_MAXLEN = 300;
  * fire-and-forget at start() and then on an unref'd interval. Per-property errors are swallowed
  * so one bad property never aborts a run or crashes the server.
  */
+/** The dbt selector for the catalog's source models (space-separated union), or null — `select` when given. */
+export function sourceModelSelect(catalog, select = null) {
+  if (select) return select;
+  const names = [...new Set(catalog.modelKeys().map((k) => catalog.getModel(k).dbt_model).filter(Boolean))];
+  return names.length ? names.join(' ') : null;
+}
+
+/**
+ * REBUILD THE CATALOG'S SOURCE MODELS (`dbt run`) in the project at `dir`. The server does it at START,
+ * BEFORE the catalog is grounded to the warehouse (src/server.js) — a column a new schema.yml declares
+ * exists in the table only once its model is rebuilt, and grounding drops what the table lacks — and
+ * every sync of the value index does it again before indexing. Never throws: → { ok, ms, select?, reason? }.
+ */
+export async function buildSourceModels({ runner, catalog, dir, select = null }) {
+  const sel = sourceModelSelect(catalog, select);
+  if (!sel || !runner?.run) return { ok: true, ms: 0, select: null };
+  const t = Date.now();
+  const r = await runner.run(dir, sel);
+  const ms = Date.now() - t;
+  if (r.ok) return { ok: true, ms, select: sel };
+  const reason = [r.error, r.stderr, r.stdout].filter((s) => s && String(s).trim()).join('\n').trim() || 'unknown';
+  return { ok: false, ms, select: sel, reason };
+}
+
 export class BackgroundIndexer {
-  constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, logger } = {}) {
+  constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, modelsBuilt = false, logger } = {}) {
     this.catalog = catalog;
     this.runner = runner;
     this.index = index;
@@ -62,6 +86,9 @@ export class BackgroundIndexer {
     // overrides the dbt selector (default = all catalog source models). Off → index as-is.
     this.runModels = !!runModels;
     this.runModelsSelect = runModelsSelect || null;
+    // the server rebuilt them at start, before grounding the catalog (buildSourceModels): the first
+    // sync, which starts right after, does not rebuild them again
+    this._modelsBuilt = !!modelsBuilt;
     // Properties indexed together per combined scan: cardinality + coverage are computed for
     // a whole batch in ONE query each (instead of one scan per property). A batch that errors
     // falls back to per-property, so a single bad column never loses the rest. >=1.
@@ -539,28 +566,24 @@ export class BackgroundIndexer {
     return { r: merged, watermark: Math.max(prior.dataWatermark, delta.maxTime) };
   }
 
-  /** The dbt selector for the catalog's source models (space-separated union), or null. */
-  _sourceModelSelect() {
-    if (this.runModelsSelect) return this.runModelsSelect;
-    const names = [...new Set(this.catalog.modelKeys().map((k) => this.catalog.getModel(k).dbt_model).filter(Boolean))];
-    return names.length ? names.join(' ') : null;
-  }
-
   /** Rebuild the catalog's source models (dbt run) BEFORE indexing, so the index reflects a
    *  freshly computed table. Best-effort: a failed build is logged + noted, and indexing still
-   *  proceeds over whatever data currently exists. No-op unless runModels is on. */
+   *  proceeds over whatever data currently exists. No-op unless runModels is on, and on the first
+   *  sync after the server rebuilt them at start. */
   async _dbtRunModels(runId) {
     if (!this.runModels || !this.runner?.run) return;
-    const select = this._sourceModelSelect();
+    if (this._modelsBuilt) {
+      this._modelsBuilt = false;
+      this.logger?.(`sync #${runId} source models were rebuilt at start — indexing them as built`);
+      return;
+    }
+    const select = sourceModelSelect(this.catalog, this.runModelsSelect);
     if (!select) return;
     this.logger?.(`sync #${runId} rebuilding source models before indexing: dbt run --select ${select}`);
-    const t = Date.now();
-    const r = await this.runner.run(this.baseProjectDir, select);
-    const ms = Date.now() - t;
-    if (r.ok) { this.logger?.(`sync #${runId} dbt run ok (${ms}ms) — indexing the rebuilt models`); return; }
-    const reason = [r.error, r.stderr, r.stdout].filter((s) => s && String(s).trim()).join('\n').trim() || 'unknown';
-    this.logger?.(`sync #${runId} dbt run FAILED (${ms}ms) — indexing existing (possibly stale) data: ${reason}`);
-    this.index.recordRunNote?.(runId, `dbt run of source models failed before indexing: ${reason}`);
+    const r = await buildSourceModels({ runner: this.runner, catalog: this.catalog, dir: this.baseProjectDir, select });
+    if (r.ok) { this.logger?.(`sync #${runId} dbt run ok (${r.ms}ms) — indexing the rebuilt models`); return; }
+    this.logger?.(`sync #${runId} dbt run FAILED (${r.ms}ms) — indexing existing (possibly stale) data: ${r.reason}`);
+    this.index.recordRunNote?.(runId, `dbt run of source models failed before indexing: ${r.reason}`);
   }
 
   /** One resilient pass over the indexable properties/attributes. Skips if already running. */

@@ -23,7 +23,7 @@ import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { resolveFeatures } from './features.js';
 import { loadProjectSemantics } from './project-semantics.js';
-import { BackgroundIndexer } from './value-indexer.js';
+import { BackgroundIndexer, buildSourceModels } from './value-indexer.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
@@ -118,6 +118,20 @@ export async function makeEngine(opts = {}) {
   // MCP_DB_RESET=1/true. (Persistence still needs the DB on a durable volume + Node >= 22.5.)
   const resetDb = S.MCP_DB_RESET;
   if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on — clearing the store on startup (state will NOT survive this restart)`);
+  // REBUILD THE SOURCE MODELS BEFORE GROUNDING (MCP_INDEX_DBT_RUN, the setting the value index's
+  // rebuild reads): a column a new schema.yml declares exists in the table only once its model is
+  // rebuilt, and grounding (below) drops what the table lacks — the catalog is grounded once, here,
+  // so a deploy that adds a column would otherwise lose it until the next restart. The first sync of
+  // the value index then indexes the models as built here (modelsBuilt). A failed build is logged and
+  // the catalog grounded on the tables as they are.
+  const runModels = S.MCP_INDEX_DBT_RUN;
+  const runModelsSelect = S.MCP_INDEX_DBT_RUN_SELECT || null;
+  let modelsBuilt = false;
+  if (runner && baseProjectDir && runModels) {
+    const r = await buildSourceModels({ runner, catalog, dir: ctxs.warehouseDir(), select: runModelsSelect });
+    modelsBuilt = r.ok && !!r.select;
+    if (r.select) console.error(`[mcp] ${new Date().toISOString()} source models ${r.ok ? `rebuilt (${r.ms}ms) before grounding the catalog` : `NOT rebuilt (${r.ms}ms) — grounding the catalog on the tables as they are: ${r.reason}`}: dbt run --select ${r.select}`);
+  }
   // GROUND the catalog to the physical warehouse BEFORE building the engine (its tool
   // schemas + value index derive from the catalog): a column the dbt schema declares but
   // the physical table lacks is pruned, so it never appears in any tool. Best-effort and
@@ -178,6 +192,8 @@ export async function makeEngine(opts = {}) {
   } else if (dbPath) {
     console.error(`[mcp] ${new Date().toISOString()} store persisted at ${dbPath} (survives restart when the path is on a durable volume; MCP_DB_RESET is ${resetDb ? 'ON — wiped this start' : 'off'})`);
   }
+  // the source models were rebuilt above, before grounding: the value index's first sync indexes them as built
+  engine.sourceModelsBuiltAtStart = modelsBuilt;
   return engine;
 }
 
@@ -354,9 +370,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // indexing, so the index + data_freshness reflect a freshly computed table (not the last
   // externally-built one). Disable with MCP_INDEX_DBT_RUN=false if an external scheduler
   // (Airflow/dbt Cloud) already builds the models. MCP_INDEX_DBT_RUN_SELECT overrides the selector.
+  // makeEngine rebuilt them at start, before grounding the catalog: the first sync does not again.
   const runModels = S.MCP_INDEX_DBT_RUN;
   const runModelsSelect = S.MCP_INDEX_DBT_RUN_SELECT || null;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.warehouseDir(), intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  const modelsBuilt = !!engine.sourceModelsBuiltAtStart;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.warehouseDir(), intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, modelsBuilt, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the runner and the SQLite handle.

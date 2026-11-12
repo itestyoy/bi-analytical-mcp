@@ -69,7 +69,7 @@ export const SETTING_GROUPS = [
     S('MCP_INDEX_MERGE', 'flag', 'Re-scan only rows newer than what is indexed and add them up. Turned off by MCP_INDEX_WINDOW_DAYS.', { default: true }),
     S('MCP_INDEX_APPROX_DISTINCT', 'flag', 'Approximate distinct counts.', { default: true }),
     S('MCP_INDEX_HIGH_CARD_PCT', 'number', 'A field whose distinct values are at least this % of its rows is ID-like: its values are not kept.\n0: no such check.', { default: 90 }),
-    S('MCP_INDEX_DBT_RUN', 'flag', '`dbt run` the source models before indexing them. false when an external scheduler builds them.', { default: true }),
+    S('MCP_INDEX_DBT_RUN', 'flag', '`dbt run` the source models at start, before the catalog is checked against the tables, and before each sync of\nthe value index. false when an external scheduler builds them.', { default: true }),
     S('MCP_INDEX_DBT_RUN_SELECT', 'string', 'The selector of that dbt run. Default: every catalog source model.', { shown: '' }),
   ]],
   ['python pipeline stage', [

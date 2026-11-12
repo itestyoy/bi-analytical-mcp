@@ -142,6 +142,21 @@ test('runModels rebuilds the source models (dbt run) before indexing', async () 
   index.close();
 });
 
+// The server rebuilds the source models at start, before grounding the catalog (src/server.js): the
+// first sync, right after, indexes them as built; every later sync rebuilds them again.
+test('runModels after a rebuild at start: the first sync does not rebuild again, the next one does', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  let runs = 0;
+  const runner = { run: async () => { runs++; return { ok: true, stdout: '', stderr: '' }; }, show: async () => ({ ok: true, rows: [] }) };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, runModels: true, modelsBuilt: true, logger: () => {} });
+  await bi.refresh();
+  assert.equal(runs, 0, 'built at start: not again');
+  await bi.refresh();
+  assert.equal(runs, 1, 'the next sync rebuilds');
+  index.close();
+});
+
 // A failed dbt run does not stop indexing — it logs + notes and indexes existing data.
 test('runModels: a failed dbt run still indexes existing data (best-effort)', async () => {
   const catalog = loadCatalog(CATALOG, {});

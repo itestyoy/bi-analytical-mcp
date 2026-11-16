@@ -68,19 +68,19 @@ test('a batch started right after the declaration waits for its parse, runs ever
   const started = await engine.raw.query_model({
     context_id: created.context_id,
     queries: [
-      { steps: [{ stage: 'metrics', metrics: ['revenue'] }] },
-      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] },
-      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }], materialize: true },
-      { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }, { stage: 'metrics', metrics: ['revenue'] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }], materialize: true },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }, { stage: 'metrics', metrics: ['revenue'] }] },
       // steps after the metrics step, over its result: the countries whose revenue reaches 25 (a having), the largest first
-      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 25 }] }] }, largestFirst] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 25 }] }] }, largestFirst] },
       // grouped by an entity the measure source carries: one row per value of its key there
-      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ entity: 'user' }] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ entity: 'user' }] }] },
       // steps on both sides of the metrics step: a where before it (the iOS players' purchases — the rows
       // the metric folds), a where after it on the result (a having) and an order_by
-      { steps: [iosOnly, { stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 20 }] }] }, largestFirst] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [iosOnly, { stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 20 }] }] }, largestFirst] },
       // the metrics step and only an order_by after it: MetricFlow orders it itself (mf query)
-      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, largestFirst] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, largestFirst] },
     ],
   });
   assert.deepEqual(Object.keys(started).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
@@ -135,7 +135,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
 
 test('a batch of reads over a built pipeline model, each in steps of the pipeline\'s own stages: count, non-NULL count, sums, a where on a measure, a count and a sum over a case, and a share and an any over a case with an else, read back together', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: 'priced', source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'priced', source: 'events' });
   // a numeric property, read as the catalog declares it (no cast)
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } }] });
   const mat = await engine.build_model({ action: 'materialize', context_id: s.context_id });
@@ -147,21 +147,21 @@ test('a batch of reads over a built pipeline model, each in steps of the pipelin
   const started = await engine.raw.query_model({
     context_id: s.context_id,
     queries: [
-      { steps: [{ stage: 'aggregate', measures: [{ name: 'rows', expr: { fn: 'count' } }] }] },
-      { steps: [{ stage: 'aggregate', measures: [{ name: 'priced', expr: { fn: 'count', args: [{ column: 'price' }] } }] }] },
-      { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] }] },
-      { steps: [priced, amountByEvent, { stage: 'order_by', keys: [{ key: 'event_name' }] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'aggregate', measures: [{ name: 'rows', expr: { fn: 'count' } }] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'aggregate', measures: [{ name: 'priced', expr: { fn: 'count', args: [{ column: 'price' }] } }] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [priced, amountByEvent, { stage: 'order_by', keys: [{ key: 'event_name' }] }] },
       // where → aggregate → a where on the measure it made → order_by: the groups whose amount passes 50
-      { steps: [priced, amountByEvent, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'amount' }, { value: 50 }] }] }, { stage: 'order_by', keys: [{ key: 'amount', direction: 'desc' }] }] },
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [priced, amountByEvent, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'amount' }, { value: 50 }] }] }, { stage: 'order_by', keys: [{ key: 'amount', direction: 'desc' }] }] },
       // a conditional count and a conditional sum over every row: each aggregate over a case that yields
       // its value on the completed purchases alone (1 for the count) and nothing on any other row
-      { steps: [{ stage: 'aggregate', measures: [
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'aggregate', measures: [
         { name: 'purchases', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [completed], then: { value: 1 } }] }] } },
         { name: 'purchase_revenue', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [completed], then: { column: 'price' } }] }] } },
       ] }] },
       // per player, the average and the max of a case that is 1 on a completed purchase and 0 (its else)
       // on every other row: the share of the player's rows that are one, and whether any is
-      { steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [
+      { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [
         { name: 'purchase_share', expr: { fn: 'average', args: [purchaseFlag] } },
         { name: 'any_purchase', expr: { fn: 'max', args: [purchaseFlag] } },
       ] }] },
@@ -200,14 +200,14 @@ test('a batch of reads over a built pipeline model, each in steps of the pipelin
 test('a cancelled query ends as cancelled and the context goes on; a query issued after a batch runs once the whole batch is done — each reads the warehouse\'s numbers', opts, async (t) => {
   if (skip(t)) return;
   const context_id = await monContext();
-  const doomed = await engine.raw.query_model({ context_id, queries: [{ steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] }, { steps: [{ stage: 'metrics', metrics: ['revenue'] }] }] });
+  const doomed = await engine.raw.query_model({ context_id, queries: [{ name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] }, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'] }] }] });
   const out = await engine.raw.query_model({ task_ids: doomed.task_ids, cancel: true });
   assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled'], '[cancel] both end as cancelled');
   const read = await engine.raw.query_model({ task_ids: doomed.task_ids, wait_seconds: 0 });
   assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled'], '[cancel] and read back as cancelled');
   // the context goes on: a batch, and a query issued after it
-  const batch = await engine.raw.query_model({ context_id, queries: [{ steps: [{ stage: 'metrics', metrics: ['revenue'] }] }, { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] }] });
-  const after = await engine.query_model({ context_id, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] });
+  const batch = await engine.raw.query_model({ context_id, queries: [{ name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'] }] }, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] }] });
+  const after = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] });
   // by the time the later query is done, every member of the batch is too
   const peek = await engine.raw.query_model({ task_ids: batch.task_ids, wait_seconds: 0 });
   assert.equal(peek.status, 'done', '[after a batch] the batch is done');

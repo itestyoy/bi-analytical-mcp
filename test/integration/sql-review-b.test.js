@@ -41,7 +41,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 /** The events a pipeline keeps with one where on device_time (the first step: the rows are the source's,
  *  so the partition bound is added to it), counted. */
 async function countWhere(fn, ...values) {
-  const s = await engine.build_model({ action: 'start', name: `bound_${seq++}`, source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `bound_${seq++}`, source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn, args: [{ column: 'device_time' }, ...values.map((value) => ({ value }))] }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },

@@ -110,7 +110,7 @@ export async function openWorld() {
    * the source's own columns unless `columns` names others. → the start's answer ({ task_id, context_id }).
    */
   const startPrepared = async ({ steps, source = 'events', time_range, path, columns = {}, ...rest }) => {
-    const p = await engine.build_model({ action: 'start', name: `${rest.name}_rows`, source, steps, ...(time_range ? { time_range } : {}), materialize: true });
+    const p = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `${rest.name}_rows`, source, steps, ...(time_range ? { time_range } : {}), materialize: true });
     assert.ok(p.materialize?.task_id, `the rows are built: ${JSON.stringify(p.materialize)}`);
     for (;;) {
       const r = await one(engine.query_model({ task_ids: [p.materialize.task_id] }));

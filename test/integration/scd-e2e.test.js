@@ -73,7 +73,7 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
 
   // 'governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)'
   // 'governed SCD join: metric_time series works (time spine auto-built), Jan month = 100'
-  const seg = await engine.query_model({ context_id: ctx, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] }] });
+  const seg = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] }] });
   assert.equal(seg.status, 'done', JSON.stringify(seg));
   const total = seg.rows.reduce((s, x) => s + (Number.isFinite(num(x.revenue)) ? num(x.revenue) : 0), 0);
   assert.equal(total, 100, '[point-in-time] total revenue = 100 (a fan-out join would give 130)');
@@ -106,9 +106,9 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.ok(!created.metrics.includes('revenue_per_player'), 'a derived metric over it goes with it');
   assert.ok(created.metrics.includes('revenue'), 'the events metric survives');
   // a dropped metric is refused when it is asked for, before any task starts — not by MetricFlow later
-  await assert.rejects(engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['players'] }] }), /not in its semantic layer/);
+  await assert.rejects(engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['players'] }] }), /not in its semantic layer/);
   // and the surviving metric still queries to the point-in-time total
-  const r = await engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['revenue'] }] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['revenue'] }] });
   assert.equal(r.status, 'done', JSON.stringify(r));
   assert.equal(num(r.rows[0].revenue), 100);
 });
@@ -116,7 +116,7 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
 // 4) PIPELINE point-in-time join via the users contract's time: same point-in-time numbers as governed.
 test('pipeline join on the users contract: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: 'scd_pipe', source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'scd_pipe', source: 'events' });
   const r = await engine.build_model({
     action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
@@ -143,7 +143,7 @@ test('the key alone would inflate to 130 / 6 rows; a join without its time is re
   if (skip(t)) return;
   const { rows } = await wh.query(`SELECT sum(e.price_in_usd_of_event_data) AS revenue, count(*) AS n FROM main.fct_events e JOIN main.dim_users u ON e.internal_player_id = u.internal_player_id WHERE e.event_name = 'iap_purchase_completed'`);
   assert.deepEqual([num(rows[0].revenue), num(rows[0].n)], [130, 6], 'u1 (2 purchases) × 2 versions + u2 + u3');
-  const s = await engine.build_model({ action: 'start', name: 'scd_notime', source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'scd_notime', source: 'events' });
   await assert.rejects(
     () => engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'internal_player_id' }, attrs: [{ column: 'country' }] }] }),
     /missing required property 'time'/,

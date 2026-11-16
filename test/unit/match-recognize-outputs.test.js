@@ -39,14 +39,14 @@ const funnel = (extra = {}) => ({
 });
 
 async function columnsAfter(e, stage) {
-  const { context_id } = await e.build_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'mro', source: 'events' });
   const added = await e.build_model({ action: 'add_steps', context_id, steps: [stage], include: ['columns'] });
   return { context_id, types: new Map(added.available_columns.map((c) => [c.name, c.type])) };
 }
 
 test('a capture cannot take the name of a column the funnel outputs anyway', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'mro', source: 'events' });
   // the fixed columns, the partition key, each step's own, and a capture taken twice
   for (const name of ['completed', 'first_seen_at', 'furthest_step_name', 'player_id_of_internal', 'reached_a', 'at_b']) {
     await assert.rejects(
@@ -79,7 +79,7 @@ test('only the working columns THIS funnel makes are refused as a capture name �
   assert.deepEqual(['t3', 'is3', 't30', 'is5'].map((c) => two.get(c)), ['numeric', 'numeric', 'numeric', 'numeric']);
   // three steps: t3 and is3 are now its own
   const three = funnel({ steps: [...funnel().steps, { name: 'c', event_name: ['level_started'] }] });
-  const { context_id } = await e.build_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'mro', source: 'events' });
   for (const name of ['t3', 'is3']) {
     await assert.rejects(
       () => e.build_model({ action: 'add_steps', context_id, steps: [{ ...three, capture: [{ name, step: 'c', column: 'level_id_of_event_data' }] }] }),
@@ -110,7 +110,7 @@ test('a capture of a column the warehouse stores as text keeps that mark, as a c
   // and a comparison text cannot spell is refused — on the capture as on the column it copies
   const e = engine();
   e.probe.physicalColumns = async () => SOURCE_COLS;
-  const { context_id } = await e.build_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'mro', source: 'events' });
   const captured = funnel({ capture: [{ name: 'clicked', step: 'b', column: 'is_clicked_of_event_data' }] });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id, steps: [captured, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'clicked' }, { value: true }] }] }] }),
@@ -133,7 +133,7 @@ test('a capture of a column the warehouse stores as text keeps that mark, as a c
 
 test('a capture naming a step the funnel does not have is refused as the capture it is', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'mro', source: 'events' });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id, steps: [funnel({ capture: [{ name: 'x', step: 'zz', column: 'level_id_of_event_data' }] })] }),
     (err) => /capture 'x' names step 'zz'/.test(err.message) && /steps: a, b/.test(err.message) && !/metric/.test(err.message),
@@ -167,7 +167,7 @@ test('between_steps is the one choice of what lies between steps: any by default
   assert.equal(duck.default, 'any');
   // `mode` is gone: the choice it made is between_steps' — refused, not read beside it
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'mro', source: 'events' });
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [funnel({ mode: 'strict' })] }), /unexpected property 'mode'/);
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [funnel({ between_steps: 'none' })] }), /between_steps/);
   // where a row-pattern match runs it, the adjacent-events funnel builds the same columns as any other

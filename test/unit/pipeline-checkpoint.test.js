@@ -34,7 +34,7 @@ const funnel = {
 
 test('materialize keeps the draft and records the built table as a checkpoint; the next step reads it', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   const built = await e.build_model({ action: 'materialize', context_id });
   assert.equal(built.checkpoint.at, 1);
@@ -59,7 +59,7 @@ test('materialize keeps the draft and records the built table as a checkpoint; t
 
 test('invalidation is positional: an edit retires the checkpoints whose prefix contains that step', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   await e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
   const c1 = await e.build_model({ action: 'materialize', context_id }); // at: 2
@@ -95,7 +95,7 @@ test('invalidation is positional: an edit retires the checkpoints whose prefix c
 
 test('an edit retires the checkpoints at and after it; add_steps never retires one', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   await e.build_model({ action: 'materialize', context_id }); // at: 1
   await e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
@@ -110,7 +110,7 @@ test('an edit retires the checkpoints at and after it; add_steps never retires o
 test('a stage needing the source columns is refused after a checkpoint that dropped them, accepted after one that kept them', async () => {
   const e = engine();
   // (a) checkpoint after an aggregate: one row per player, no event columns left.
-  const a = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const a = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: a.context_id, steps: [agg('events_seen')] });
   await e.build_model({ action: 'materialize', context_id: a.context_id });
   await assert.rejects(
@@ -124,7 +124,7 @@ test('a stage needing the source columns is refused after a checkpoint that drop
   );
 
   // (b) checkpoint where the rows are still events (a where) → the funnel is legal on top of it.
-  const b = await e.build_model({ action: 'start', name: 'funnel_on_slice', source: 'events' });
+  const b = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'funnel_on_slice', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: b.context_id, steps: [keepEvents('level_started')] });
   const built = await e.build_model({ action: 'materialize', context_id: b.context_id });
   assert.equal(built.checkpoint.carries_source, 'events');
@@ -135,13 +135,13 @@ test('a stage needing the source columns is refused after a checkpoint that drop
 
 test('fork inherits a checkpoint it keeps, copies its definition, and the owner cannot be dropped under it', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   const c1 = await e.build_model({ action: 'materialize', context_id }); // at: 1
   await e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 5 }] }] }] });
   const c2 = await e.build_model({ action: 'materialize', context_id }); // at: 2
 
-  const fork = await e.build_model({ action: 'fork', context_id, after: 1, name: 'seg_alt' });
+  const fork = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id, after: 1, name: 'seg_alt' });
   assert.deepEqual(fork.inherited_checkpoints, [{ at: 1, model: c1.model, owner: context_id }]);
   assert.ok(e.ctxs.hasPipelineModel(fork.context_id, c1.model), "the parent's model is readable in the fork (ref resolves)");
   assert.ok(!e.ctxs.hasPipelineModel(fork.context_id, c2.model), 'a checkpoint past `after` is not inherited');
@@ -163,7 +163,7 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
 
 test('a checkpoint is retired when the value index moved on, or its model is gone', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   await e.build_model({ action: 'materialize', context_id });
   assert.equal(draftOf(e, context_id).checkpoints.length, 1);
@@ -207,7 +207,7 @@ test('lifecycle: cleanup takes a pipeline\'s later builds and leaves an inherite
 // dropping a prefix left the next materialize recomputing everything with nothing said about why.
 test('preview reports the prefix it retired instead of dropping it silently', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   const built = await e.build_model({ action: 'materialize', context_id });
   await e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
@@ -226,7 +226,7 @@ test('preview reports the prefix it retired instead of dropping it silently', as
 // included: a step copied into edit_step is the step that was built.
 test('materialize keeps each step in the spelling it was built in, and a draft shows its prefix so', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'lvl', source: 'events', steps: [funnel] });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'lvl', source: 'events', steps: [funnel] });
   // the funnel as an earlier version stored it: a step condition on `property`, on a name that is an
   // event property and a column of the rows alike — which its build reads as the column
   const kept = { ...funnel, steps: [funnel.steps[0], { ...funnel.steps[1], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }] };
@@ -241,7 +241,7 @@ test('materialize keeps each step in the spelling it was built in, and a draft s
   const pv = await e.build_model({ action: 'preview', context_id });
   assert.equal(pv.from_checkpoint.model, built.model, 'the step is in the prefix the checkpoint stands for');
   assert.deepEqual(pv.steps[0].steps[1].where, asBuilt);
-  const fork = await e.build_model({ action: 'fork', context_id, name: 'lvl_alt', include: ['steps'] });
+  const fork = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id, name: 'lvl_alt', include: ['steps'] });
   assert.deepEqual(fork.steps[0].steps[1].where, asBuilt);
 });
 
@@ -249,7 +249,7 @@ test('materialize keeps each step in the spelling it was built in, and a draft s
 // prefix was built from, so it is not evidence that anything moved.
 test('a prefix built before the first index scan is not retired by that scan', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   const built = await e.build_model({ action: 'materialize', context_id });
   assert.equal(draftOf(e, context_id).checkpoints[0].index_run_id, null, 'nothing had been scanned yet');
@@ -262,14 +262,14 @@ test('a prefix built before the first index scan is not retired by that scan', a
 // would otherwise start over at the bare name and rebuild the very table a fork inherited.
 test('a new draft in the same context never reuses a model name', async () => {
   const e = engine();
-  const first = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const first = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: first.context_id, steps: [agg('events_seen')] });
   const built = await e.build_model({ action: 'materialize', context_id: first.context_id });
-  const fork = await e.build_model({ action: 'fork', context_id: first.context_id, after: 1, name: 'seg_alt' });
+  const fork = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: first.context_id, after: 1, name: 'seg_alt' });
   assert.equal(fork.inherited_checkpoints[0].model, built.model);
 
   // start again in the SAME context, same name: the next build takes its own name
-  const again = await e.build_model({ action: 'start', name: 'seg', source: 'events', context_id: first.context_id });
+  const again = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events', context_id: first.context_id });
   assert.equal(again.context_id, first.context_id);
   await e.build_model({ action: 'add_steps', context_id: first.context_id, steps: [agg('other_count')] });
   const rebuilt = await e.build_model({ action: 'materialize', context_id: first.context_id });
@@ -281,10 +281,10 @@ test('a new draft in the same context never reuses a model name', async () => {
 // bypassing the refusal that a context delete makes for exactly that reason.
 test('the idle GC does not reclaim a context whose prefix a fork reads', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
   await e.build_model({ action: 'materialize', context_id });
-  const fork = await e.build_model({ action: 'fork', context_id, after: 1, name: 'seg_alt' });
+  const fork = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id, after: 1, name: 'seg_alt' });
   for (const c of [context_id, fork.context_id]) { const x = e.ctxs.get(c); x.lastUsedAt = 1; x.createdAt = 1; } // long idle
   assert.deepEqual(e.gc(1000), [fork.context_id], 'the consumer itself is reclaimable; its owner is not');
   assert.ok(e.ctxs.has(context_id), 'the owner stayed');
@@ -318,7 +318,7 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
     await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ left: flag, op: 'gt', value: true }] }] }), /invalid input/, when);
   };
 
-  const { context_id } = await e.build_model({ action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
   await refusedBoth(context_id, 'on the source');
   const started = await e.build_model({ action: 'materialize', context_id });
   const built = await taskResult(e, started.task_id);
@@ -327,7 +327,7 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   const eq = await e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [flag, { value: true }] }] }] });
   assert.equal(eq.from_checkpoint.model, built.model, 'the step reads the built table');
 
-  const from = await e.build_model({ action: 'start', name: 'flg2', from_task: started.task_id, include: ['columns'] });
+  const from = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg2', from_task: started.task_id, include: ['columns'] });
   assert.ok(from.available_columns.some((c) => c.name === 'is_clicked_of_event_data'));
   assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
   await refusedBoth(from.context_id, 'from the task');
@@ -365,14 +365,14 @@ const builtFlags = async (e, context_id) => {
 
 test('a draft started from an earlier build reads its table\'s types from the warehouse after a later build superseded its checkpoint', async () => {
   const e = flagEngine(flagRunner());
-  const { context_id } = await e.build_model({ action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
   const first = await builtFlags(e, context_id);
   await e.build_model({ action: 'edit_step', context_id, index: 1, step: keepEvents('level_completed') });
   const second = await builtFlags(e, context_id);
   const owner = e.ctxs.get(context_id).state;
   assert.ok(![...(owner.draft.checkpoints || []), ...(owner.pipeline_origin?.checkpoints || [])].some((c) => c.task_id === first), 'no checkpoint records the first build any more');
   for (const task of [first, second]) {
-    const from = await e.build_model({ action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
+    const from = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
     assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
     await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [flagOrdered] }), TEXT_FLAG, `from task ${task}`);
     const eq = await e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [flagEq] });
@@ -382,9 +382,9 @@ test('a draft started from an earlier build reads its table\'s types from the wa
 
 test('where the warehouse cannot be asked about a task\'s table, the marks its build\'s checkpoint recorded stand', async () => {
   const e = flagEngine(flagRunner({ tables: false }));
-  const { context_id } = await e.build_model({ action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
   const task = await builtFlags(e, context_id);
-  const from = await e.build_model({ action: 'start', name: 'flg_from', from_task: task });
+  const from = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg_from', from_task: task });
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [flagOrdered] }), TEXT_FLAG);
 });
 
@@ -392,9 +392,9 @@ test('a draft started from a semantic query run with materialize: true has its t
   const e = flagEngine(flagRunner());
   const created = await declare(e, { name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
   await taskResult(e, created.task_id);
-  const stored = await e.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['cnt'], group_by: [{ source: 'events', column: 'event_name' }] }], materialize: true });
+  const stored = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['cnt'], group_by: [{ source: 'events', column: 'event_name' }] }], materialize: true });
   assert.equal((await taskResult(e, stored.task_id)).status, 'done');
-  const from = await e.build_model({ action: 'start', name: 'slice', from_task: stored.task_id, include: ['columns'] });
+  const from = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'slice', from_task: stored.task_id, include: ['columns'] });
   assert.deepEqual(from.available_columns, [{ name: 'cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 'many' }] }] }] }),
@@ -410,12 +410,12 @@ test('after a restart, a draft started from a build\'s task has its table\'s col
   const workspaceRoot = tempDir('cp');
   const store = openStore({ dbPath: join(workspaceRoot, 'store.sqlite') });
   const e = flagEngine(flagRunner(), { workspaceRoot, store });
-  const { context_id } = await e.build_model({ action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
   const task = await builtFlags(e, context_id);
   // a new process over the same registry and job store: the task's answer held in memory is gone
   const e2 = flagEngine(flagRunner(), { workspaceRoot, store });
   assert.equal(e2.jobs.get(task).status, 'ready');
-  const from = await e2.build_model({ action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
+  const from = await e2.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
   assert.deepEqual(from.available_columns.find((c) => c.name === 'is_clicked_of_event_data'), { name: 'is_clicked_of_event_data', type: 'string' });
   await assert.rejects(() => e2.build_model({ action: 'add_steps', context_id: from.context_id, steps: [flagOrdered] }), TEXT_FLAG);
   store.close();

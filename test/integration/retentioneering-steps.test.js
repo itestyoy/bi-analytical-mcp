@@ -244,7 +244,7 @@ test('a path by an event property, its events renamed by a value (with names of 
   const expected = counts(withLevel.map((x) => (x.e !== 'level_completed' || x.r == null ? x.e : x.r === 'win' ? 'level_won' : `level_completed_${x.r}`)));
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'renamed by value: the named value under its name, any other as <event>_<value>, every other event as it was');
   // an unknown parameter is refused before anything runs — by the pipeline that prepares the rows
-  await assert.rejects(engine.build_model({ action: 'start', name: 'x_rows', source: 'events', steps: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])] }), /invalid input|no_such/, 'an unknown parameter');
+  await assert.rejects(engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'x_rows', source: 'events', steps: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])] }), /invalid input|no_such/, 'an unknown parameter');
 });
 
 // A window in a timezone, and events made from an event's parameters by conditions: one start.
@@ -329,7 +329,7 @@ test('a path by a composite key of columns, its events renamed and merged into o
 test('a where between two values (both ends included), and a top N: the most frequent events of those rows keep their names, the rest is "other" — no event dropped', opts, async (t) => {
   if (skip(t)) return;
   const src = (await wh.query('select session_number as s, event_name as e from fct_analytics_events')).rows;
-  const b = await w.startPrepared({ name: 'sessions_1_2', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
+  const b = await w.startPrepared({ description: 'what the test computes', question: 'what the test asks', name: 'sessions_1_2', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   const inSessions = src.filter((x) => x.s >= 1 && x.s <= 2);

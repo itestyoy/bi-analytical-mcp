@@ -31,7 +31,7 @@ before(async () => {
 after(async () => { engine?.runner?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-const PER_EVENT = { action: 'start', name: 'per_event_jan', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] };
+const PER_EVENT = { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'per_event_jan', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] };
 
 test('a build\'s table is written as one CSV file — its rows the table\'s, every value', opts, async (t) => {
   if (skip(t)) return;
@@ -54,7 +54,7 @@ test('a result that is not stored as a table is refused, saying what holds one',
   const build = await startAndBuild(engine, { ...PER_EVENT, name: 'per_event_read' });
   // a read of the build's table stores nothing of its own
   const raw = engine.raw;
-  const started = await raw.query_model({ context_id: build.context_id, steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }] });
+  const started = await raw.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: build.context_id, steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }] });
   await taskResult(raw, started.task_id);
   await assert.rejects(raw.export_result({ task_id: started.task_id }), (e) => e.field === 'task_id' && /holds no stored table to export/.test(e.message));
   await assert.rejects(raw.export_result({ task_id: 'aaaaaaaaaaaa' }), (e) => e.field === 'task_id' && /unknown task_id/.test(e.message));

@@ -100,7 +100,7 @@ async function settled(client, name, args) {
  * empty value is an error, never a zero: a path that reads nothing has not reached any answer.
  */
 export async function runReference(client, ref) {
-  const s = await settled(client, 'build_model', { action: 'start', name: `ref_${Date.now().toString(36)}`, source: ref.source });
+  const s = await settled(client, 'build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: `ref_${Date.now().toString(36)}`, source: ref.source });
   for (const step of ref.steps) await settled(client, 'build_model', { action: 'add_steps', context_id: s.context_id, steps: [step] });
   const built = await settled(client, 'build_model', { action: 'materialize', context_id: s.context_id });
   const rows = built.rows || [];

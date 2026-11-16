@@ -54,7 +54,7 @@ async function start(rebuild) {
   return settle(engine);
 }
 
-const BY_KIND = { action: 'start', name: 'by_kind', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, steps: [{ stage: 'aggregate', group_by: ['event_kind'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] };
+const BY_KIND = { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'by_kind', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, steps: [{ stage: 'aggregate', group_by: ['event_kind'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] };
 
 test('without the rebuild at start, the column the table does not have yet is dropped from the catalog', opts, async (t) => {
   if (skip(t)) return;

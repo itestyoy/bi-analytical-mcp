@@ -39,7 +39,7 @@ before(async () => {
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-const q = (input) => engine.query_model({ context_id: ctxId, ...input });
+const q = (input) => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctxId, ...input });
 /** The revenue metrics step, broken down by `group_by` when one is given. */
 const revenue = (group_by) => ({ stage: 'metrics', metrics: ['revenue'], ...(group_by ? { group_by } : {}) });
 const byCountry = [{ source: 'users', column: 'country' }];
@@ -50,7 +50,7 @@ const paying = { stage: 'where', conditions: [{ fn: 'in', args: [{ source: 'user
 test('one ungrouped revenue task: started at once and read back with show_to_user; a missing-column funnel and a single-value pie refused; then drawn as a KPI tile of 85', opts, async (t) => {
   if (skip(t)) return;
   // [a metric query answers with its task at once; the same tool, given the task_id, waits for it and returns the warehouse's rows]
-  const started = await engine.raw.query_model({ context_id: ctxId, steps: [revenue()] });
+  const started = await engine.raw.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctxId, steps: [revenue()] });
   assert.ok(isStartedTask(started), JSON.stringify(started));
   assert.match(started.task_id, /^[a-f0-9]{12}$/);
   const done = await one(engine.query_model({ task_ids: [started.task_id] }));

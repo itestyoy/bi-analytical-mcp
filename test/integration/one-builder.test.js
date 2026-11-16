@@ -62,7 +62,7 @@ let ctx;
 
 test('a build whose one step is its layer: joined on the contract, an amount computed beside the events, every name as declared', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_model({ action: 'start', name: 'onebld', source: 'events', steps: [LAYER], materialize: true });
+  const out = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'onebld', source: 'events', steps: [LAYER], materialize: true });
   ctx = out.context_id;
   assert.deepEqual(out.step_effects[0].metrics.sort(), ['evts', 'evts_per_player', 'players', 'spend']);
   const parsed = await taskResult(engine, out.materialize.task_id);
@@ -70,7 +70,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
 
   const [truth] = (await wh.query('select count(*) as evts, count(distinct player_id_of_internal) as players from fct_analytics_events')).rows;
   const [{ spend }] = (await wh.query('select sum(cost) as spend from fct_player_acquisition')).rows;
-  const all = await engine.query_model({ context_id: ctx, steps: [metrics(['evts', 'players', 'spend', 'evts_per_player'])], time_range: WINDOW });
+  const all = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['evts', 'players', 'spend', 'evts_per_player'])], time_range: WINDOW });
   assert.equal(all.ok, true, JSON.stringify(all.error));
   const [row] = all.rows;
   // the result's columns are the names the step declared
@@ -81,7 +81,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
 
   // grouped by an attribute of the joined model: every event counted once (the contract's key is unique
   // at a moment), the per-country counts those the warehouse gives for the version valid at the event
-  const by = await engine.query_model({ context_id: ctx, steps: [metrics(['evts'], { group_by: [{ source: 'users', column: 'platform' }] })], time_range: WINDOW });
+  const by = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['evts'], { group_by: [{ source: 'users', column: 'platform' }] })], time_range: WINDOW });
   assert.equal(by.ok, true, JSON.stringify(by.error));
   const col = by.group_by_resolved['users.platform'];
   const got = Object.fromEntries(by.rows.map((r) => [String(r[col] ?? 'null'), num(r.evts)]));
@@ -96,7 +96,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   // after the metrics step a group_by item is named as group_by names it, a metric as { metric }: the same
   // rows as the result's column names give, the platforms with more than one event, the biggest first
   const platform = { source: 'users', column: 'platform' };
-  const byRef = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }),
+  const byRef = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }),
     { stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'evts' }, { value: 1 }] }, { fn: 'is_not_null', args: [platform] }] },
     { stage: 'order_by', keys: [{ key: 'evts', direction: 'desc' }, { key: platform }] }] });
   assert.equal(byRef.ok, true, JSON.stringify(byRef.error));
@@ -107,7 +107,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   // platform by an aggregate whose group_by names it as group_by does, the metric summed as { metric },
   // sorted by { metric } — the per-platform counts again; a pivot's on and a project's keep alike
   const country = { source: 'users', column: 'country' };
-  const refold = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform, country] }),
+  const refold = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform, country] }),
     { stage: 'where', conditions: [{ fn: 'is_not_null', args: [platform] }] },
     { stage: 'aggregate', group_by: [platform], measures: [{ name: 'n', expr: { fn: 'sum', args: [{ metric: 'evts' }] } }] },
     { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }, { key: platform }] },
@@ -115,11 +115,11 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   assert.equal(refold.ok, true, JSON.stringify(refold.error));
   const perPlatform = Object.entries(want).filter(([k]) => k !== 'null').sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   assert.deepEqual(refold.rows.map((r) => [String(r[col]), num(r.n)]), perPlatform);
-  const sorted = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }), { stage: 'order_by', keys: [{ key: { metric: 'evts' }, direction: 'desc' }, { key: platform }] }] });
+  const sorted = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }), { stage: 'order_by', keys: [{ key: { metric: 'evts' }, direction: 'desc' }, { key: platform }] }] });
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error));
   assert.deepEqual(sorted.rows.map((r) => num(r.evts)), Object.values(want).sort((a, b) => b - a));
   const [first] = Object.keys(want).filter((k) => k !== 'null').sort();
-  const pivoted = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }),
+  const pivoted = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }),
     { stage: 'pivot', on: platform, measure: { fn: 'sum', args: [{ metric: 'evts' }] }, values: [{ value: first, name: 'first_platform' }] }] });
   assert.equal(pivoted.ok, true, JSON.stringify(pivoted.error));
   assert.equal(num(pivoted.rows[0].first_platform), want[first]);
@@ -127,7 +127,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   // a time column of the joined model at a bucket of its own: events by the ISO week of the install, as
   // the warehouse counts them for the version valid at each event
   const week = { source: 'users', column: 'install_date', grain: 'week' };
-  const byWeek = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [week] }), { stage: 'order_by', keys: [{ key: week }] }] });
+  const byWeek = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [week] }), { stage: 'order_by', keys: [{ key: week }] }] });
   assert.equal(byWeek.ok, true, JSON.stringify(byWeek.error));
   const wcol = byWeek.group_by_resolved['users.install_date'];
   const gotWeeks = byWeek.rows.map((r) => [r[wcol] == null ? null : String(r[wcol]).slice(0, 10), num(r.evts)]);
@@ -140,7 +140,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   // a window after the metrics step names its columns as the query does: the day before's count by lag,
   // ordered by the day as group_by names it
   const dayRef = { time: 'metric_time', grain: 'day' };
-  const lagged = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [dayRef] }),
+  const lagged = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [dayRef] }),
     { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ metric: 'evts' }], over: { order_by: [{ key: dayRef }] } } },
     { stage: 'order_by', keys: [{ key: dayRef }] }] });
   assert.equal(lagged.ok, true, JSON.stringify(lagged.error));
@@ -148,14 +148,14 @@ test('a build whose one step is its layer: joined on the contract, an amount com
 
   // a window inside a week, grouped by week: MetricFlow counts the week whole — the rows of every day of
   // it, as the warehouse counts them — and the answer says the days it covers
-  const midWeek = await engine.query_model({ context_id: ctx, time_range: { start: '2026-01-06', end: '2026-01-07' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'week' }] })] });
+  const midWeek = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: { start: '2026-01-06', end: '2026-01-07' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'week' }] })] });
   assert.equal(midWeek.ok, true, JSON.stringify(midWeek.error));
   const [{ n: wholeWeek }] = (await wh.query("select count(*) as n from fct_analytics_events where device_time >= '2026-01-05' and device_time < '2026-01-12'")).rows;
   assert.deepEqual(midWeek.rows.map((r) => num(r.evts)), [num(wholeWeek)]);
   assert.ok(midWeek.warnings.some((w) => w.includes('2026-01-05 … 2026-01-11')), JSON.stringify(midWeek.warnings));
   // a window in a timezone, grouped by day: the days are UTC days, the first and last counted whole —
   // the days MetricFlow returns are those the answer names, each its whole UTC day as the warehouse counts it
-  const la = await engine.query_model({ context_id: ctx, time_range: { start: '2026-01-02', end: '2026-01-03', timezone: 'America/Los_Angeles' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'day' }] }), { stage: 'order_by', keys: [{ key: { time: 'metric_time', grain: 'day' } }] }] });
+  const la = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: { start: '2026-01-02', end: '2026-01-03', timezone: 'America/Los_Angeles' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'day' }] }), { stage: 'order_by', keys: [{ key: { time: 'metric_time', grain: 'day' } }] }] });
   assert.equal(la.ok, true, JSON.stringify(la.error));
   const days = (await wh.query("select strftime(date_trunc('day', device_time), '%Y-%m-%d') as d, count(*) as n from fct_analytics_events where device_time >= '2026-01-02' and device_time < '2026-01-05' group by 1 order by 1")).rows.map((r) => [r.d, num(r.n)]);
   assert.deepEqual(la.rows.map((r) => [String(r.metric_time_day).slice(0, 10), num(r.evts)]), days);
@@ -163,7 +163,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   // the timezone's own days, as the warning says to count them: a computed dimension of each row's local
   // day, kept to the days asked — as the warehouse counts Los Angeles days (UTC−8 in January)
   const laDay = { semantic_model: ['events'], dimension: 'la_day' };
-  const local = await engine.query_model({ context_id: ctx, steps: [
+  const local = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [
     { stage: 'where', conditions: [{ fn: 'between', args: [laDay, { value: '2026-01-02' }, { value: '2026-01-03' }] }] },
     metrics(['evts'], { group_by: [laDay] }), { stage: 'order_by', keys: [{ key: laDay }] }] });
   assert.equal(local.ok, true, JSON.stringify(local.error));
@@ -174,7 +174,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   // a text column holding a flag, filtered by true before the metrics step: compared as the text it holds
   // ('true', '1', 't' in any case), as a pipeline compares it — MetricFlow is never handed text = TRUE
   const [{ n: flagged }] = (await wh.query("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')")).rows;
-  const byFlagText = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'events', column: 'bundle_id' }, { value: true }] }] }, metrics(['evts'])] });
+  const byFlagText = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'events', column: 'bundle_id' }, { value: true }] }] }, metrics(['evts'])] });
   assert.equal(byFlagText.ok, true, JSON.stringify(byFlagText.error));
   assert.equal(num(byFlagText.rows[0]?.evts ?? 0), num(flagged));
 
@@ -184,7 +184,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   const [{ n: purchases }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'iap_purchase_completed'")).rows;
   const counts = { true: num(purchases), false: num(truth.evts) - num(purchases) };
   for (const tail of [[], [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'evts' }, { value: 0 }] }] }]]) {
-    const byFlag = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [flag] }), ...tail] });
+    const byFlag = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [flag] }), ...tail] });
     assert.equal(byFlag.ok, true, JSON.stringify(byFlag.error));
     const fcol = byFlag.group_by_resolved['events.is_purchase'];
     assert.deepEqual(Object.fromEntries(byFlag.rows.map((r) => [r[fcol], num(r.evts)])), counts, `${tail.length ? 'over its SQL' : 'mf query'}: ${JSON.stringify(byFlag.rows)}`);
@@ -194,7 +194,7 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   const weekdays = Object.fromEntries((await wh.query('select isodow(device_time) as d, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => [num(r.d), num(r.n)]));
   for (const tail of [[], [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'evts' }, { value: 0 }] }] }]]) {
     const wd = { semantic_model: ['events'], dimension: 'weekday' };
-    const byDay = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [wd] }), ...tail] });
+    const byDay = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [wd] }), ...tail] });
     assert.equal(byDay.ok, true, JSON.stringify(byDay.error));
     const dcol = byDay.group_by_resolved['events.weekday'];
     assert.ok(byDay.rows.every((r) => typeof r[dcol] === 'number'), JSON.stringify(byDay.rows));
@@ -206,22 +206,22 @@ test('a metric is cut by the columns its own rows reach: another model\'s column
   if (skip(t) || !ctx) return;
   // spend folds acquisition's rows: an events column does not cut it (MetricFlow would refuse it minutes later)
   const byEvent = { group_by: [{ source: 'events', column: 'event_name' }] };
-  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['evts', 'spend'], byEvent)], time_range: WINDOW }), /'events\.event_name' does not cut 'spend' \(it folds acquisition\)[^]*it cuts 'evts'/);
-  const evts = await engine.query_model({ context_id: ctx, steps: [metrics(['evts'], byEvent)], time_range: WINDOW });
+  await assert.rejects(() => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['evts', 'spend'], byEvent)], time_range: WINDOW }), /'events\.event_name' does not cut 'spend' \(it folds acquisition\)[^]*it cuts 'evts'/);
+  const evts = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['evts'], byEvent)], time_range: WINDOW });
   assert.equal(evts.ok, true, JSON.stringify(evts.error));
   // describe lists, for each metric, the dimensions that cut it
   const dimsOf = async (metric) => (await engine.context({ action: 'describe', context_id: ctx, metric })).metrics[0].group_by.dimensions.map((d) => `${d.source ?? d.semantic_model.join('.')}.${d.column ?? d.property ?? d.dimension}`);
   assert.ok((await dimsOf('evts')).includes('events.event_name'));
   assert.ok(!(await dimsOf('spend')).includes('events.event_name'));
   // the freshness read is the queried metric's own source's
-  const spend = await engine.query_model({ context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW });
+  const spend = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW });
   assert.equal(spend.ok, true, JSON.stringify(spend.error));
   assert.equal(spend.provenance.source, 'acquisition');
   // an entity is a key the metric's own rows carry: a session cuts the events, not the spend
   const entitiesOf = async (metric) => (await engine.context({ action: 'describe', context_id: ctx, metric })).metrics[0].group_by.entities.map((x) => x.entity);
   assert.ok((await entitiesOf('evts')).includes('session'));
   assert.ok(!(await entitiesOf('spend')).includes('session'));
-  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['spend'], { group_by: [{ entity: 'session' }] })], time_range: WINDOW }), /the entity 'session' does not cut 'spend' \(it folds acquisition/);
+  await assert.rejects(() => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['spend'], { group_by: [{ entity: 'session' }] })], time_range: WINDOW }), /the entity 'session' does not cut 'spend' \(it folds acquisition/);
 });
 
 test('a model removed with its metrics (cascade) stays removed: the build\'s semantic_model step says the same', opts, async (t) => {
@@ -235,8 +235,8 @@ test('a model removed with its metrics (cascade) stays removed: the build\'s sem
   assert.ok(!layer.measures.some((m) => m.source === 'acquisition') && !layer.metrics.some((m) => m.name === 'spend'), JSON.stringify(layer));
   const built = await engine.raw.build_model({ action: 'materialize', context_id: ctx });
   await taskResult(engine, built.task_id);
-  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW }), /unknown metric in context: 'spend'/);
-  const r = await engine.query_model({ context_id: ctx, steps: [metrics(['evts'])], time_range: WINDOW });
+  await assert.rejects(() => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW }), /unknown metric in context: 'spend'/);
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['evts'])], time_range: WINDOW });
   assert.equal(r.ok, true, JSON.stringify(r.error));
 });
 
@@ -249,10 +249,10 @@ test('edit_step and materialize replace the layer: the new metric answers, the o
   const built = await engine.raw.build_model({ action: 'materialize', context_id: ctx });
   await taskResult(engine, built.task_id);
   const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'tutorial'")).rows;
-  const r = await engine.query_model({ context_id: ctx, steps: [metrics(['tutorials'])], time_range: WINDOW });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['tutorials'])], time_range: WINDOW });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].tutorials), num(n));
-  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['evts'])], time_range: WINDOW }), /unknown metric in context: 'evts'. Available: tutorials/);
+  await assert.rejects(() => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [metrics(['evts'])], time_range: WINDOW }), /unknown metric in context: 'evts'. Available: tutorials/);
 });
 
 test('describe shows the layer as dbt parsed it; validate runs each metric over the window, as the warehouse counts', opts, async (t) => {
@@ -274,8 +274,8 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   if (skip(t)) return;
   const tutorial = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] };
   const perPlayer = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'events', expr: { fn: 'count' } }] };
-  const s = await engine.build_model({ action: 'start', name: 'fork_src', source: 'events', steps: [tutorial, perPlayer] });
-  const back = await engine.build_model({ action: 'fork', context_id: s.context_id, name: 'fork_back', after: 1 });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'fork_src', source: 'events', steps: [tutorial, perPlayer] });
+  const back = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: s.context_id, name: 'fork_back', after: 1 });
   assert.equal(back.steps_count, 1);
   const built = await engine.raw.build_model({ action: 'materialize', context_id: back.context_id });
   const done = await taskResult(engine, built.task_id);
@@ -300,7 +300,7 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   await engine.build_model({ action: 'edit_step', context_id: s.context_id, index: 2, step: { ...perPlayer, measures: [{ name: 'n', expr: { fn: 'count' } }] } });
   const relisted = engine.ctxs.list().find((c) => c.context_id === s.context_id);
   assert.ok(relisted.holds.some((h) => /older than the steps/.test(h)), JSON.stringify(relisted));
-  const stale = await engine.query_model({ context_id: s.context_id, steps: [{ stage: 'limit', limit: 1000 }] });
+  const stale = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: s.context_id, steps: [{ stage: 'limit', limit: 1000 }] });
   assert.equal(stale.rows.length, num(p));
   assert.ok((stale.warnings || []).some((w) => /built before the steps changed/.test(w)), JSON.stringify(stale.warnings));
 });
@@ -309,7 +309,7 @@ test('insert_step and delete_step change the steps in place: the rows are those 
   if (skip(t)) return;
   const tutorial = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] };
   const perPlayer = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'events', expr: { fn: 'count' } }] };
-  const s = await engine.build_model({ action: 'start', name: 'ins_del', source: 'events', steps: [perPlayer] });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'ins_del', source: 'events', steps: [perPlayer] });
   const rowsOf = async () => { const r = await taskResult(engine, (await engine.raw.build_model({ action: 'materialize', context_id: s.context_id })).task_id); return r.page?.total_rows ?? r.total_rows ?? r.rows.length; };
   const [{ all }] = (await wh.query('select count(distinct player_id_of_internal) as "all" from fct_analytics_events')).rows;
   const [{ tut }] = (await wh.query("select count(distinct player_id_of_internal) as tut from fct_analytics_events where event_name = 'tutorial'")).rows;
@@ -332,7 +332,7 @@ test('a date column against a midnight written ISO keeps the rows of that day on
   if (skip(t)) return;
   const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_date >= DATE '2026-01-03'")).rows;
   for (const value of ['2026-01-03T00:00:00Z', '2026-01-03 00:00:00', '2026-01-03']) {
-    const out = await engine.build_model({ action: 'start', name: 'iso_day', source: 'events', materialize: true, steps: [
+    const out = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'iso_day', source: 'events', materialize: true, steps: [
       { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'event_date' }, { value }] }] },
       { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
     ] });
@@ -346,14 +346,14 @@ test('a date column against a midnight written ISO keeps the rows of that day on
 // reads back as true / false — the player-days of each, as the warehouse counts them.
 test('a flag column of a built table, declared a dimension, reads back as a flag', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_model({ action: 'start', name: 'busy_days', source: 'events', materialize: true, steps: [
+  const out = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'busy_days', source: 'events', materialize: true, steps: [
     { stage: 'compute', name: 'day', expr: { fn: 'date_trunc', grain: 'day', args: [{ column: 'device_time' }] } },
     { stage: 'aggregate', group_by: ['player_id_of_internal', 'day'], measures: [{ name: 'evts', expr: { fn: 'count' } }] },
     { stage: 'compute', name: 'busy', expr: { fn: 'gt', args: [{ column: 'evts' }, { value: 3 }] } },
     { stage: 'semantic_model', time: 'day', dimensions: [{ column: 'busy' }], measures: [{ name: 'player_days', expr: { fn: 'count' } }], metrics: [{ name: 'player_days', type: 'simple', measure: 'player_days' }] },
   ] });
   await taskResult(engine, out.materialize.task_id);
-  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['player_days'], group_by: [{ semantic_model: ['busy_days'], dimension: 'busy' }] }] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['player_days'], group_by: [{ semantic_model: ['busy_days'], dimension: 'busy' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const col = r.group_by_resolved['busy_days.busy'];
   assert.ok(r.rows.every((row) => typeof row[col] === 'boolean'), JSON.stringify(r.rows));
@@ -363,45 +363,45 @@ test('a flag column of a built table, declared a dimension, reads back as a flag
 
 test('a numeric event property declared a dimension reads back as a number; a series comes in time order; a dry run types its metrics', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_model({ action: 'start', name: 'levels', source: 'events', materialize: true, steps: [
+  const out = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'levels', source: 'events', materialize: true, steps: [
     { stage: 'semantic_model', dimensions: [{ property: 'level_id_of_event_data' }], measures: [{ name: 'evts', expr: { fn: 'count' } }, { name: 'spent', expr: { fn: 'sum', args: [{ column: 'level_id_of_event_data' }] } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }, { name: 'spent', type: 'simple', measure: 'spent' }] },
   ] });
   await taskResult(engine, out.materialize.task_id);
   const level = { source: 'events', property: 'level_id_of_event_data' };
-  const r = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [level] })] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [level] })] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const col = r.group_by_resolved['events.level_id_of_event_data'];
   assert.ok(r.rows.every((row) => row[col] === null || typeof row[col] === 'number'), JSON.stringify(r.rows.slice(0, 5)));
   const want = Object.fromEntries((await wh.query(`select level_id_of_event_data as l, count(*) as k from fct_analytics_events where device_time >= '${WINDOW.start}' and device_time < '2026-02-01' group by 1`)).rows.map((x) => [x.l == null ? 'null' : String(num(x.l)), num(x.k)]));
   assert.deepEqual(Object.fromEntries(r.rows.map((row) => [row[col] == null ? 'null' : String(row[col]), num(row.evts)])), want);
   // with no step after the metrics step, the days come earliest first
-  const days = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'day' }] })] });
+  const days = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'day' }] })] });
   const dayCol = Object.keys(days.rows[0]).find((k) => k !== 'evts');
   const seen = days.rows.map((row) => String(row[dayCol]));
   assert.deepEqual(seen, [...seen].sort());
   assert.ok(seen.length > 1);
   // a dry run says what its metrics are: a count a whole number, a sum a number
-  const dry = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, dry_run: true, steps: [metrics(['evts', 'spent'], { group_by: [level] })] });
+  const dry = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, time_range: WINDOW, dry_run: true, steps: [metrics(['evts', 'spent'], { group_by: [level] })] });
   const typeOf = Object.fromEntries(dry.output_columns.map((c) => [c.name, c.type]));
   assert.deepEqual([typeOf.evts, typeOf.spent], ['int', 'numeric']);
 });
 
 test('a model the layer only joins is removed with its join: grouping by it is refused after, the metrics stand', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_model({ action: 'start', name: 'joined_only', source: 'events', materialize: true, steps: [
+  const out = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'joined_only', source: 'events', materialize: true, steps: [
     { stage: 'semantic_model', join: [USERS], measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] },
   ] });
   await taskResult(engine, out.materialize.task_id);
   const country = { source: 'users', column: 'country' };
-  const before = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] });
+  const before = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
   const removed = await engine.context({ action: 'delete', what: 'semantic_model', context_id: out.context_id, semantic_model: 'users' });
   assert.equal(removed.removed, true, JSON.stringify(removed));
   const { steps } = await engine.build_model({ action: 'preview', context_id: out.context_id });
   assert.equal(steps.find((x) => x.stage === 'semantic_model').join, undefined);
   await taskResult(engine, (await engine.raw.build_model({ action: 'materialize', context_id: out.context_id })).task_id);
-  await assert.rejects(() => engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] }), /users/);
-  const total = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'])] });
+  await assert.rejects(() => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] }), /users/);
+  const total = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'])] });
   const [{ n }] = (await wh.query(`select count(*) as n from fct_analytics_events where device_time >= '${WINDOW.start}' and device_time < '2026-02-01'`)).rows;
   assert.equal(num(total.rows[0].evts), num(n));
   // a model the layer neither declares on nor joins: said so, with what it holds

@@ -18,7 +18,7 @@ const payload = (r) => JSON.parse(r.result.content[0].text);
 
 test('a refused call is kept with its arguments, and explore_errors reads it back — newest first, filtered, one in full', async () => {
   const engine = makeEngine({ recipes: false });
-  const bad = { context_id: 'ctx_nope', steps: [{ stage: 'metrics', metrics: ['x'] }] };
+  const bad = { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctx_nope', steps: [{ stage: 'metrics', metrics: ['x'] }] };
   assert.equal((await runTool(engine, 'query_model', { request: bad })).result.isError, true);
   assert.equal((await runTool(engine, 'no_such_tool', { request: { a: 1 } })).result.isError, true);
   await runTool(engine, 'context', { request: { action: 'list' } }); // a call that works is not an error
@@ -115,7 +115,7 @@ test('a task that ends in an error is kept once, with its input — its reads ar
 test('an error carries what reproduces it: the draft a refused step was added to, the code of the model a task failed on, the runtime', async () => {
   const engine = makeEngine({ recipes: false });
   const source = engine.catalog.facts[0];
-  const s = await engine.build_model({ action: 'start', name: 'repro', source });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'repro', source });
   const col = engine.catalog.modelColumns(source)[0].name;
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: col }] }] }] });
   // a step naming a column that is not there is refused — and the draft it was added to is kept with it

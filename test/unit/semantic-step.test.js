@@ -19,7 +19,7 @@ const COUNT = { name: 'rows', expr: { fn: 'count' } };
 const N = [{ name: 'rows', type: 'simple', measure: 'rows' }];
 const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } };
 const step = (extra = {}) => ({ stage: 'semantic_model', measures: [COUNT], metrics: N, ...extra });
-const start = (e, steps, source = 'events') => e.build_model({ action: 'start', name: 'lay', source, ...(steps.length ? { steps } : {}) });
+const start = (e, steps, source = 'events') => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'lay', source, ...(steps.length ? { steps } : {}) });
 
 test('the step is a build\'s last, and one: refused before another step and twice', async () => {
   const e = engine();
@@ -70,9 +70,9 @@ test('preview shows the layer; edit_step replaces the step, a whole fork carries
   assert.ok(edited.step_edited && !edited.steps_added, JSON.stringify(Object.keys(edited)));
   await assert.doesNotReject(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step(), materialize: false }));
   // a whole fork carries it, a fork of the steps before it does not
-  const whole = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_copy', include: ['steps'] });
+  const whole = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: s.context_id, name: 'lay_copy', include: ['steps'] });
   assert.deepEqual(whole.steps.map((x) => x.stage), ['semantic_model']);
-  const none = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_none', after: 0, include: ['steps'] });
+  const none = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: s.context_id, name: 'lay_none', after: 0, include: ['steps'] });
   assert.deepEqual(none.steps, []);
 });
 
@@ -84,7 +84,7 @@ test('over the table of the steps before it: its time axis named, its joins keye
   const sessions = [
     { stage: 'aggregate', group_by: ['player_id_of_internal', 'session_number'], measures: [{ name: 'session_start', expr: { fn: 'min', args: [{ column: 'device_time' }] } }, { name: 'n_events', expr: { fn: 'count' } }] },
   ];
-  const over = (st) => e.build_model({ action: 'start', name: 'sess', source: 'events', steps: [...sessions, st] });
+  const over = (st) => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'sess', source: 'events', steps: [...sessions, st] });
   await assert.rejects(() => over(step()), /time: name the column of the table the steps before this one built that is its time axis/);
   await assert.rejects(() => over(step({ time: 'no_such' })), /time: 'no_such' is no column of the table/);
   await assert.rejects(() => over(step({ time: 'n_events' })), /time: 'n_events' is int, not a moment/);
@@ -96,7 +96,7 @@ test('over the table of the steps before it: its time axis named, its joins keye
   assert.deepEqual(effect.semantic_models.sort(), ['sess', 'users']);
   assert.deepEqual(effect.metrics.sort(), ['per_session', 'rows']);
   // a build named as a model or a key of the catalog would name its table so
-  await assert.rejects(() => e.build_model({ action: 'start', name: 'users', source: 'events', steps: [...sessions, step({ time: 'session_start' })] }), /the build's name 'users' is a model or a key of the catalog/);
+  await assert.rejects(() => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'users', source: 'events', steps: [...sessions, step({ time: 'session_start' })] }), /the build's name 'users' is a model or a key of the catalog/);
 });
 
 // NAMES AS DECLARED: a metric, a measure and a computed dimension are stored under the name the step gives

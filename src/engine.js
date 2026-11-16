@@ -725,7 +725,7 @@ export class Engine {
         // already, so continuing it is an informed choice rather than a rediscovery.
         ...(draft ? {
           draft: {
-            name: draft.name, source: draft.source, ...(draft.description ? { description: draft.description } : {}), steps: this._draftSteps(draft),
+            name: draft.name, source: draft.source, ...(draft.description ? { description: draft.description } : {}), ...(draft.question ? { question: draft.question } : {}), steps: this._draftSteps(draft),
             checkpoints: (draft.checkpoints || []).map((cp) => ({ at: cp.at, model: cp.model, owner: cp.owner, built_at: cp.built_at, ...(cp.carries_source ? { carries_source: cp.carries_source } : {}) })),
           },
         } : {}),
@@ -748,6 +748,7 @@ export class Engine {
         draft: {
           name: openDraft.name, source: openDraft.source,
           ...(openDraft.description ? { description: openDraft.description } : {}),
+          ...(openDraft.question ? { question: openDraft.question } : {}),
           steps: this._draftSteps(openDraft),
           ...(openDraft.building ? { building: openDraft.building } : {}),
         },

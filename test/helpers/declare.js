@@ -10,7 +10,11 @@ import { taskResult } from './settle.js';
 
 /** The build_model start a declaration is — or a start as it stands (a recipe's semantic_payload is one),
  *  built in the same call. */
-export const declaration = (engine, decl) => (Array.isArray(decl?.steps) ? { ...decl, materialize: true } : stepOfDeclaration((engine.raw || engine).catalog, decl));
+export const declaration = (engine, decl) => about(Array.isArray(decl?.steps) ? { ...decl, materialize: true } : stepOfDeclaration((engine.raw || engine).catalog, decl));
+
+/** A start says what it is for (build_model requires a description and the person's question): a test's
+ *  layer says what it gives, else the test's own words. */
+const about = (start) => ({ ...start, description: start.description || 'what the test declares', question: start.question || 'what the test asks' });
 
 /** Declare `decl` on `engine` and return the task its materialize started — { task_id, context_id, … },
  *  as a call that starts warehouse work answers (a refusal is thrown as it is). */

@@ -38,7 +38,7 @@ test('a declaration whose only metric reads a measure on the slowly-changing use
 
 test('an id that names no context says where a context id comes from — never a list of others', async () => {
   await assert.rejects(
-    engine.query_model({ context_id: 'nope12345678', steps: [{ stage: 'limit', limit: 1 }] }),
+    engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'nope12345678', steps: [{ stage: 'limit', limit: 1 }] }),
     /unknown context_id: nope12345678\. No context has that id .*the context_id its build answered/,
   );
   const r = await engine.context({ action: 'delete', context_id: 'zzzzzzzzzzzz' });
@@ -49,7 +49,7 @@ test('an id that names no context says where a context id comes from — never a
 test('a pipeline start whose steps are refused leaves no draft behind', async () => {
   const before = contexts();
   for (let i = 0; i < 2; i++) {
-    await assert.rejects(engine.build_model({
+    await assert.rejects(engine.build_model({ description: 'what the test computes', question: 'what the test asks',
       action: 'start', name: 'leak_probe', source: 'events',
       steps: [{ stage: 'aggregate', group_by: ['prise'], measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     }), /unknown column 'prise'.*nothing was started/);
@@ -58,7 +58,7 @@ test('a pipeline start whose steps are refused leaves no draft behind', async ()
 });
 
 test('a function given a parameter under another name is refused as that function, naming the parameter it takes', async () => {
-  const s = await engine.build_model({ action: 'start', name: 'misnamed_params', source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'misnamed_params', source: 'events' });
   const refusal = async (expr) => {
     let msg = '';
     await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'x', expr }] }), (e) => { msg = e.message; return true; });
@@ -91,9 +91,9 @@ test('an earlier { model, attribute } is no ref: refused by the schema as any va
 // model with no primary entity: each refused in the call with what to write instead, nothing created.
 test('a window on a source with no time axis, and a layer over a model with no primary entity, are refused with the way out', async () => {
   const before = ctxs.list().length;
-  await assert.rejects(engine.build_model({ action: 'start', name: 'exp_window', source: 'experiments', time_range: { start: '2026-01-01', end: '2026-01-31' } }),
+  await assert.rejects(engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'exp_window', source: 'experiments', time_range: { start: '2026-01-01', end: '2026-01-31' } }),
     (e) => e.field === 'time_range' && /'experiments' has no time axis, so time_range bounds nothing there — leave it out and bound its own time columns in a where step \(assigned_at/.test(e.message));
-  await assert.rejects(engine.build_model({ action: 'start', name: 'exp_layer', source: 'experiments', steps: [{ stage: 'semantic_model', measures: [{ name: 'assigned', expr: { fn: 'count' } }], metrics: [{ name: 'assigned', type: 'simple', measure: 'assigned' }] }] }),
+  await assert.rejects(engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'exp_layer', source: 'experiments', steps: [{ stage: 'semantic_model', measures: [{ name: 'assigned', expr: { fn: 'count' } }], metrics: [{ name: 'assigned', type: 'simple', measure: 'assigned' }] }] }),
     /'experiments' has no primary entity, .* a pipeline over that source with a join stage \(\{ stage: 'join', source: 'experiments', on, attrs \}/);
   assert.equal(ctxs.list().length, before, 'no context was created');
 });

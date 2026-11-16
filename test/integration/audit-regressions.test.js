@@ -72,7 +72,7 @@ const marginal = (rows, keyCol, valCol) => {
 };
 const sumCol = (rows, col) => rows.reduce((s, r) => s + num(r[col]), 0);
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
-const q = (ctx, input, eng = engine) => eng.query_model({ context_id: ctx, ...input });
+const q = (ctx, input, eng = engine) => eng.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, ...input });
 const dayOf = (v) => String(v).slice(0, 10);
 
 /** A catalog variant over the same warehouse: mutate the fixture document, load, wrap in an Engine. */
@@ -91,7 +91,7 @@ const evtsTask = (eng, name, load = []) => declare(eng, {
 });
 /** Run a pipeline of steps and return its rows. */
 async function pipeRows(source, steps, eng = engine) {
-  const s = await eng.build_model({ action: 'start', name: `au_${seq++}`, source });
+  const s = await eng.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `au_${seq++}`, source });
   for (const step of steps) {
     const r = await eng.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps failed: ${JSON.stringify(r.error || r)}`);

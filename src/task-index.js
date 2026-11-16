@@ -5,6 +5,13 @@
 // a phrase, and the themes of a period (the tasks of the window, narrowed to those near a phrase if
 // one is given, clustered).
 //
+// Beside that line it keeps the person's QUESTION the task answers, as the call that started it restated
+// it (`question`: build_model's start and every query, src/schema/fields.js ABOUT) — with a vector of its
+// OWN, made from the question alone: two spaces, read apart (`by`). By the question, the themes are what
+// the company asks — the business problems the work is for — whatever was computed for them; by the
+// computation, what was computed. A task from before the question was asked for has none, and is read
+// only in the space of the computation.
+//
 // It is a record of the QUESTIONS and of HOW each was computed — never a way to the data: what it
 // answers carries no task id, no context id and no table, and nothing it keeps does either — a found
 // task's steps are kept without what names stored work and with every id spelled in them blanked
@@ -69,6 +76,15 @@ export function howOf(input) {
   }
   if (!input || typeof input !== 'object') return input;
   return Object.fromEntries(Object.entries(input).filter(([k]) => !LEADS_TO_DATA.has(k)).map(([k, v]) => [k, howOf(v)]));
+}
+
+/** The spaces a task is read in, each with a vector of its own: its question, and what it computes. */
+export const SPACES = ['question', 'computation'];
+
+/** The person's question a task answers: its call's own, else the one its context's build started with. */
+function questionOf(ctx, input) {
+  const q = input?.question ?? ctx?.state?.draft?.question ?? null;
+  return typeof q === 'string' && q.trim() ? withoutIds(q.trim()) : null;
 }
 
 /** The name and the note a context says it is for, or nulls. */
@@ -172,7 +188,8 @@ export class TaskIndex {
   record({ id, tool, ctx = null, input = null, at = Date.now() }) {
     try {
       const said = this.toolOf(tool) || tool;
-      this.store.taskLog.put({ id, at, tool: said, source: ctx?.state?.draft?.source ?? input?.source ?? null, text: taskText({ tool: said, ctx, input }), how: input ? howOf(input) : null });
+      const question = questionOf(ctx, input);
+      this.store.taskLog.put({ id, at, tool: said, source: ctx?.state?.draft?.source ?? input?.source ?? null, text: taskText({ tool: said, ctx, input }), how: input ? howOf(Object.fromEntries(Object.entries(input).filter(([k]) => k !== 'question'))) : null, ...(question ? { question } : {}) });
       if (this.embedder) { this.pending.add(id); this._schedule(); }
     } catch (e) { this.logger(`✗ task ${id} not indexed: ${e?.message || e}`); }
   }
@@ -207,15 +224,18 @@ export class TaskIndex {
     return this.flushing;
   }
 
-  /** Embed every row without a vector of this deployment's model (what waits among them), batch by batch. */
+  /** Embed every row without a vector of this deployment's model (what waits among them), batch by batch —
+   *  in each space: the line of what it computes, and its question alone. */
   async _flush() {
     if (!this.embedder) return;
     this.pending.clear();
-    const rows = this.store.taskLog.missing(this.model, 10000);
-    for (let i = 0; i < rows.length; i += EMBED_BATCH) {
-      const batch = rows.slice(i, i + EMBED_BATCH);
-      const vecs = await this.embedder.embed(batch.map((r) => r.text), { dimensions: TASK_DIMS });
-      batch.forEach((r, j) => { if (vecs[j]) this.store.taskLog.setVector(r.id, this.model, normalized(vecs[j])); });
+    for (const by of SPACES) {
+      const rows = this.store.taskLog.missing(this.model, 10000, by);
+      for (let i = 0; i < rows.length; i += EMBED_BATCH) {
+        const batch = rows.slice(i, i + EMBED_BATCH);
+        const vecs = await this.embedder.embed(batch.map((r) => r.text), { dimensions: TASK_DIMS });
+        batch.forEach((r, j) => { if (vecs[j]) this.store.taskLog.setVector(r.id, this.model, normalized(vecs[j]), by); });
+      }
     }
   }
 
@@ -224,7 +244,7 @@ export class TaskIndex {
    * there is no embedder or it cannot be reached now, the rows with no vector (the thread makes local
    * ones) and a note saying so. A row the embedder has not reached yet is counted, never silently left out.
    */
-  async _read(timeRange, phrase) {
+  async _read(timeRange, phrase, by = 'question') {
     const { since, until } = windowOf(timeRange);
     let note = null;
     if (this.embedder) {
@@ -233,33 +253,45 @@ export class TaskIndex {
         if (this.flushing) await this.flushing.catch(() => {});
         await this._embedPending();
         const q = phrase ? normalized((await this.embedder.embed([phrase], { dimensions: TASK_DIMS }))[0]) : null;
-        const rows = this.store.taskLog.range({ since, until, model: this.model });
-        const all = this.store.taskLog.count({ since, until });
-        return { rows, q, model: this.model, ...(all > rows.length ? { not_embedded: all - rows.length } : {}) };
+        const rows = this.store.taskLog.range({ since, until, model: this.model, by });
+        const all = this.store.taskLog.count({ since, until, by });
+        return { rows, q, model: this.model, by, ...this._unasked(since, until, by), ...(all > rows.length ? { not_embedded: all - rows.length } : {}) };
       } catch (e) {
         this.logger(`✗ the embedder could not be reached: ${e?.message || e}`);
         note = `the embedder could not be reached (${e?.message || e}), so the tasks were compared by their words`;
       }
     }
-    return { rows: this.store.taskLog.range({ since, until }), q: null, model: LOCAL_MODEL, ...(note ? { note } : {}) };
+    return { rows: this.store.taskLog.range({ since, until, by }), q: null, model: LOCAL_MODEL, by, ...this._unasked(since, until, by), ...(note ? { note } : {}) };
+  }
+
+  /** By the question: how many tasks of the window have none (started before it was asked for) — left out, and said. */
+  _unasked(since, until, by) {
+    if (by !== 'question') return {};
+    const n = this.store.taskLog.count({ since, until }) - this.store.taskLog.count({ since, until, by });
+    return n > 0 ? { without_question: n } : {};
+  }
+
+  /** What is compared of a row in the space read: its question, or the line of what it computes. */
+  _compared(read) {
+    return read.rows.map((r) => (read.by === 'question' ? r.question : r.text));
   }
 
   /** What a task is said as here: what it computed, when and (where asked) how — never a way back to it. */
   _shown(r, score, how) {
-    return { at: new Date(r.at).toISOString(), tool: r.tool, ...(r.source ? { source: r.source } : {}), task: r.text, ...(score != null ? { similarity: Math.round(score * 1000) / 1000 } : {}), ...(how ? { how } : {}) };
+    return { at: new Date(r.at).toISOString(), tool: r.tool, ...(r.source ? { source: r.source } : {}), ...(r.question ? { question: r.question } : {}), task: r.text, ...(score != null ? { similarity: Math.round(score * 1000) / 1000 } : {}), ...(how ? { how } : {}) };
   }
 
   /** What every answer says of the read: the model, and what it could not compare. */
   _said(read) {
-    return { model: read.model, ...(read.not_embedded ? { not_embedded: read.not_embedded } : {}), ...(read.note ? { note: read.note } : {}) };
+    return { by: read.by, model: read.model, ...(read.without_question ? { without_question: read.without_question } : {}), ...(read.not_embedded ? { not_embedded: read.not_embedded } : {}), ...(read.note ? { note: read.note } : {}) };
   }
 
   /** The tasks most like a phrase, within a window — each with how it was computed. */
-  async similar({ search, time_range: timeRange, limit = 10 }) {
-    const read = await this._read(timeRange, search);
+  async similar({ search, time_range: timeRange, limit = 10, by = 'question' }) {
+    const read = await this._read(timeRange, search, by);
     const { rows } = read;
     const ranked = rows.length
-      ? await inThread('similar', { texts: rows.map((r) => r.text), ats: rows.map((r) => r.at), query: search, limit }, read.model === LOCAL_MODEL ? null : rows.map((r) => r.vector), read.q ? { field: 'queryVector', vector: read.q } : null)
+      ? await inThread('similar', { texts: this._compared(read), ats: rows.map((r) => r.at), query: search, limit }, read.model === LOCAL_MODEL ? null : rows.map((r) => r.vector), read.q ? { field: 'queryVector', vector: read.q } : null)
       : [];
     const hows = this.store.taskLog.hows(ranked.map(({ i }) => rows[i].id));
     return { ...this._said(read), searched: rows.length, tasks: ranked.map(({ i, s }) => this._shown(rows[i], s, hows.get(rows[i].id))) };
@@ -270,14 +302,14 @@ export class TaskIndex {
    * given) clustered — `clusters` of them, or the number whose clustering separates best — each with
    * its size, its share, its days, the words that set it apart and its most typical tasks.
    */
-  async themes({ time_range: timeRange, about = null, min_similarity: minSimilarity = null, clusters = null }) {
-    const read = await this._read(timeRange, about);
+  async themes({ time_range: timeRange, about = null, min_similarity: minSimilarity = null, clusters = null, by = 'question' }) {
+    const read = await this._read(timeRange, about, by);
     const { rows } = read;
     const out = { ...this._said(read), tasks_in_window: rows.length };
     if (!rows.length) return { ...out, ...(about ? { about, tasks_about: 0 } : {}), themes: [] };
     const floor = minSimilarity ?? (read.q ? 0.3 : 0.1);
     const found = await inThread('themes', {
-      texts: rows.map((r) => r.text), ats: rows.map((r) => r.at), tools: rows.map((r) => r.tool), sources: rows.map((r) => r.source),
+      texts: this._compared(read), ats: rows.map((r) => r.at), tools: rows.map((r) => r.tool), sources: rows.map((r) => r.source),
       about, minSimilarity: floor, clusters,
     }, read.model === LOCAL_MODEL ? null : rows.map((r) => r.vector), read.q ? { field: 'aboutVector', vector: read.q } : null);
     return {

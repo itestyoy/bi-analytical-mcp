@@ -237,7 +237,7 @@ test('a measure is typed by its aggregate: the earliest or latest of a column is
 
 test('a condition is a function: an earlier spelling is no form of one; a field a function does not read is refused', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
-  const { context_id } = await e.build_model({ action: 'start', name: 'cond', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'cond', source: 'events' });
   const add = (c) => e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [c] }] });
   // refused by the schema, as any value it does not take — and what it is today is taken
   const refusedNotToday = (today) => async (earlier) => {
@@ -269,7 +269,7 @@ test('a condition is a function: an earlier spelling is no form of one; a field 
 // not take; converting is a cast, a conditional aggregate an aggregate over a case.
 test('a typed read, an aggregate\'s where and a typed unnest are refused; what is written today is taken', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
-  const { context_id } = await e.build_model({ action: 'start', name: 'typed', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'typed', source: 'events' });
   const add = (...steps) => e.build_model({ action: 'add_steps', context_id, steps });
   const isTut = { fn: 'eq', args: [col('event_name'), val('tutorial')] };
   for (const earlier of [

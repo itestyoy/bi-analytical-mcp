@@ -433,7 +433,7 @@ export const pipelineDraftMethods = {
     if (!found) this._timeAxisFor(input.source, input.time_range); // refused before a context is made
     const ctx = input.context_id ? this._ctxToWrite(input.context_id) : this.ctxs.create();
     const source = found ? found.source : input.source;
-    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}) };
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}), ...(input.question ? { question: input.question } : {}) };
     if (base) this._holdTaskBase(ctx, base);
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
@@ -448,6 +448,7 @@ export const pipelineDraftMethods = {
       // (a task that read several models: its rows are its table's — source is only what the steps resolve against)
       ...(base && found.read.length > 1 ? { task_read: found.read, source_note: `the rows are task ${base.task_id}'s table, which read ${found.read.join(', ')}; source '${source}' is what these steps resolve relationships and properties against` } : {}),
       ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
+      ...(ctx.state.draft.question ? { question: ctx.state.draft.question } : {}),
       steps: [], column_count: cols.length,
       next: `Append steps with build_model({ request: { action: "add_steps", context_id: "${ctx.id}", steps: [...] } }) — a logical chunk at a time; each response shows what each step added or removed (include: ["columns"] or preview for the full list).`,
       recommendations: [
@@ -612,7 +613,8 @@ export const pipelineDraftMethods = {
     const name = input.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
     const description = input.description || origin.description;
-    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), ...(origin.semantic && after === total ? { semantic: JSON.parse(JSON.stringify(origin.semantic)) } : {}), checkpoints: [], ...(origin.base ? { base: JSON.parse(JSON.stringify(origin.base)) } : {}), ...(description ? { description } : {}) };
+    const question = input.question || origin.question;
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), ...(origin.semantic && after === total ? { semantic: JSON.parse(JSON.stringify(origin.semantic)) } : {}), checkpoints: [], ...(origin.base ? { base: JSON.parse(JSON.stringify(origin.base)) } : {}), ...(description ? { description } : {}), ...(question ? { question } : {}) };
     // a draft started from a task's table: the fork reads the same table as its step 0
     if (origin.base) {
       if (!this.ctxs.has(origin.base.owner) || !this.ctxs.hasPipelineModel(origin.base.owner, origin.base.model)) throw new ToolError(`the table this draft starts from (${origin.base.model}, task ${origin.base.task_id}) is gone — start a new draft from a task that still exists`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });

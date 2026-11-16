@@ -251,6 +251,8 @@ export class ContextManager {
       ...(c.state.pipeline_model?.description || c.state.draft?.description
         ? { description: c.state.pipeline_model?.description || c.state.draft?.description }
         : {}),
+      // …and the person's question it answers, restated when the build started
+      ...(c.state.draft?.question ? { question: c.state.draft.question } : {}),
       // every model the layer reads — those it declares measures or dimensions on and those it joins
       semantic_models: Object.keys(c.state.additions || {}).length ? [...new Set([...Object.keys(c.state.additions), ...(c.state.usedModels || [])])] : [],
       metrics: (c.state.metrics || []).map((m) => m.name),

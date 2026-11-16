@@ -14,7 +14,7 @@ import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { exprDefs } from './pipeline/compute.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, METRIC_TIME_RANGE, METRIC_QUERY_FIELDS, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, DRY_RUN, VALIDATE } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, METRIC_TIME_RANGE, METRIC_QUERY_FIELDS, ABOUT, ABOUT_FIELDS, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, DRY_RUN, VALIDATE } from './schema/fields.js';
 import { refSchema } from './schema/refs.js';
 import { display } from './schema/display.js';
 import { transportSchema } from './schema/transport.js';
@@ -114,7 +114,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   const pipelineFields = {
     context_id: { type: 'string', pattern: CTX, description: 'The context start returned.' },
     name: { type: 'string', pattern: TASK, description: 'A semantic_model step over the built table takes this name: give its measures and metrics other names.' },
-    description: { type: 'string', description: 'What this pipeline computes, shown by context list / describe.' },
+    description: ABOUT.description,
+    question: ABOUT.question,
     materialized: { enum: ['view', 'table'], default: 'table' },
     from_task: { type: 'string', pattern: TASK_ID, description: 'Start from the stored table of a finished task (a pipeline build, or a query with materialize: true).' },
     source: { type: 'string', enum: modelKeys },
@@ -137,18 +138,18 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   const startFields = { ...pipelineFields, context_id: { type: 'string', pattern: CTX, description: 'Its draft is replaced; omitted, a new context.' } };
   // a source is read within a window; a task's table was computed under its own already (a where step
   // filters it), so its form takes none
-  const startOptional = ['context_id', 'description', 'materialized', 'steps', 'materialize', ...echo];
+  const startOptional = ['context_id', 'materialized', 'steps', 'materialize', ...echo];
   const buildModel = {
     type: 'object',
     description: 'start → add_steps → (preview) → materialize; later steps read the materialized table instead of recomputing it.',
     anyOf: [
-      form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'The default.', required: ['name', 'source'], properties: pick(startFields, ['name', 'source', 'time_range', ...startOptional]) }),
-      form({ title: 'start from a task', tag: ['action', 'start'], optionalTag: true, tagDescription: 'The default.', required: ['name', 'from_task'], properties: pick(startFields, ['name', 'from_task', 'source', ...startOptional]) }),
+      form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'The default.', required: [...ABOUT_FIELDS, 'source'], properties: pick(startFields, [...ABOUT_FIELDS, 'source', 'time_range', ...startOptional]) }),
+      form({ title: 'start from a task', tag: ['action', 'start'], optionalTag: true, tagDescription: 'The default.', required: [...ABOUT_FIELDS, 'from_task'], properties: pick(startFields, [...ABOUT_FIELDS, 'from_task', 'source', ...startOptional]) }),
       step('add_steps', 'add steps', 'add_steps', ['steps'], ['materialize']),
       step('edit_step', 'edit a step', 'edit_step', ['index', 'step'], ['materialize']),
       step('insert_step', 'insert a step', 'insert_step', ['index', 'step'], ['materialize']),
       step('delete_step', 'delete a step', 'delete_step', ['index'], ['materialize']),
-      step('fork', 'fork the draft', 'fork: a new draft from steps 1..after', ['name'], ['description', 'after']),
+      step('fork', 'fork the draft', 'fork: a new draft from steps 1..after', ABOUT_FIELDS, ['after']),
       step('preview', 'preview the draft', 'preview: the steps and their SQL', [], ['validate'], []),
       step(['materialize', 'discard'], 'materialize or discard', 'materialize builds; discard drops the draft', [], [], []),
     ],
@@ -184,6 +185,9 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // (src/engine/semantic-query.js _metricSteps). Its fields are the one list METRIC_QUERY_FIELDS, which
   // also tells an earlier metric query apart (src/earlier-spelling.js).
   const queryFields = pick({
+      name: { type: 'string', pattern: TASK, description: 'This query\'s name (lowercase snake_case).' },
+      description: ABOUT.description,
+      question: ABOUT.question,
       steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'With a metrics step: where steps before it filter the rows (named as group_by names them); steps after it work on its result, naming a group_by item as group_by does and a metric as { metric }. Without one: a read of the built table. A join, unnest, funnel or python step is a build (from_task).' },
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: `The rows the task keeps (default ${KEPT_ROWS}).` },
@@ -196,7 +200,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     type: 'object',
     description: 'Start a query (or a batch), or read tasks back with task_ids.',
     $defs: pdefs,
-    anyOf: queryModes({ context_id: queryContextId, fields: queryFields }, batchOf({ type: 'object', additionalProperties: false, properties: queryFields }, 'queries'), readPaging),
+    anyOf: queryModes({ context_id: queryContextId, fields: queryFields, required: ABOUT_FIELDS }, batchOf({ type: 'object', additionalProperties: false, required: ABOUT_FIELDS, properties: queryFields }, 'queries'), readPaging),
   };
 
   // THE CONTEXTS — list them, describe one, or delete one or part of what it holds (the context, its

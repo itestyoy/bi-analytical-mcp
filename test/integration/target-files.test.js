@@ -39,7 +39,7 @@ for (const name of new Set([TEST_ENV, 'dbt-v2'])) {
     const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
     const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('tgt'), timeSpineDialect: 'duckdb' });
     const engine = settle(new Engine({ catalog, contextManager: ctxs, runner: createDbt({ environment, profilesDir: BASE }) }));
-    const s = await engine.build_model({ action: 'start', name: 'per_event', source: 'events' });
+    const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'per_event', source: 'events' });
     await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
       { stage: 'order_by', keys: [{ key: 'event_name', direction: 'asc' }] },

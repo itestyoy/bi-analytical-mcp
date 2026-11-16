@@ -222,7 +222,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 /** Run a pipeline of steps and return its materialized rows. */
 async function pipeRows(source, ...steps) {
-  const s = await engine.build_model({ action: 'start', name: `jn_${seq++}`, source });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `jn_${seq++}`, source });
   for (const step of steps) {
     const r = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
@@ -244,7 +244,7 @@ async function joinStats(source, joinStage, idColumn) {
   return { n: num(rows[0].n), distinct: num(rows[0].distinct_base) };
 }
 
-const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
+const q = (ctx, input) => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, ...input });
 
 // ═══════════ A. THE JOIN CONTRACT: every part named, unique on the joined side ═══════════
 //
@@ -363,7 +363,7 @@ test('21. a phantom validity window is dropped and the source still queries: cos
   assert.match(String(phantomPruned.acquisition || ''), /ghost_valid_from/);
   assert.match(String(phantomPruned.acquisition || ''), /no longer treated as slowly-changing/);
   assert.ok(!phantom.getModel('acquisition').scd, 'the flag went with the columns');
-  const r = await phantomEngine.query_model({ context_id: phantomCostCtx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
+  const r = await phantomEngine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: phantomCostCtx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].cost), 17.5), `cost=${r.rows[0].cost}`);
 });
@@ -382,7 +382,7 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   assert.ok(!phantom.joinableModels().includes('users'));
   // …and with no contract it is joined by nothing: a semantic layer's join of it is refused (it would
   // match every version of u1), and a layer over the events alone still parses and answers
-  await assert.rejects(() => phantomEngine.build_model({ action: 'start', name: 'jphev', source: 'events', steps: [{ stage: 'semantic_model', join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }], measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] }] }),
+  await assert.rejects(() => phantomEngine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'jphev', source: 'events', steps: [{ stage: 'semantic_model', join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }], measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] }] }),
     /'users' declares no join contract, so it is not joinable|unexpected property 'join'|`steps\.0\.join\.0/);
   const sm = await declare(phantomEngine, {
     name: 'jphev',
@@ -390,7 +390,7 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
-  const res = await phantomEngine.query_model({ context_id: sm.context_id, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
+  const res = await phantomEngine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: sm.context_id, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
   assert.equal(res.ok, true, JSON.stringify(res.error));
   assert.equal(sumCol(res.rows, 'evts'), 184);
 });
@@ -430,7 +430,7 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   // warehouse: one assignment per player in the experiment, so every one of the 184 events pairs once.
   assert.deepEqual(phantom.entityKey('experiments', 'user'), [{ column: 'player_id_of_internal' }]);
   assert.equal(phantom.joinTargetFor('user'), 'users');
-  const st = await phantomEngine.build_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
+  const st = await phantomEngine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `ph_${seq++}`, source: 'events' });
   for (const stage of [
     { stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment: 'checkout_flow' }, kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'distinct_base', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } }] },
@@ -503,7 +503,7 @@ function ordered(sql, cols) {
 async function generatedSql(...args) {
   const eng = typeof args[0] === 'string' ? engine : args.shift();
   const [source, ...steps] = args;
-  const s = await eng.build_model({ action: 'start', name: `gen_${seq++}`, source });
+  const s = await eng.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `gen_${seq++}`, source });
   for (const step of steps) {
     const r = await eng.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
@@ -750,7 +750,7 @@ test('40. governed: spend and events from two sources, sliced by the same instal
     ],
   });
   assert.equal(task.parse.ok, true, JSON.stringify(task.parse));
-  const r = await engine.query_model({
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks',
     context_id: task.context_id,
     steps: [{ stage: 'metrics', metrics: ['cost', 'evts', 'cost_per_event'], group_by: [{ source: 'users', column: 'country' }] }],
   });
@@ -786,18 +786,18 @@ test('41. a join path without its owning model is refused, and works once loaded
   });
   assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
   await assert.rejects(
-    () => engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country' }] }] }),
+    () => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country' }] }] }),
     /needs model 'users', which this context does not read.*join it in the build's semantic_model step — \{ source: 'users', on: \{ … \} \}/s,
   );
   // the metric itself answers fine — it is the PATH that needed the model, not the measure.
-  const flat = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
+  const flat = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
   assert.equal(num(flat.rows[0].evts), 184);
   // the fix the refusal names — the model joined in the semantic_model step on its contract — loads it
   // into this context, and the same group_by now answers, every event counted once
   const loadedNow = await editLayer(engine, bare.context_id, (st) => ({ ...st, join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }] }));
   assert.equal(loadedNow.parse.ok, true, JSON.stringify(loadedNow.parse));
-  const viaUpdate = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const viaUpdate = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(viaUpdate.ok, true, JSON.stringify(viaUpdate.error));
   assert.equal(sumCol(viaUpdate.rows, 'evts'), 184);
   // '14. governed = pipeline for events too': the point-in-time breakdown by country, as 13's pipeline
@@ -822,7 +822,7 @@ test('42. a joined column keys the next join: the spend record of the install da
     { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', expr: { fn: 'count' } }] });
   assert.deepEqual(mapCol(rows, 'media_source', 'n'), { applovin: 3, google: 2, meta: 5, organic: 3 });
   // …and a part naming a column the rows do not have (yet) is refused at the step
-  const s2 = await engine.build_model({ action: 'start', name: `ch_${seq++}`, source: 'crashlytics' });
+  const s2 = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `ch_${seq++}`, source: 'crashlytics' });
   await assert.rejects(
     () => engine.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', ...SPEND_ON('install_date'), attrs: [{ column: 'media_source' }] }] }),
     /install_date/,
@@ -957,13 +957,13 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
 test('50. a fact that owns a key exposes its attributes to a governed group-by; 51. a `unique` key that is unique adds no row: 184 stays 184', opts, async (t) => {
   if (skip(t)) return;
   assert.equal(ownerCatalog.joinTargetFor('ad_funnel'), 'crashlytics', '[50] the crash source is the target');
-  const r = await ownerEngine.query_model({
+  const r = await ownerEngine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks',
     context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.deepEqual(splitBy(r, 'app_version', 'evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '[50] events per crash app_version, via ad_funnel');
 
-  const flat = await ownerEngine.query_model({ context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
+  const flat = await ownerEngine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
   assert.equal(num(flat.rows[0].evts), 184, '[51] ungrouped, nothing is joined and the count is honest');
 
@@ -985,7 +985,7 @@ test('52. a one-column `unique` key answers exactly as the two-column one', opts
   assert.deepEqual(oneCatalog.entityKey('events', 'ad_funnel'), [{ column: 'tracking_id' }]);
 
   // both attributes through the one join, in one query (as 50's): each split is a marginal of it
-  const r = await oneEngine.query_model({
+  const r = await oneEngine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks',
     context_id: oneCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -1014,7 +1014,7 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   const refused = []; const totals = {}; const answered = {};
   const ask = async (group_by) => {
     try {
-      const r = await trueEngine.query_model({ context_id: trueCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by }] });
+      const r = await trueEngine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: trueCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by }] });
       if (!r.ok) return { why: JSON.stringify(r.error) };
       if (!r.rows.length) return { why: 'answered with no rows' };
       return { r };

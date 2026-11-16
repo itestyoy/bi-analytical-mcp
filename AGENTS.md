@@ -833,10 +833,21 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   their names, which everyone queries; semantic_index's `{ status }` says a task by its tool, status
   and age; a context's describe counts the drafts that read its tables instead of naming them; the
   task index (below) answers no id. The one exception is `explore_errors`, kept whole for debugging.
+- EVERY START SAYS WHAT IT IS FOR, IN THE SAME THREE REQUIRED FIELDS (`ABOUT_FIELDS` / `ABOUT`,
+  src/schema/fields.js — one definition): build_model's start and fork, and every query of query_model
+  (one, or each of a batch) take `name`, `description` (what it computes) and `question` — the person's
+  question restated in one sentence, what they want to know or decide, the business problem, its
+  description asking for no personal data. A draft keeps its question (context list / describe say it);
+  a recipe's request that says none is served with the recipe's own (its title, its when_to_use, its id
+  — src/recipes.js `aboutOf`), for the caller to replace with the person's.
 - WHAT HAS BEEN ASKED IS KEPT BY MEANING, NEVER AS A WAY TO THE DATA (src/task-index.js, `engine.taskIndex`):
   every task a tool starts is recorded as it starts (the task runtime's `onStart`) — one line of text
   that says what it computes (its context's name and description, the source, the events, metrics,
-  columns and values its input names, its window) and a vector of it: the deployment's embedder's
+  columns and values its input names, its window) and, apart from it, the person's QUESTION the task
+  answers (its call's own, else its context's build's) — TWO SPACES, each with a vector of its own: the
+  question's made from the question alone, so what the company asks is read apart from how it was
+  computed (`by: "question"`, the default, or `"computation"`; a task from before the question has none
+  and is read by its computation only, counted as `without_question`) — and a vector of each: the deployment's embedder's
   (MEMORY_EMBEDDINGS, at `TASK_DIMS`, after the start and never in its way, stored with its model and
   re-embedded for another), or without one a local TF-IDF vector over the tasks read. semantic_index's
   `{ tasks }` view reads it — the tasks like a phrase, or the themes of a period (narrowed to a phrase,

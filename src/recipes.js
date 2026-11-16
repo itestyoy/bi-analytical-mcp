@@ -165,6 +165,23 @@ function refSubject(semantic) {
   };
 }
 
+/**
+ * WHAT A RECIPE'S REQUESTS SAY THEY ARE FOR — a start and a query take a name, a description and the
+ * person's question (src/schema/fields.js ABOUT_FIELDS); a recipe's file may say none of them (one
+ * written before they were asked for, or a deployment's). What it leaves out is the recipe's own word:
+ * its title as the description, what it is for (`when_to_use`) as the question — for the caller to
+ * replace with the person's own, as the recipe view says. `name` (a query's) is the recipe's id.
+ */
+const clip = (s, n = 500) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+const queryName = (r, i) => clip(`${String(r.id || 'recipe').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^[^a-z]+/, '')}${i ? `_${i + 1}` : ''}`, 41).replace(/…$/, '').padEnd(3, '_');
+function aboutOf(r) {
+  const description = clip(r.title || r.id);
+  const question = clip(r.when_to_use || r.title || r.id);
+  return (req, name = null) => (req && typeof req === 'object' && !Array.isArray(req)
+    ? { ...(name && !req.name ? { name } : {}), ...req, ...(!req.description && description ? { description } : {}), ...(!req.question && question ? { question } : {}) }
+    : req);
+}
+
 /** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. An example query
  *  written for an earlier version (a metric query's `metrics`, `group_by` and `where` beside its steps,
  *  its `order_by`, a read's `stages` / `transform`, a `{ model, attribute }` it groups or filters by) is
@@ -175,11 +192,12 @@ function readFile(path, origin, catalog = null) {
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   return (raw.recipes || []).map((r) => {
     const semantic = r.semantic_payload ? semanticStartRequest(r.semantic_payload, catalog) : undefined;
+    const about = aboutOf(r);
     return {
       ...r,
-      ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload, catalog) } : {}),
-      ...(semantic ? { semantic_payload: semantic } : {}),
-      ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q) => currentQueryInput(q, { subject: refSubject(semantic), propertyType: propertyTypes(catalog) })) } : {}),
+      ...(r.pipeline_payload ? { pipeline_payload: about(pipelineStartRequest(r.pipeline_payload, catalog)) } : {}),
+      ...(semantic ? { semantic_payload: about(semantic) } : {}),
+      ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q, i) => about(currentQueryInput(q, { subject: refSubject(semantic), propertyType: propertyTypes(catalog) }), queryName(r, i))) } : {}),
       ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
       origin,
     };

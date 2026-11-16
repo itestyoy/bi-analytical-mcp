@@ -632,7 +632,7 @@ test('a context delete removes one eventstream in the feature\'s own form, which
   assert.ok(e.ctxs.get(ctx.id), 'and so is the context');
   await assert.rejects(Promise.resolve().then(() => e.context({ action: 'delete', what: 'eventstream', context_id: ctx.id, eventstream: 'nope' })), (err) => err.field === 'eventstream' && /no eventstream 'nope'.*it holds other/.test(err.message));
   await assert.rejects(Promise.resolve().then(() => e.context({ action: 'delete', what: 'eventstream', context_id: ctx.id })), /invalid input: .*missing required property 'eventstream'/);
-  const plain = (await e.build_model({ action: 'start', name: 'plain', source: 'events' })).context_id;
+  const plain = (await e.build_model({ action: 'start', name: 'plain', description: 'what the test computes', question: 'what the test asks', source: 'events' })).context_id;
   await assert.rejects(Promise.resolve().then(() => e.context({ action: 'delete', what: 'eventstream', context_id: plain, eventstream: 'es' })), (err) => err.field === 'context_id' && /is not a path-analysis context/.test(err.message));
   assert.equal(e.schemas.context.anyOf.map((b) => deref(e.schemas.context, b)).filter((f) => pinned(e.schemas.context, f, 'what').includes('eventstream')).length, 1);
   // off: no such form, and `what` is one of the core's

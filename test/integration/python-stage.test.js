@@ -143,7 +143,7 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
 
 test('python stage: the incremental builder materializes the same split and returns the rows', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: 'seg2', source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg2', source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
   const keep = { name: 'keep', params: ['df', 'columns'], body: "return df[columns]" };
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } }] });

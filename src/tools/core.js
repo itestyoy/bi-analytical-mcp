@@ -20,12 +20,12 @@ import { OUTPUTS } from '../schema/outputs.js';
  */
 export const EXAMPLES = {
   build_model: [
-    { action: 'start', name: 'per_event', source: '<events source>', steps: [{ stage: 'aggregate', group_by: ['<event-name column>'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], materialize: true },
-    { action: 'start', name: 'activity', source: '<events source>', steps: [{ stage: 'semantic_model', measures: [{ name: 'events', expr: { fn: 'count' } }], metrics: [{ name: 'events', type: 'simple', measure: 'events' }] }], materialize: true },
+    { action: 'start', name: 'per_event', description: 'Events per event name', question: 'What do players do most often?', source: '<events source>', steps: [{ stage: 'aggregate', group_by: ['<event-name column>'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], materialize: true },
+    { action: 'start', name: 'activity', description: 'Events as a daily metric', question: 'How active are players day by day?', source: '<events source>', steps: [{ stage: 'semantic_model', measures: [{ name: 'events', expr: { fn: 'count' } }], metrics: [{ name: 'events', type: 'simple', measure: 'events' }] }], materialize: true },
   ],
   query_model: [
-    { context_id: '<context_id>', steps: [{ stage: 'metrics', metrics: ['events'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-31' } },
-    { context_id: '<context_id>', steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }, { stage: 'limit', limit: 10 }] },
+    { context_id: '<context_id>', name: 'daily_events', description: 'Events per day in January', question: 'How did activity change over January?', steps: [{ stage: 'metrics', metrics: ['events'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-31' } },
+    { context_id: '<context_id>', name: 'top_events', description: 'The ten most frequent events', question: 'What do players do most often?', steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }, { stage: 'limit', limit: 10 }] },
   ],
 };
 

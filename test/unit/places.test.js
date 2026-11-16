@@ -174,7 +174,7 @@ test('a metric query refuses in the call what its group_by and its where steps d
   const e = engine();
   const { context_id } = await declare(e, { name: 'plc', semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'users' }], metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }] });
   const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['rows'], ...extra });
-  const query = (...steps) => e.query_model({ context_id, steps });
+  const query = (...steps) => e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id, steps });
   const where = (...conditions) => ({ stage: 'where', conditions });
   // a source, an event: no ref the tool takes, so no form of its $defs.ref
   for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }]) {
@@ -198,7 +198,7 @@ test('a metric query refuses in the call what its group_by and its where steps d
 
 test('a pipeline step over a source\'s rows refuses a metric and another model\'s column, naming where each is read', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'plc', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'plc', source: 'events' });
   const where = (leaf) => [{ stage: 'where', conditions: [{ fn: 'eq', args: [leaf, { value: 1 }] }] }];
   const ctx = e.ctxs.get(context_id);
   for (const [leaf, said] of [[{ metric: 'revenue' }, /\{ metric \} /], [{ source: 'users', column: 'country' }, /\{ source, column \} /]]) {

@@ -25,10 +25,16 @@ const TOPICS = {
   retention: ['day 7 retention of new installs by country', 'retention d1 d7 cohorts of installs by week', 'retention of installs from organic by country', 'install cohort retention curve d1 d3 d7'],
   crashes: ['crash rate and anr by app version', 'fatal crashes by device model and app version', 'anr and crash counts after the update by version', 'crash free players by app version and device'],
 };
+// …and the person's question each answers, in the business's words — a space of its own, read by default
+const QUESTIONS = {
+  ads: ['Which ad network brings us the most ad revenue?', 'Is our ad revenue from each network growing?', 'Which ad placement earns the most ad revenue?', 'How much ad revenue does rewarded video bring per network?'],
+  retention: ['Do new players come back after a week?', 'Do new players come back better than last month?', 'Do organic players come back more than paid players?', 'How many new players come back after the first day?'],
+  crashes: ['Did the update make the game crash more?', 'Which devices crash the most since the update?', 'Is the game crashing more since the update?', 'How many players play without a crash since the update?'],
+};
 const DAY = Date.UTC(2026, 9, 20);
 
-const TASKS = Object.entries(TOPICS).flatMap(([topic, texts]) => texts.map((t) => ({ topic, t })))
-  .map(({ topic, t }, i) => ({ id: `${topic}${i}`, tool: 'build_model', ctx: { state: { draft: { name: `${topic}_${i}`, description: t, source: 'events' } } }, at: DAY + (i % 3) * 86400000 }));
+const TASKS = Object.entries(TOPICS).flatMap(([topic, texts]) => texts.map((t, j) => ({ topic, t, q: QUESTIONS[topic][j] })))
+  .map(({ topic, t, q }, i) => ({ id: `${topic}${i}`, tool: 'build_model', ctx: { state: { draft: { question: q, name: `${topic}_${i}`, description: t, source: 'events' } } }, at: DAY + (i % 3) * 86400000 }));
 function seeded(index) {
   for (const task of TASKS) index.record(task);
 }
@@ -39,7 +45,7 @@ for (const [label, store] of [['in memory', () => openStore()], ['sqlite', () =>
     const s = store(); opened.push(() => s.close?.());
     const index = new TaskIndex({ store: s });
     seeded(index);
-    const found = await index.similar({ search: 'retention of installs by country cohorts', limit: 4 });
+    const found = await index.similar({ search: 'retention of installs by country cohorts', limit: 4, by: 'computation' });
     assert.equal(found.searched, 12);
     assert.deepEqual(found.tasks.map((t) => topicOf(t.task)), ['retention', 'retention', 'retention', 'retention']);
     for (const t of found.tasks) for (const k of ['id', 'task_id', 'context_id', 'table']) assert.equal(k in t, false, `${k} is not said`);
@@ -49,7 +55,7 @@ for (const [label, store] of [['in memory', () => openStore()], ['sqlite', () =>
     const s = store(); opened.push(() => s.close?.());
     const index = new TaskIndex({ store: s });
     seeded(index);
-    const all = await index.themes({});
+    const all = await index.themes({ by: 'computation' });
     assert.equal(all.tasks_in_window, 12);
     assert.equal(all.themes.length, 3);
     for (const th of all.themes) {
@@ -57,9 +63,9 @@ for (const [label, store] of [['in memory', () => openStore()], ['sqlite', () =>
       assert.equal(new Set(th.examples.map((x) => topicOf(x.task))).size, 1, 'a theme holds one subject');
     }
     // the first day only: one task of every third
-    const day1 = await index.themes({ time_range: { start: '2026-10-20', end: '2026-10-20' } });
+    const day1 = await index.themes({ time_range: { start: '2026-10-20', end: '2026-10-20' }, by: 'computation' });
     assert.equal(day1.tasks_in_window, 4);
-    const about = await index.themes({ about: 'crash anr app version' });
+    const about = await index.themes({ about: 'crash anr app version', by: 'computation' });
     assert.equal(about.tasks_about, 4);
     assert.deepEqual(about.themes.flatMap((t) => t.examples.map((x) => topicOf(x.task))).filter((x) => x !== 'crashes'), []);
   });
@@ -70,19 +76,74 @@ test('with an embedder: vectors are its, asked at TASK_DIMS, stored with its mod
   const calls = [];
   // a stand-in embedder: the local vectors over the texts the index keeps, so the subjects stay apart
   const local = localVectors(TASKS.map((t) => taskText(t)));
-  const embedder = (model) => ({ model, embed: async (texts, opts) => { calls.push({ model, n: texts.length, opts }); return texts.map((t) => local.of(t)); } });
+  const asked = TASKS.map((t) => t.ctx.state.draft.question);
+  const localQ = localVectors(asked);
+  const embedder = (model) => ({ model, embed: async (texts, opts) => { calls.push({ model, n: texts.length, opts, texts }); return texts.map((t) => (asked.includes(t) ? localQ.of(t) : local.of(t))); } });
   const index = new TaskIndex({ store: s, embedder: embedder('m1') });
   seeded(index);
-  const themes = await index.themes({});
+  const themes = await index.themes({ by: 'computation' });
   assert.equal(themes.model, `m1@${TASK_DIMS}`);
   assert.equal(themes.themes.length, 3);
   assert.ok(calls.every((c) => c.opts?.dimensions === TASK_DIMS));
   assert.equal(s.taskLog.missing(`m1@${TASK_DIMS}`).length, 0, 'every task has its vector');
+  assert.equal(s.taskLog.missing(`m1@${TASK_DIMS}`, 1000, 'question').length, 0, '…and its question one of its own');
+  const embedded = calls.flatMap((c) => c.texts);
+  for (const t of TASKS) assert.ok(embedded.includes(t.ctx.state.draft.question), 'a question is embedded alone, apart from the line of what was computed');
   // a deployment that switches models: the rows are embedded again when the index is read
   const other = new TaskIndex({ store: s, embedder: embedder('m2') });
-  const again = await other.similar({ search: 'crash by app version', limit: 2 });
+  const again = await other.similar({ search: 'crash by app version', limit: 2, by: 'computation' });
   assert.equal(again.searched, 12);
   assert.deepEqual(again.tasks.map((t) => topicOf(t.task)), ['crashes', 'crashes']);
+});
+
+// BY THE QUESTION (the default): what the company asks, read apart from what was computed — the
+// person's question has a vector of its own, so a phrase in the business's words finds the tasks that
+// answered it, the themes are the questions', and every task says the question it answered.
+test('by the question, the default: the tasks whose question is like a phrase come first, the themes are the questions\'', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  seeded(index);
+  const found = await index.similar({ search: 'do new players come back', limit: 4 });
+  assert.equal(found.by, 'question');
+  assert.deepEqual(found.tasks.map((t) => topicOf(t.task)), ['retention', 'retention', 'retention', 'retention']);
+  assert.ok(found.tasks.every((t) => QUESTIONS.retention.includes(t.question)), 'each says the question it answered');
+  const themes = await index.themes({});
+  assert.equal(themes.by, 'question');
+  assert.equal(themes.themes.length, 3);
+  for (const th of themes.themes) assert.equal(new Set(th.examples.map((x) => topicOf(x.task))).size, 1, 'a theme holds one subject');
+});
+
+test('the two spaces are independent: one computation for two questions falls apart by the question, together by the computation', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  const same = 'daily active players by country';
+  const asked = [
+    ...['Is the new marketing campaign bringing players in?', 'Did the marketing campaign in Brazil bring players?', 'Which marketing campaign brought the most players?'],
+    ...['Did the server outage drive players away?', 'How many players did the server outage cost us?', 'Are players back after the server outage?'],
+  ];
+  asked.forEach((q, i) => index.record({ id: `t${i}`, tool: 'build_model', ctx: { state: { draft: { name: `dau_${i}`, description: same, question: q, source: 'events' } } }, at: DAY + i }));
+  const byQuestion = await index.themes({ clusters: 2 });
+  const groups = byQuestion.themes.map((th) => th.examples.map((x) => /campaign/.test(x.question) ? 'campaign' : 'outage'));
+  for (const g of groups) assert.equal(new Set(g).size, 1, 'by the question: the campaign and the outage apart');
+  const found = await index.similar({ search: 'marketing campaign', limit: 3 });
+  assert.ok(found.tasks.every((t) => /campaign/.test(t.question)));
+});
+
+test('a task from before the question was asked for is read by its computation only, and the question space says how many it leaves out', async () => {
+  const s = openStore(); opened.push(() => s.close?.());
+  const index = new TaskIndex({ store: s });
+  index.record({ id: 'old', tool: 'build_model', ctx: { state: { draft: { name: 'old_one', description: 'crash rate by version', source: 'events' } } }, at: DAY });
+  index.record({ id: 'new', tool: 'build_model', ctx: { state: { draft: { name: 'new_one', description: 'crash rate by version', question: 'Did the update make the game crash more?', source: 'events' } } }, at: DAY });
+  const q = await index.similar({ search: 'crash' });
+  assert.equal(q.searched, 1);
+  assert.equal(q.without_question, 1);
+  const c = await index.similar({ search: 'crash', by: 'computation' });
+  assert.equal(c.searched, 2);
+  // a query's own question is its — else its context's build's
+  index.record({ id: 'q1', tool: 'query_model', ctx: { state: { draft: { question: 'the build\'s question' } } }, input: { name: 'q_one', description: 'd', question: 'the query\'s own question', steps: [] }, at: DAY });
+  index.record({ id: 'q2', tool: 'query_model', ctx: { state: { draft: { question: 'the build\'s question' } } }, input: { steps: [] }, at: DAY });
+  const asked = (await index.similar({ search: 'question', limit: 10 })).tasks.map((t) => t.question);
+  assert.ok(asked.includes('the query\'s own question') && asked.includes('the build\'s question'));
 });
 
 test('a clustering is the same on every run', () => {
@@ -94,12 +155,13 @@ test('every task a tool starts is recorded as it starts; semantic_index reads th
   const e = new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('task-index-engine') }) });
   opened.push(() => e.close());
   const steps = [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }];
-  const id = e.tasks.start(null, 'build_model', async () => ({ ok: true }), { input: { source: 'events', context_id: 'abc123', from_task: 'aaaaaaaaaaaa', steps } });
+  const id = e.tasks.start(null, 'build_model', async () => ({ ok: true }), { input: { name: 'test_query', description: 'what the test computes', question: 'what the test asks', source: 'events', context_id: 'abc123', from_task: 'aaaaaaaaaaaa', steps } });
   assert.ok(e.store.taskLog.has(id));
   const found = await e.semantic_index({ tasks: { search: 'level completed' } });
   assert.equal(found.searched, 1);
   // how it was computed is said — its steps — and nothing that names stored work
-  assert.deepEqual(found.tasks[0].how, { source: 'events', steps });
+  assert.deepEqual(found.tasks[0].how, { name: 'test_query', description: 'what the test computes', source: 'events', steps });
+  assert.equal(found.tasks[0].question, 'what the test asks', 'the question is said beside how, not in it');
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ tasks: { search: 'x', themes: true } })), /tasks/);
   await assert.rejects(Promise.resolve().then(() => e.semantic_index({ tasks: { themes: true, limit: 3 } })), /tasks/);
 });
@@ -110,7 +172,7 @@ test('nothing kept or answered hands an id on: a checkpoint, a context, an id sp
   const ID = 'abcdef123456';
   index.record({
     id: 't1', tool: 'build_model',
-    ctx: { state: { draft: { name: 'retention_rerun', description: `retention, rerun of ${ID}`, source: 'events' } } },
+    ctx: { state: { draft: { question: 'what the test asks', name: 'retention_rerun', description: `retention, rerun of ${ID}`, source: 'events' } } },
     input: { action: 'materialize', context_id: ID, name: 'retention_rerun', steps: [{ stage: 'limit', limit: 1 }], from_checkpoint: { at: 2, model: `pipe_retention_${ID}_c2` }, note: `see pipe_x_${ID}` },
   });
   const found = await index.similar({ search: 'retention rerun' });
@@ -122,7 +184,7 @@ test('nothing kept or answered hands an id on: a checkpoint, a context, an id sp
 test('a long string of a task\'s steps is kept cut', async () => {
   const s = openStore(); opened.push(() => s.close?.());
   const index = new TaskIndex({ store: s });
-  index.record({ id: 't1', tool: 'build_model', ctx: { state: { draft: { name: 'scoring', source: 'events' } } }, input: { steps: [{ stage: 'python', functions: [{ name: 'f', params: ['df'], body: 'x'.repeat(30000) }] }] } });
+  index.record({ id: 't1', tool: 'build_model', ctx: { state: { draft: { description: 'what the test computes', question: 'what the test asks', name: 'scoring', source: 'events' } } }, input: { steps: [{ stage: 'python', functions: [{ name: 'f', params: ['df'], body: 'x'.repeat(30000) }] }] } });
   const [t] = (await index.similar({ search: 'scoring' })).tasks;
   assert.ok(t.how.steps[0].functions[0].body.length < 1100);
 });
@@ -132,10 +194,10 @@ test('an embedder that cannot be reached: the tasks are compared by their words,
   const embedder = { model: 'down', embed: async () => { throw new Error('embeddings HTTP 503'); } };
   const index = new TaskIndex({ store: s, embedder });
   seeded(index);
-  const found = await index.similar({ search: 'crash by app version', limit: 2 });
+  const found = await index.similar({ search: 'crash by app version', limit: 2, by: 'computation' });
   assert.match(found.note, /could not be reached/);
   assert.deepEqual(found.tasks.map((t) => topicOf(t.task)), ['crashes', 'crashes']);
-  const themes = await index.themes({});
+  const themes = await index.themes({ by: 'computation' });
   assert.equal(themes.themes.length, 3);
 });
 
@@ -147,13 +209,13 @@ test('a task is sent to the embedder once, however many reads wait for it', asyn
   const index = new TaskIndex({ store: s, embedder });
   seeded(index);
   await Promise.all([index.similar({ search: 'crash' }), index.similar({ search: 'retention' }), index.themes({})]);
-  assert.equal(embedded - 2, 12, 'twelve tasks, plus the two phrases searched for');
+  assert.equal(embedded - 2, 24, 'twelve tasks, each once in either space — what it computed and its question — plus the two phrases searched for');
 });
 
 test('a task whose context is gone, or says nothing of what it was for, is not taken from the registry', () => {
   const s = openStore(); opened.push(() => s.close?.());
   const index = new TaskIndex({ store: s });
-  const ctxs = { a: { state: { draft: { name: 'kept_one', source: 'events' } } }, b: { state: {} } };
+  const ctxs = { a: { state: { draft: { description: 'what the test computes', question: 'what the test asks', name: 'kept_one', source: 'events' } } }, b: { state: {} } };
   index.backfill([{ id: 'j1', tool: 'query_model', contextId: 'a' }, { id: 'j2', tool: 'query_model', contextId: 'b' }, { id: 'j3', tool: 'query_model', contextId: 'gone' }, { id: 'j4', tool: 'query_model' }], (id) => ctxs[id] || null);
   assert.deepEqual(['j1', 'j2', 'j3', 'j4'].filter((id) => s.taskLog.has(id)), ['j1']);
 });
@@ -162,7 +224,7 @@ test('a theme\'s share is of the tasks clustered, one or many', async () => {
   const s = openStore(); opened.push(() => s.close?.());
   const index = new TaskIndex({ store: s });
   seeded(index);
-  const one = await index.themes({ about: 'fatal crashes by device model and app version', min_similarity: 0.6 });
+  const one = await index.themes({ about: 'fatal crashes by device model and app version', min_similarity: 0.6, by: 'computation' });
   assert.equal(one.tasks_about, 1);
   assert.equal(one.themes[0].share, 1);
 });
@@ -172,7 +234,7 @@ test('clustering a long window runs in a thread of its own: the server\'s thread
   const index = new TaskIndex({ store: s });
   for (let i = 0; i < 1500; i += 1) {
     const [topic, texts] = Object.entries(TOPICS)[i % 3];
-    index.record({ id: `x${i}`, tool: 'build_model', ctx: { state: { draft: { name: `${topic}_${i}`, description: texts[i % 4], source: 'events' } } }, at: DAY + i * 1000 });
+    index.record({ id: `x${i}`, tool: 'build_model', ctx: { state: { draft: { question: 'what the test asks', name: `${topic}_${i}`, description: texts[i % 4], source: 'events' } } }, at: DAY + i * 1000 });
   }
   let ticks = 0;
   const beat = setInterval(() => { ticks += 1; }, 10);

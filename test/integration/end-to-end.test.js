@@ -75,7 +75,7 @@ after(async () => { backend?.close?.(); engine?.close(); if (wh) await wh.stop()
 // ───────────────────────── 3. PIPELINE (incremental) ─────────────────────────
 test('3a. build_model: start → add_steps (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: 'e2e_funnel', source: 'events', include: ['columns'] });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'e2e_funnel', source: 'events', include: ['columns'] });
   assert.ok(s.context_id, 'start returns a context_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   S.draftId = s.context_id;
@@ -134,7 +134,7 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
 
-  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.revenue)]));
   assert.equal(by.US, 35);
@@ -174,7 +174,7 @@ test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 
   assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));
 
   const names = ['per_payer_stored', 'per_payer_declared', 'per_payer_mixed'];
-  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers', ...names] }] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers', ...names] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].payers), 7, '[payers] distinct payers = 7 (SEED_DATA §3)');
   const [payers] = (await wh.query(`select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'iap_purchase_completed'`)).rows;
@@ -190,9 +190,9 @@ test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 
   // Recommendation #4: count_distinct per day folded again after the metrics step is non-additive →
   // prefer HLL sketches; the same series read as it is carries no such warning.
   const day = { time: 'metric_time', grain: 'day' };
-  const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }] });
+  const byDay = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }] });
   assert.ok(!byDay.recommendations.some((x) => /once per bucket/i.test(x)), `a series read as it is: ${JSON.stringify(byDay.recommendations)}`);
-  const summed = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }, { stage: 'aggregate', measures: [{ name: 'payer_days', expr: { fn: 'sum', args: [{ metric: 'payers' }] } }] }] });
+  const summed = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }, { stage: 'aggregate', measures: [{ name: 'payer_days', expr: { fn: 'sum', args: [{ metric: 'payers' }] } }] }] });
   assert.ok(summed.recommendations.some((x) => /once per bucket/i.test(x) && /HLL/i.test(x)), `distinct-by-time refolded should warn + suggest HLL: ${JSON.stringify(summed.recommendations)}`);
 });
 
@@ -224,7 +224,7 @@ test('5a. build_model fed the conversion recipe steps → per-variant aggregates
   // is the documented fallback; here we prove the add_steps path also works.)
   const r = recipes.list.find((x) => x.id === 'experiment_conversion');
   const steps = r.pipeline_payload.steps;
-  const start = await engine.build_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.source });
+  const start = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.source });
   for (const step of steps) {
     const a = await engine.build_model({ action: 'add_steps', context_id: start.context_id, steps: [step] });
     assert.ok(Number.isInteger(stepEffect(a).step_index), 'each add_steps advances the draft');

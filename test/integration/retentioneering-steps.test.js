@@ -329,7 +329,7 @@ test('a path by a composite key of columns, its events renamed and merged into o
 test('a where between two values (both ends included), and a top N: the most frequent events of those rows keep their names, the rest is "other" — no event dropped', opts, async (t) => {
   if (skip(t)) return;
   const src = (await wh.query('select session_number as s, event_name as e from fct_analytics_events')).rows;
-  const b = await w.startPrepared({ description: 'what the test computes', question: 'what the test asks', name: 'sessions_1_2', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
+  const b = await w.startPrepared({ name: 'sessions_1_2', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   const inSessions = src.filter((x) => x.s >= 1 && x.s <= 2);

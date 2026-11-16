@@ -138,7 +138,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   // Declare the metric the discovery pointed at, then answer with it. dim_users is SCD-2, so
   // MetricFlow applies the validity window itself: each spend row is attributed to the install
   // version valid on the spend day.
-  const ctx = await mcpTask({ description: 'what the test computes', question: 'what the test asks',
+  const ctx = await mcpTask({
     name: 'e2e_ua', source: 'acquisition',
     join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'spend_date' } }],
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
@@ -299,7 +299,7 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
 test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13', opts, async (t) => {
   if (skip(t)) return;
   // each measure folds its own source's rows; MetricFlow compares them on metric_time
-  const ctx = await mcpTask({ description: 'what the test computes', question: 'what the test asks',
+  const ctx = await mcpTask({
     name: 'e2e_mix', source: 'acquisition',
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }, { name: 'evts', source: 'events', expr: { fn: 'count' } }, { name: 'crashes', source: 'crashlytics', expr: { fn: 'count' } }],
     metrics: [
@@ -404,7 +404,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 4
 
 test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64 clicks', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await mcpTask({ description: 'what the test computes', question: 'what the test asks',
+  const ctx = await mcpTask({
     name: 'e2e_grow', source: 'acquisition',
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],

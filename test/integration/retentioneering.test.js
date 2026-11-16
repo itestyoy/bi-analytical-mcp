@@ -474,7 +474,7 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, every 
 test('filter_events.where: every operator, a number compared as a number, not(…) keeps a missing value where neq drops it, a kept tree re-checked — the rows the warehouse keeps', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l, device_time as t from fct_analytics_events')).rows;
-  const b = await w.startPrepared({ description: 'what the test computes', question: 'what the test asks', name: 'levels', source: 'events', steps: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
+  const b = await w.startPrepared({ name: 'levels', source: 'events', steps: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
   const levels = await readDone(b.task_id);
   assert.equal(levels.status, 'done', `T16 levels: ${JSON.stringify(levels.error)}`);
   const ctx = levels.context_id;
@@ -611,7 +611,7 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   if (skip(t)) return;
   // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it — the
   // platform the pipeline's join brings under that name
-  const first = await readDone((await w.startPrepared({ question: 'what the test asks', name: 'origin', source: 'events', description: 'every event', steps: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
+  const first = await readDone((await w.startPrepared({ name: 'origin', source: 'events', description: 'every event', steps: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
   assert.equal(first.status, 'done', `T23 origin: ${JSON.stringify(first.error)}`);
   const ctx = first.context_id;
   assert.deepEqual(Object.fromEntries(first.segment_levels.group.levels.map((l) => [l.level, l.users])), perPlatform, 'T23: a segment named for a keyword is carried, level by level');
@@ -630,7 +630,7 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
 
   // T28 + T21 — a later start of the same name, and a step on it that waits for that build — while a
   // preview of another eventstream of the context answers at once
-  const restart = await w.startPrepared({ description: 'what the test computes', question: 'what the test asks', context_id: ctx, name: 'origin', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
+  const restart = await w.startPrepared({ context_id: ctx, name: 'origin', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
   const order = [];
   const stepping = engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'origin', steps: [{ type: 'collapse_events', loops: true }] }).then(() => order.push('step'));
   await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'origin_copy' }).then(() => order.push('preview'));
@@ -678,7 +678,7 @@ test('the source\'s own columns and event properties filter the paths and carry 
   const own = (await wh.query('select player_id_of_internal as u, event_name as e, bundle_id as b, level_id_of_event_data as l from fct_analytics_events')).rows;
   // a where on a column of the source, a compute copying a column under another name, a compute reading
   // an event property into a column — and the two columns carried as segments
-  const b = await w.startPrepared({ description: 'what the test computes', question: 'what the test asks',
+  const b = await w.startPrepared({
     name: 'one_app', source: 'events',
     steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'com.omg.colorfit' }] }] },

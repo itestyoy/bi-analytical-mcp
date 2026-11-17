@@ -167,6 +167,8 @@ test('a delta adds to what is kept; a key the payload never had is counted over 
     assert.deepEqual(stored('crashlytics', 'custom_keys_of_event_data', key), truth.values, `custom key ${key} after the delta`);
     assert.deepEqual(carried('crashlytics', 'custom_keys_of_event_data', key), truth.carried, `custom key ${key}: rows per event after the delta`);
   }
+  // its key pass stands where the declared arrays' do: at the newest row the delta read
+  assert.equal(index.keyPassMark('crashlytics', 'custom_keys_of_event_data'), index.stats('crashlytics', 'stack_frames_of_event_data').dataWatermark);
   const line = index.keys('crashlytics', 'stack_frames_of_event_data').find((k) => k.field === 'line').numeric;
   const lines = Object.entries(await truthValues('fct_crashlytics_events', 'stack_frames_of_event_data', 'line')).flatMap(([v, n]) => Array(n).fill(Number(v)));
   assert.equal(line.count, lines.length, 'a number\'s count adds up across the delta');

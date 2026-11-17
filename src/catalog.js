@@ -584,7 +584,8 @@ export class Catalog {
   /**
    * WHERE A COMPLEX PROPERTY'S ELEMENTS ARE, AND AS WHAT: { column, key, encoding, json, struct, dtype } — its
    * own column (key null) or a key of the event-data payload; `encoding` native (a warehouse array or struct) or
-   * json; `json` whether the warehouse holds it as its JSON type (else a text of JSON); `struct` a native ONE
+   * json; `json` whether the warehouse holds it as its JSON type (false: a text of JSON; null: not known — the
+   * SQL then reads either); `struct` a native ONE
    * struct, not an array of them (a JSON value says per row which it is); `dtype` the warehouse's type, the
    * declared one until grounding reads it (a native struct's fields are read off it). Also asked of a text
    * property the value index finds holding JSON (src/complex-keys.js holdsJson).
@@ -599,7 +600,7 @@ export class Catalog {
       column: spec.column || this.eventDataColumn(fact),
       key: spec.column ? null : name,
       encoding,
-      json: /^jsonb?$/i.test(String(dtype || '').trim()),
+      json: dtype ? /^jsonb?$/i.test(String(dtype).trim()) : null,
       struct: encoding === 'native' && (dtype ? isStructType(dtype) : String(spec.type || '').toLowerCase() === 'struct'),
       dtype,
     };

@@ -176,7 +176,8 @@ export class DuckDBDialect extends Dialect {
 
   sampleList(text, cond, n) { return `CAST(to_json((list(${text}) FILTER (WHERE ${cond}))[1:${Math.floor(Number(n))}]) AS VARCHAR)`; }
 
-  complexText(expr, st) { return st.json || st.encoding === 'native' ? `CAST(${expr} AS VARCHAR)` : expr; }
+  // (a cast reads a JSON value and a text alike: where the type is not known, cast)
+  complexText(expr, st) { return st.json !== false || st.encoding === 'native' ? `CAST(${expr} AS VARCHAR)` : expr; }
 
   /** STRING holding a JSON array → a native VARCHAR[] list (so it can be unnested as native). */
   jsonParseArray(column) {

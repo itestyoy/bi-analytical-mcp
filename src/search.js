@@ -215,7 +215,9 @@ export class CatalogSearch {
       const top = value_matches[0];
       // a column of its model, or a property riding on that source's events (run() says which)
       const name = top.property ?? top.column;
-      recs.push(`Value '${top.value}' lives in ${top.property !== undefined ? 'property' : 'column'} '${name}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: ${keyView(this.catalog, top.source, name)}.`);
+      // a value of a key of a complex property's elements: the key's own view holds its distribution
+      if (top.field !== undefined) recs.push(`Value '${top.value}' lives in key '${top.path}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ request: { source: '${top.source}', property: '${top.property}', field: '${top.field}' } }).`);
+      else recs.push(`Value '${top.value}' lives in ${top.property !== undefined ? 'property' : 'column'} '${name}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: ${keyView(this.catalog, top.source, name)}.`);
       // (said once: the event list's own best match recommends the same view)
       if (top.events?.[0] && !(event_names[0]?.event === top.events[0] && event_names[0]?.source === top.source)) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }

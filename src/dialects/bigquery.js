@@ -164,7 +164,17 @@ export class BigQueryDialect extends Dialect {
     if (st.key != null) this.ident(st.key);
     const path = st.key == null ? '$' : `$.${st.key}`;
     const node = `JSON_QUERY(${col}, '${path}')`;
-    return `(CASE JSON_TYPE(${st.json ? node : `SAFE.PARSE_JSON(${node})`}) WHEN 'object' THEN [${node}] ELSE JSON_QUERY_ARRAY(${col}, '${path}') END)`;
+    return `(CASE JSON_TYPE(${this._jsonOf(node, st)}) WHEN 'object' THEN [${node}] ELSE JSON_QUERY_ARRAY(${col}, '${path}') END)`;
+  }
+
+  // A value of the property's kind as JSON: a JSON column's as it is, a text's parsed (SAFE: malformed is
+  // none); where the warehouse type is not known (`st.json` null) one expression that compiles over either —
+  // TO_JSON keeps a JSON value and makes a text a JSON string, which is then parsed (a JSON string that is
+  // no JSON text — a scalar element "a" — stays the string it is).
+  _jsonOf(x, st) {
+    if (st.json === true) return x;
+    if (st.json === false) return `SAFE.PARSE_JSON(${x})`;
+    return `(CASE JSON_TYPE(TO_JSON(${x})) WHEN 'string' THEN COALESCE(SAFE.PARSE_JSON(JSON_VALUE(TO_JSON(${x}))), TO_JSON(${x})) ELSE TO_JSON(${x}) END)`;
   }
 
   unnestJoin(arr, alias) {
@@ -173,7 +183,7 @@ export class BigQueryDialect extends Dialect {
   }
 
   elementKeys(e, st) {
-    const j = st.json ? e : `SAFE.PARSE_JSON(${e})`;
+    const j = this._jsonOf(e, st);
     return `(CASE JSON_TYPE(${j}) WHEN 'object' THEN JSON_KEYS(${j}, 1) WHEN 'string' THEN [''] WHEN 'number' THEN [''] WHEN 'boolean' THEN [''] ELSE ARRAY<STRING>[] END)`;
   }
 
@@ -199,7 +209,10 @@ export class BigQueryDialect extends Dialect {
   sampleList(text, cond, n) { return `TO_JSON_STRING(ARRAY_AGG(IF(${cond}, ${text}, NULL) IGNORE NULLS LIMIT ${Math.floor(Number(n))}))`; }
 
   // a JSON value or a native array as its JSON text (a text of JSON is that already)
-  complexText(expr, st) { return st.json || st.encoding === 'native' ? `TO_JSON_STRING(${expr})` : expr; }
+  complexText(expr, st) {
+    if (st.json === true || st.encoding === 'native') return `TO_JSON_STRING(${expr})`;
+    return st.json === false ? expr : `TO_JSON_STRING(${this._jsonOf(expr, st)})`;
+  }
 
   /** STRING holding a JSON array → a native ARRAY<STRING> (so it can be unnested as native). */
   jsonParseArray(column) {

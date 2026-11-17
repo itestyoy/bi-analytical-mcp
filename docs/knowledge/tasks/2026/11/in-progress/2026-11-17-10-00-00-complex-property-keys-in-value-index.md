@@ -77,6 +77,23 @@ app; min / max / percentiles for a numeric key — found by search and readable 
 6. The complex pass is batched per source: a key discovery query, one coverage query, one stats query and one
    examples query for all its complex properties (was two dbt calls per property).
 
+## Review fixes (2026-11-17)
+
+- All of a group's queries run before any write (a failed whole-history count of a new key no longer loses
+  it behind the advanced watermark); a refused batch is scanned again per property.
+- A native struct's keys are its type's current fields only (a dropped field is not read; it goes inactive);
+  a struct whose type is not read falls back to the declared `fields`, and is never read as a scalar element.
+- A key is "seen" only when some element holds a value of it (a native field the data stopped filling goes
+  inactive).
+- BigQuery: an unknown column type gets SQL that compiles over JSON and text alike (`_jsonOf`); top values
+  skip NULL (as DuckDB's exact top does).
+- A text holding JSON keeps its key pass's watermark in a registry row of no key (`KEY_PASS`), so one with no
+  keys (`[]`, double-encoded JSON) is not rescanned over the whole window every sync.
+- search: a value of a key recommends the key's own view.
+- Open: BigQuery does not see a nested object in the event payload as JSON (its scalar read is JSON_VALUE,
+  NULL for an object); the coverage query reads each property's elements once per key (cost — measure on
+  BigQuery).
+
 ## Steps
 
 1. [ ] Measure on BigQuery (owner's go-ahead): dry-run bytes of the batched queries on one partition; the

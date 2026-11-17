@@ -7,7 +7,7 @@
 
 import { openStore } from './store.js';
 import { rankFuzzy } from './fuzzy.js';
-import { parseKeyId } from './complex-keys.js';
+import { parseKeyId, KEY_PASS } from './complex-keys.js';
 
 // Cap on the candidate set scanned for a FUZZY value match (the index is small —
 // top-N values per property — so this comfortably covers it without unbounded cost).
@@ -30,7 +30,15 @@ export class ValueIndex {
   }
 
   /** A complex property's keys as the data shows them (src/complex-keys.js) — every key of `source`, or one property's. */
-  keys(source, property = null) { return this.store.values.keys ? this.store.values.keys(source, property) : []; }
+  keys(source, property = null, { marks = false } = {}) {
+    const rows = this.store.values.keys ? this.store.values.keys(source, property) : [];
+    return marks ? rows : rows.filter((k) => k.field !== KEY_PASS);
+  }
+
+  /** Where the key pass of a text holding JSON stands (src/complex-keys.js KEY_PASS), or null. */
+  keyPassMark(source, property) { return this.keys(source, property, { marks: true }).find((k) => k.field === KEY_PASS)?.watermark ?? null; }
+
+  setKeyPassMark(source, property, watermark) { this.store.values.putKey?.(source, property, KEY_PASS, { watermark }); }
 
   /** Record a key of a complex property: last seen, its values counted, a numeric key's summary. */
   putKey(source, property, field, info) { this.store.values.putKey?.(source, property, field, info); }

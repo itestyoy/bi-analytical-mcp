@@ -193,17 +193,19 @@ export class BackgroundIndexer {
       if (!spec || !st) return null;
       const native = st.encoding === 'native';
       const elems = d.complexElements(st);
+      // a native struct's fields: the warehouse's type, else the catalog's declared `fields` (a type not read
+      // yet) — and whether its elements are structs at all, so a struct is never read as a scalar element
+      const declaredFields = Object.entries(spec.fields || {}).map(([f, t]) => ({ name: f, type: String(t?.type ?? t), scalar: !/struct|array|\[\]|</i.test(String(t?.type ?? t)) }));
+      const typed = native ? structFieldsOfType(st.dtype) : [];
+      const fields = native ? (typed.length ? typed : declaredFields) : null;
+      const structs = native && (fields.length > 0 || st.struct || /struct/i.test(String(spec.type || '')));
       // present on a row = it has an element (a native array never NULL — only its length tells; a JSON
       // value that is no array or object, or no JSON, has none). NULL → not counted, on every path.
-      return { i, name, spec, st, native, held: held.has(name), presence: `${d.arrayLength(elems)} > 0`, expr: this._valueExpr(name, fact), elems, fields: native ? structFieldsOfType(st.dtype) : null };
+      return { i, name, spec, st, native, structs, held: held.has(name), presence: `${d.arrayLength(elems)} > 0`, expr: this._valueExpr(name, fact), elems, fields };
     }).filter(Boolean);
-    // where its counts stand: a declared one's row's watermark; a held one's keys' (the scalar pass moves
-    // its row's), none until every key has one
-    const watermarkOf = (p) => {
-      if (!p.held) return this.index.stats?.(fact, p.name)?.dataWatermark ?? null;
-      const ks = this.index.keys(fact, p.name);
-      return ks.length && ks.every((k) => k.watermark != null) ? Math.min(...ks.map((k) => k.watermark)) : null;
-    };
+    // where its counts stand: a declared one's row's watermark; a held one's key pass's (the scalar pass
+    // moves its row's — src/complex-keys.js KEY_PASS)
+    const watermarkOf = (p) => (p.held ? this.index.keyPassMark(fact, p.name) : this.index.stats?.(fact, p.name)?.dataWatermark ?? null);
     const fresh = this.merge && timeCol ? props.filter((p) => watermarkOf(p) != null) : [];
     const newbies = props.filter((p) => !fresh.includes(p));
     const groups = [];
@@ -217,18 +219,31 @@ export class BackgroundIndexer {
     }
     if (newbies.length) groups.push({ props: newbies, cond: windowCond, delta: false });
     let done = 0; let written = 0;
-    for (const g of groups) {
+    // one group's scan; its error, or null — a group writes nothing unless all its queries ran
+    const scan = async (g, { record }) => {
       const t0 = Date.now();
       try {
         const out = await this._complexGroup(runId, fact, g, { d, ref, evCol, bundleCol, timeCol, windowCond });
         done += out.props; written += out.values;
         for (const p of g.props) timing({ source: fact, property: p.name, ms: Math.round((Date.now() - t0) / g.props.length), valuesWritten: out.valuesOf.get(p.name) || 0, totalCount: this.index.stats?.(fact, p.name)?.totalCount ?? null, status: 'ok' });
+        return null;
       } catch (e) {
         const why = e?.message || String(e);
-        for (const p of g.props) timing({ source: fact, property: p.name, ms: Math.round((Date.now() - t0) / g.props.length), status: 'error', error: why });
-        this.index.recordRunNote?.(runId, `complex-coverage scan of '${fact}' failed [${g.props.map((p) => p.name).join(', ')}]: ${why}`);
-        this.logger?.(`sync #${runId} complex-coverage '${fact}' [${g.props.map((p) => p.name).join(', ')}] FAILED: ${why}`);
+        if (record) {
+          for (const p of g.props) timing({ source: fact, property: p.name, ms: Math.round((Date.now() - t0) / g.props.length), status: 'error', error: why });
+          this.index.recordRunNote?.(runId, `complex-coverage scan of '${fact}' failed [${g.props.map((p) => p.name).join(', ')}]: ${why}`);
+          this.logger?.(`sync #${runId} complex-coverage '${fact}' [${g.props.map((p) => p.name).join(', ')}] FAILED: ${why}`);
+        }
+        return why;
       }
+    };
+    for (const g of groups) {
+      // batched for speed; when the batch fails, each property on its own — one that the warehouse refuses
+      // does not keep the others of its source out of the index (as the scalar pass falls back)
+      const why = await scan(g, { record: g.props.length === 1 });
+      if (!why || g.props.length === 1) continue;
+      this.logger?.(`sync #${runId} complex-coverage '${fact}': the batch of ${g.props.length} failed (${why.split('\n')[0]}) — each property on its own`);
+      for (const p of g.props) await scan({ ...g, props: [p] }, { record: true });
     }
     return { props: done, values: written };
   }
@@ -255,7 +270,9 @@ export class BackgroundIndexer {
     const jsonProps = g.props.filter((p) => !p.native);
     for (const p of g.props.filter((x) => x.native)) {
       const scalarFields = p.fields.filter((f) => f.scalar).map((f) => f.name);
-      for (const k of p.fields.length ? scalarFields : ['']) found.get(p.name).add(k);
+      // a struct whose fields are not known is not read (its text is no element value)
+      for (const k of p.structs ? scalarFields : ['']) found.get(p.name).add(k);
+      if (p.structs && !p.fields.length) this.index.recordRunNote?.(runId, `complex keys of '${fact}.${p.name}' not read: its struct's fields are neither in the warehouse type nor declared`);
     }
     if (jsonProps.length) {
       const branches = jsonProps.map((p) => {
@@ -275,17 +292,26 @@ export class BackgroundIndexer {
     }
     const known = (p) => new Set(this.index.keys(fact, p.name).map((k) => k.field));
     // the keys counted here: those found, and — on a delta — every key already kept (its rows without it
-    // add to its NULLs); a key first seen in a delta is counted over the whole history on its own, after
+    // add to its NULLs), but of a native struct only the fields its type has now (one the type dropped
+    // cannot be read); a key first seen in a delta is counted over the whole history on its own
     const keysOf = new Map(); const freshKeys = new Map();
     for (const p of g.props) {
       const was = known(p);
       const now_ = found.get(p.name);
-      keysOf.set(p.name, [...new Set([...now_, ...(g.delta ? was : [])])].filter((k) => !g.delta || was.has(k)).sort());
+      const pool = p.native ? now_ : new Set([...now_, ...(g.delta ? was : [])]);
+      keysOf.set(p.name, [...pool].filter((k) => !g.delta || was.has(k)).sort());
       freshKeys.set(p.name, g.delta ? [...now_].filter((k) => !was.has(k)).sort() : []);
     }
 
-    // 2)–4) count the properties and their keys over this group's rows
+    // 2)–5) EVERY COUNT FIRST, then the writes: a query that fails leaves the group as it stood (its
+    //    watermark too), so the next sync scans it again whole — a key first seen in this delta is not lost
     const counted = await this._complexCounts(fact, g.props, keysOf, g.cond, { d, ref, evCol, bundleCol, timeCol, withExamples: true });
+    const late = g.props.filter((p) => freshKeys.get(p.name).length);
+    const full = late.length ? await this._complexCounts(fact, late, freshKeys, windowCond, { d, ref, evCol, bundleCol, timeCol, withExamples: false }) : null;
+    // a key is seen when some element holds a value of it (a native struct's field the data stopped filling
+    // goes inactive, as a JSON key the payload dropped does)
+    const seenAt = (c) => ((c?.elements || 0) > 0 ? now : null);
+
     for (const p of g.props) {
       const cov = counted.coverage.get(p.name);
       if (g.delta && counted.maxTime == null) { this.logger?.(`sync #${runId} complex-coverage '${fact}.${p.name}': no new rows since watermark — kept stored`); continue; }
@@ -303,20 +329,17 @@ export class BackgroundIndexer {
         this.index.upsertProperty(fact, p.name, { values: examples, distinctCount: null, totalCount: cov.total, nullCount: cov.rowsTotal - cov.total, coverage: cov.coverage, bundleCoverage: cov.bundleCoverage, cellCoverage: cov.cellCoverage, ...(counted.maxTime != null ? { dataWatermark: counted.maxTime } : {}) });
         valuesOf.set(p.name, examples.length);
       }
-      for (const k of keysOf.get(p.name)) valuesOf.set(p.name, valuesOf.get(p.name) + this._writeKey(fact, p, k, counted.keys.get(`${p.name}\u0000${k}`), { merge: g.delta, seen: found.get(p.name).has(k) ? now : null, watermark: counted.maxTime }));
-      this.logger?.(`sync #${runId} complex-coverage '${fact}.${p.name}': ${cov.coverage.filter((e) => e.nonNull > 0).length} event(s) carry it, ${keysOf.get(p.name).length} key(s)${g.delta ? ' (merged delta)' : ''}`);
-    }
-
-    // 5) a key first seen in a delta: counted once over the whole history (the window), on its own
-    const late = g.props.filter((p) => freshKeys.get(p.name).length);
-    if (late.length) {
-      const full = await this._complexCounts(fact, late, freshKeys, windowCond, { d, ref, evCol, bundleCol, timeCol, withExamples: false });
-      for (const p of late) {
-        for (const k of freshKeys.get(p.name)) valuesOf.set(p.name, (valuesOf.get(p.name) || 0) + this._writeKey(fact, p, k, full.keys.get(`${p.name}\u0000${k}`), { merge: false, seen: now, watermark: full.maxTime }));
-        this.logger?.(`sync #${runId} complex-coverage '${fact}.${p.name}': new key(s) ${freshKeys.get(p.name).map((k) => keyPath(p.name, k)).join(', ')} — counted over the whole history`);
+      for (const k of keysOf.get(p.name)) {
+        const c = counted.keys.get(`${p.name}\u0000${k}`);
+        valuesOf.set(p.name, valuesOf.get(p.name) + this._writeKey(fact, p, k, c, { merge: g.delta, seen: seenAt(c) }));
       }
+      for (const k of freshKeys.get(p.name)) {
+        const c = full?.keys.get(`${p.name}\u0000${k}`);
+        valuesOf.set(p.name, valuesOf.get(p.name) + this._writeKey(fact, p, k, c, { merge: false, seen: seenAt(c) }));
+      }
+      if (p.held && counted.maxTime != null) this.index.setKeyPassMark(fact, p.name, Math.max(this.index.keyPassMark(fact, p.name) ?? 0, counted.maxTime));
+      this.logger?.(`sync #${runId} complex-coverage '${fact}.${p.name}': ${cov.coverage.filter((e) => e.nonNull > 0).length} event(s) carry it, ${keysOf.get(p.name).length} key(s)${g.delta ? ' (merged delta)' : ''}${freshKeys.get(p.name).length ? `, new key(s) ${freshKeys.get(p.name).map((k) => keyPath(p.name, k)).join(', ')} counted over the whole history` : ''}`);
     }
-    // a held property is counted by the scalar pass that indexed it; here only its keys' values are
     return { props: g.props.filter((p) => !p.held).length, values: [...valuesOf.values()].reduce((a, b) => a + b, 0), valuesOf };
   }
 
@@ -365,7 +388,7 @@ export class BackgroundIndexer {
       const kvRows = `(${branches.join(' UNION ALL ')}) AS kvrows`;
       const num = d.fromText('v', 'float');
       const top = d.approxTopK('v', this.maxValues);
-      const statRows = await this._rows(`SELECT p, k, ${top ? `${top} AS top, ` : ''}${d.approxCountDistinct('v')} AS dc, COUNT(v) AS nn, COUNT(${num}) AS num_n, MIN(${num}) AS num_min, MAX(${num}) AS num_max, ${d.quantilesJson(num, QUANTILE_POINTS)} AS q FROM ${kvRows} GROUP BY p, k`, 100000);
+      const statRows = await this._rows(`SELECT p, k, ${top ? `${top} AS top, ` : ''}${d.approxCountDistinct('v')} AS dc, COUNT(v) AS nn, COUNT(${num}) AS num_n, MIN(${num}) AS num_min, MAX(${num}) AS num_max, ${d.quantilesJson(num, QUANTILE_POINTS)} AS q FROM ${kvRows} WHERE v IS NOT NULL GROUP BY p, k`, 100000);
       const tops = new Map();
       if (!top) {
         const exact = await this._rows(`SELECT p, k, v, n FROM (SELECT p, k, v, COUNT(*) AS n FROM ${kvRows} WHERE v IS NOT NULL GROUP BY p, k, v) AS counted QUALIFY ROW_NUMBER() OVER (PARTITION BY p, k ORDER BY n DESC, v) <= ${this.maxValues}`, 1000000);
@@ -407,7 +430,7 @@ export class BackgroundIndexer {
    * `merge` (a delta), else replacing it — and its registry row: when it was last seen in the data, how
    * many of its values were counted, a number's summary.
    */
-  _writeKey(fact, p, k, counted, { merge, seen, watermark = null }) {
+  _writeKey(fact, p, k, counted, { merge, seen }) {
     if (!counted) return 0;
     const id = keyId(p.name, k);
     const cov = counted.cov;
@@ -419,7 +442,6 @@ export class BackgroundIndexer {
       lastSeen: seen ?? prior?.lastSeen ?? null,
       elements: (merge && prior ? (prior.elements || 0) : 0) + (counted.elements || 0),
       numeric: merge && prior ? mergeNumeric(prior.numeric, counted.numeric) : counted.numeric || null,
-      watermark: watermark != null && prior?.watermark != null ? Math.max(watermark, prior.watermark) : watermark,
     });
     return r.values.length;
   }
@@ -772,7 +794,7 @@ export class BackgroundIndexer {
       const complex = new Set(c.complexEventProps(f));
       for (const prop of complex) desired.add(label({ source: f, property: prop }));
       for (const prop of this._jsonHolders(f)) complex.add(prop);
-      for (const k of this.index.keys?.(f) || []) {
+      for (const k of this.index.keys?.(f, null, { marks: true }) || []) {
         if (complex.has(k.property)) desired.add(label({ source: f, property: keyId(k.property, k.field) }));
         else this.index.removeKey?.(f, k.property, k.field);
       }

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ValueIndex } from '../../src/value-index.js';
 import { BackgroundIndexer } from '../../src/value-indexer.js';
+import { keyId } from '../../src/complex-keys.js';
 import { settle } from '../helpers/settle.js';
 import { tempDir } from '../helpers/temp-dir.js';
 
@@ -543,5 +544,65 @@ test('complex-coverage pass leaves a diagnostics row per property; a write failu
   const timingNotes = notes.filter((n) => /per-property timing could not be recorded/.test(n));
   assert.equal(timingNotes.length, 1, `exactly one note per run, got ${notes.length}: ${notes.join(' | ')}`);
   assert.match(timingNotes[0], /read-only/);
+  index.close();
+});
+
+// ── THE KEY PASS FAILS SAFE (src/complex-keys.js) ──────────────────────────────────────────
+// A batch of a source's complex properties that the warehouse refuses is scanned again property by
+// property, so one bad property does not keep the others out; and a group writes nothing until every
+// query it needs has run — a key first seen in a delta, whose whole-history count failed, is found again
+// by the next sync instead of being lost behind an advanced watermark.
+test('a refused batch of complex properties is scanned again one property at a time', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const names = catalog.complexEventProps('events');
+  assert.ok(names.length >= 2, 'fixture has several complex props');
+  const counts = (sql, n) => Object.fromEntries([...sql.matchAll(/AS (c\d+(?:_\d+)?)\b/g)].map((m) => [m[1], n]));
+  const runner = { show: async (_d, sql) => {
+    if (/AS row_count/.test(sql)) {
+      if (/AS c0\b/.test(sql) && /AS c1\b/.test(sql)) return { ok: false, stderr: 'the batch is refused' };
+      return { ok: true, rows: [{ ev: 'level_completed', row_count: 5, wm: 1000, ...counts(sql, 4) }] };
+    }
+    return { ok: true, rows: [] };
+  } };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, logger: () => {} });
+  const r = await bi._indexComplexCoverage(1, 'events');
+  assert.equal(r.props, names.length, 'every property indexed on its own');
+  for (const n of names) assert.equal(index.coverage('events', n).find((e) => e.event_name === 'level_completed')?.non_null, 4, n);
+  assert.ok(index.runProperties(1, { limit: 1000 }).filter((x) => x.source === 'events').every((x) => x.status === 'ok'));
+  index.close();
+});
+
+test('a key first seen in a delta whose whole-history count fails is counted by the next sync', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const prop = 'words_selected_of_event_data';
+  const i = catalog.complexEventProps('events').indexOf(prop);
+  const counts = (sql, n) => Object.fromEntries([...sql.matchAll(/AS (c\d+(?:_\d+)?)\b/g)].map((m) => [m[1], n]));
+  let failLate = true;
+  const runner = { show: async (_d, sql) => {
+    const delta = /\bWHERE\b/.test(sql);
+    if (/AS keyrows/.test(sql)) return { ok: true, rows: [{ p: i, k: 'word_name', n: 3 }, ...(delta ? [{ p: i, k: 'word_dictionary', n: 1 }] : [])] };
+    if (/AS row_count/.test(sql)) {
+      // the whole-history count of the new key: a coverage query with no WHERE during the delta pass
+      if (!delta && failLate && index.stats('events', prop)?.dataWatermark != null) return { ok: false, stderr: 'timed out' };
+      return { ok: true, rows: [{ ev: 'level_completed', row_count: delta ? 3 : 5, wm: delta ? 2000 : 1000, ...counts(sql, delta ? 3 : 5) }] };
+    }
+    return { ok: true, rows: [] };
+  } };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, logger: () => {} });
+  await bi._indexComplexCoverage(1, 'events'); // full: word_name
+  assert.deepEqual(index.keys('events', prop).map((k) => k.field), ['word_name']);
+
+  await bi._indexComplexCoverage(2, 'events'); // delta finds word_dictionary; its history count fails
+  assert.equal(index.stats('events', prop).dataWatermark, 1000, 'nothing written: the watermark stays');
+  assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 5, 'nor the delta\'s counts');
+  assert.deepEqual(index.keys('events', prop).map((k) => k.field), ['word_name']);
+
+  failLate = false;
+  await bi._indexComplexCoverage(3, 'events'); // the same delta again: the new key found and counted
+  assert.equal(index.stats('events', prop).dataWatermark, 2000);
+  assert.deepEqual(index.keys('events', prop).map((k) => k.field), ['word_dictionary', 'word_name']);
+  assert.equal(index.coverage('events', keyId(prop, 'word_dictionary')).find((e) => e.event_name === 'level_completed').non_null, 5, 'counted over the whole history');
   index.close();
 });

@@ -23,6 +23,13 @@ export function parseKeyId(id) {
 /** How a key is shown: `words_selected_of_event_data[].word_dictionary`. */
 export const keyPath = keyId;
 
+/**
+ * The registry row of no key that says where the key pass of a text holding JSON stands (its watermark):
+ * its own row is the scalar pass's, and it may have no keys at all (an empty array, a JSON text inside a
+ * JSON text) — without it every sync would scan its whole window again. Never a key: READABLE_KEY refuses it.
+ */
+export const KEY_PASS = '*';
+
 /** A key this index reads as a field: a name the JSON path and every warehouse take as it is. */
 export const READABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 

@@ -209,7 +209,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   incrementally: a delta is added, a key first seen in a delta is counted over the whole history, a
   key unseen for `KEY_STALE_MS` is said inactive, never deleted. A property declared a plain text whose
   indexed values are JSON (`holdsJson`) has its keys counted alike — its own row stays the scalar
-  pass's, its keys carry their own watermark. A key is named `{ source, property, field }`
+  pass's, its key pass keeps its own watermark (`KEY_PASS`). A batch the warehouse refuses is scanned
+  again property by property, and a group writes nothing until every query it needs has run (a key
+  first seen in a delta is never lost behind an advanced watermark). A key is named `{ source, property, field }`
   (semantic_index's key view, search); its store id (`<property>[].<field>`) is internal.
 - An events source is EXTENDED, never duplicated: a new source reuses the same
   machinery — the catalog accessors (`eventNames/eventProps/eventNameFor/propertyFor`),

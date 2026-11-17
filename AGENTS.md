@@ -201,6 +201,14 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   src/engine/pipeline-warnings.js: a build over the model, a metric folding it); `{ when: { <column>:
   <values> } }` instead of `true` requires it only of rows that column may hold one of those values in
   (a tester flag of the production stream, not of the test one).
+- THE KEYS OF A COMPLEX PROPERTY ARE READ OFF THE DATA, NEVER DECLARED (src/complex-keys.js): every
+  sync the value indexer finds each key of an array's / a JSON payload's elements (a native struct's
+  fields off the warehouse's type, a JSON element's keys off its rows) and counts each as a property
+  is — values with frequencies, distinct count, rows that carry it per event and per app, a number's
+  count / min / max / quantiles — incrementally: a delta is added, a key first seen in a delta is
+  counted over the whole history, a key unseen for `KEY_STALE_MS` is said inactive, never deleted. A
+  key is named `{ source, property, field }` (semantic_index's key view, search); its store id
+  (`<property>[].<field>`) is internal.
 - An events source is EXTENDED, never duplicated: a new source reuses the same
   machinery — the catalog accessors (`eventNames/eventProps/eventNameFor/propertyFor`),
   the indexer worklist and the value-index API all take the source as an argument.

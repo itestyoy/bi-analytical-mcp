@@ -29,6 +29,10 @@
 //   values.valueCount(source, property) -> int (values STORED; vs distinct_count → capped?)
 //   values.properties()               -> [{source, property}] (every indexed pair)
 //   values.removeProperty(source, property)
+//   values.keys(source, property?)    -> [{ source, property, field, firstSeen, lastSeen, elements, numeric }] (a complex
+//                                        property's keys, as the data shows them — src/complex-keys.js)
+//   values.putKey(source, property, field, { lastSeen?, elements, numeric })   (first_seen kept from the first write)
+//   values.removeKey(source, property, field)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
@@ -69,6 +73,8 @@ import { cosineSimilarity } from './embeddings.js';
 import { setting } from './settings.js';
 
 const require = createRequire(import.meta.url);
+/** Code-point order, as SQLite's ORDER BY sorts text — never the locale's. */
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 // ───────────────────────── in-memory backend (no persistence) ─────────────────────────
 // The universal fallback when no persistent backend is available. Mirrors the SQLite
@@ -81,6 +87,7 @@ export class MemoryBackend {
     // coverage:[{event_name,row_count,non_null}], ... }. Each SOURCE owns its own index space, so
     // two events facts can carry the same property name without sharing a row.
     const bySource = new Map();
+    const keyRows = new Map(); // `${source}\0${property}\0${field}` → a complex property's key (prop_keys)
     const entryOf = (source, property) => bySource.get(source)?.get(property) || null;
     const putEntry = (source, property, e) => {
       let m = bySource.get(source);
@@ -228,6 +235,14 @@ export class MemoryBackend {
       properties: () => [...allEntries()].map(({ source, property }) => ({ source, property })),
       // Drop everything stored for one property (a column gone from the table) — no full reindex.
       removeProperty: (source, property) => !!bySource.get(source)?.delete(property),
+      keys: (source, property = null) => [...keyRows.values()].filter((k) => k.source === source && (property == null || k.property === property))
+        .sort((a, b) => cmp(a.property, b.property) || cmp(a.field, b.field)).map((k) => ({ ...k, numeric: k.numeric ? structuredClone(k.numeric) : null })),
+      putKey: (source, property, field, { lastSeen = null, elements = null, numeric = null } = {}) => {
+        const id = `${source}\u0000${property}\u0000${field}`;
+        const had = keyRows.get(id);
+        keyRows.set(id, { source, property, field, firstSeen: had?.firstSeen ?? Date.now(), lastSeen: lastSeen ?? had?.lastSeen ?? null, elements: elements ?? null, numeric: numeric ? structuredClone(numeric) : null });
+      },
+      removeKey: (source, property, field) => keyRows.delete(`${source}\u0000${property}\u0000${field}`),
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -336,6 +351,11 @@ const TABLES = [
   // combo — so a pipeline-model step scoped to a concrete bundle_id AND event_name can warn the
   // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
   { name: 'prop_bundle_event_coverage', cache: true, key: ['source', 'property', 'bundle', 'event_name'], columns: ['source TEXT', 'property TEXT', 'bundle TEXT', 'event_name TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  // The KEYS of a complex property, as the data shows them (src/complex-keys.js): one row per key of its
+  // elements (field '' — its scalar elements). Its values and coverage are kept under the key's id in the
+  // tables above; here, when it was first and last seen, how many of its values were counted, and a
+  // numeric key's summary (JSON: count, min, max, quantiles).
+  { name: 'prop_keys', cache: true, key: ['source', 'property', 'field'], columns: ['source TEXT', 'property TEXT', 'field TEXT', 'first_seen INTEGER', 'last_seen INTEGER', 'elements INTEGER', 'numeric TEXT'] },
   { name: 'index_runs', cache: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'started_at INTEGER', 'finished_at INTEGER', 'status TEXT', 'properties_indexed INTEGER', 'values_written INTEGER', 'errors INTEGER', 'error TEXT'] },
   // Per-property timing within a run — detailed stats drilled into via semantic_index.
   // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
@@ -579,6 +599,17 @@ export class SqliteBackend {
           }
         });
       },
+      keys(source, property = null) {
+        const rows = property == null
+          ? s._all('SELECT * FROM prop_keys WHERE source = ? ORDER BY property, field', source)
+          : s._all('SELECT * FROM prop_keys WHERE source = ? AND property = ? ORDER BY field', source, property);
+        return rows.map((r) => ({ source: r.source, property: r.property, field: r.field, firstSeen: r.first_seen ?? null, lastSeen: r.last_seen ?? null, elements: r.elements ?? null, numeric: (() => { try { return r.numeric ? JSON.parse(r.numeric) : null; } catch { return null; } })() }));
+      },
+      putKey(source, property, field, { lastSeen = null, elements = null, numeric = null } = {}) {
+        s._run('INSERT INTO prop_keys (source, property, field, first_seen, last_seen, elements, numeric) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property, field) DO UPDATE SET last_seen = COALESCE(excluded.last_seen, prop_keys.last_seen), elements = excluded.elements, numeric = excluded.numeric',
+          source, property, field, Date.now(), lastSeen, elements, numeric ? JSON.stringify(numeric) : null);
+      },
+      removeKey(source, property, field) { s._run('DELETE FROM prop_keys WHERE source = ? AND property = ? AND field = ?', source, property, field); },
     };
 
     this.runs = {

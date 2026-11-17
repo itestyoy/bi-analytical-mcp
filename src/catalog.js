@@ -142,6 +142,11 @@ export class Catalog {
         // the semantic layer reads a time column by the warehouse's data type (TIMESTAMP vs DATETIME)
         (m.data_types ||= {})[c.name] = p.dtype;
       }
+      // what a complex payload is held as, in the warehouse's own word (JSON, a text of it, a native
+      // array and its struct's fields) — the value index reads its keys by it (src/complex-keys.js)
+      const held = (name) => types.get(String(name).toLowerCase());
+      if (m.event_data_column && held(m.event_data_column)) m.event_data_type = held(m.event_data_column);
+      for (const prop of Object.values(m.properties || {})) if (prop?.column && isArrayPropertyType(prop.type) && held(prop.column)) prop.data_type = held(prop.column);
       for (const [name, prop] of Object.entries(m.properties || {})) {
         const p = prop?.column && (prop.type === 'numeric' || prop.type === 'string') ? physical(prop.column) : null;
         if (!p || !scalar(p.type)) continue;
@@ -573,6 +578,26 @@ export class Catalog {
   scalarEventProps(fact) {
     fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
+  }
+
+  /**
+   * WHERE A COMPLEX PROPERTY'S ELEMENTS ARE, AND AS WHAT: { column, key, encoding, json, dtype } — its own
+   * column (key null) or a key of the event-data payload; `encoding` native (a warehouse array) or json; `json`
+   * whether the warehouse holds it as its JSON type (else a text of JSON); `dtype` the warehouse's type, the
+   * declared one until grounding reads it (a native struct's fields are read off it).
+   */
+  complexStorage(name, fact) {
+    fact = this._fact(fact);
+    const spec = this.eventPropertySpec(name, fact);
+    if (!spec) return null;
+    const dtype = spec.column ? (spec.data_type || null) : (this.models[fact]?.event_data_type || null);
+    return {
+      column: spec.column || this.eventDataColumn(fact),
+      key: spec.column ? null : name,
+      encoding: spec.column ? (spec.encoding || 'json') : 'json',
+      json: /^jsonb?$/i.test(String(dtype || '').trim()),
+      dtype,
+    };
   }
 
   /** COMPLEX (array/struct) event properties (the { property } leaf) — only usable via prepare stages. */

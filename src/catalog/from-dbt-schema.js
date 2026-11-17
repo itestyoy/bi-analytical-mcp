@@ -199,6 +199,7 @@ export function dbtSchemaToCatalog(doc) {
       if (cm.is_event_name) { m.event_name = { column: col.name }; continue; }
       if (cm.is_event_data) {
         m.event_data_column = col.name;
+        if (col.data_type) m.event_data_type = String(col.data_type);
         if (cm.properties) {
           m.properties = cm.properties;
         }
@@ -219,6 +220,9 @@ export function dbtSchemaToCatalog(doc) {
           encoding: a.encoding || (String(col.data_type).toLowerCase() === 'string' ? 'json' : 'native'),
           ...(a.items ? { items: a.items } : {}),
           ...(a.fields ? { fields: a.fields } : {}),
+          // what the warehouse holds it as (JSON or a text of it, a native array) — grounding puts the
+          // warehouse's own word here (Catalog.typeToPhysical); the value index reads its keys by it
+          ...(col.data_type ? { data_type: String(col.data_type) } : {}),
           ...(cm.unit ? { unit: cm.unit } : {}),
           ...(col.description ? { description: col.description } : {}),
         };

@@ -153,6 +153,52 @@ export class BigQueryDialect extends Dialect {
     return { join: `CROSS JOIN UNNEST(${sarr}) AS ${e}`, element: this.fromText(e, type) };
   }
 
+  // ── the keys of a complex property (src/complex-keys.js) ──
+  // JSON_QUERY_ARRAY reads a JSON column and a text of JSON alike: its elements are of the same kind
+  // (JSON, or a text of JSON), and JSON_VALUE reads either; JSON_KEYS takes JSON only, so a text element
+  // is parsed first (SAFE: a malformed one has no keys).
+  complexElements(st) {
+    const col = this.quoteIdent(st.column);
+    if (st.encoding === 'native') return col;
+    if (st.key == null) return `JSON_QUERY_ARRAY(${col}, '$')`;
+    this.ident(st.key);
+    return `JSON_QUERY_ARRAY(${col}, '$.${st.key}')`;
+  }
+
+  unnestJoin(arr, alias) {
+    this.ident(alias);
+    return { join: `CROSS JOIN UNNEST(${arr}) AS ${alias}`, el: alias };
+  }
+
+  elementKeys(e, st) {
+    const j = st.json ? e : `SAFE.PARSE_JSON(${e})`;
+    return `(CASE JSON_TYPE(${j}) WHEN 'object' THEN JSON_KEYS(${j}, 1) WHEN 'string' THEN [''] WHEN 'number' THEN [''] WHEN 'boolean' THEN [''] ELSE ARRAY<STRING>[] END)`;
+  }
+
+  elementField(e, field, st) {
+    this.ident(field);
+    if (st.encoding === 'native') return `CAST(${e}.${this.quoteIdent(field)} AS STRING)`;
+    return `JSON_VALUE(${e}, '$.${field}')`;
+  }
+
+  elementText(e, st) {
+    return st.encoding === 'native' ? `CAST(${e} AS STRING)` : `JSON_VALUE(${e}, '$')`;
+  }
+
+  anyElement(arr, body) { return `EXISTS(SELECT 1 FROM UNNEST(${arr}) AS x WHERE ${body('x')})`; }
+
+  keyValueList(pairs) {
+    return `[${pairs.map(([k, v]) => `STRUCT(${this.sqlLiteral(k)} AS k, ${v} AS v)`).join(', ')}]`;
+  }
+
+  // APPROX_QUANTILES skips NULLs and returns points + 1 values (min … max)
+  quantilesJson(x, points) { return `TO_JSON_STRING(APPROX_QUANTILES(${x}, ${Math.floor(Number(points))}))`; }
+
+  sampleList(text, cond, n) { return `TO_JSON_STRING(ARRAY_AGG(IF(${cond}, ${text}, NULL) IGNORE NULLS LIMIT ${Math.floor(Number(n))}))`; }
+
+  // a JSON value or a native array as its JSON text (a text of JSON is that already)
+  complexText(expr, st) { return st.json || st.encoding === 'native' ? `TO_JSON_STRING(${expr})` : expr; }
+
   /** STRING holding a JSON array → a native ARRAY<STRING> (so it can be unnested as native). */
   jsonParseArray(column) {
     return `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;

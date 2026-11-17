@@ -424,16 +424,19 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
   const prop = 'words_selected_of_event_data';
   assert.ok(catalog.complexEventProps('events').includes(prop), 'fixture has a complex prop');
   const covQueries = [];
+  // a stand-in warehouse for the batched pass: the coverage query (one per source and scan) answers every
+  // property's and key's count column alike; the keys query finds none; the examples query one shape each
+  const counts = (sql, n) => Object.fromEntries([...sql.matchAll(/AS (c\d+(?:_\d+)?)\b/g)].map((m) => [m[1], n]));
   const runner = {
     show: async (_d, sql) => {
-      if (/AS v\b/.test(sql) && !/GROUP BY/.test(sql)) return { ok: true, rows: [{ v: '[{"word_name":"cat"}]' }] }; // examples (row cap via show limit, no inline LIMIT)
-      if (/GROUP BY/.test(sql) && /AS ev\b/.test(sql)) {
+      if (/AS row_count/.test(sql)) {
         const isDelta = /\bWHERE\b/.test(sql); // full scan has no WHERE (windowDays 0); delta has the since-clause
         covQueries.push(isDelta ? 'delta' : 'full');
         return isDelta
-          ? { ok: true, rows: [{ ev: 'level_completed', row_count: 3, nn: 3, wm: 2000 }] }
-          : { ok: true, rows: [{ ev: 'level_completed', row_count: 5, nn: 5, wm: 1000 }] };
+          ? { ok: true, rows: [{ ev: 'level_completed', row_count: 3, wm: 2000, ...counts(sql, 3) }] }
+          : { ok: true, rows: [{ ev: 'level_completed', row_count: 5, wm: 1000, ...counts(sql, 5) }] };
       }
+      if (/AS s\d+/.test(sql)) return { ok: true, rows: [Object.fromEntries([...sql.matchAll(/AS (s\d+)/g)].map((m) => [m[1], JSON.stringify(['[{"word_name":"cat"}]'])]))] };
       return { ok: true, rows: [] };
     },
   };
@@ -448,9 +451,7 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
   await bi._indexComplexCoverage(2, 'events'); // second pass: watermark set → DELTA, counts ADD
   assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
   assert.equal(index.stats('events', prop).dataWatermark, 2000, 'watermark advanced to the delta max');
-  const complexN = catalog.complexEventProps('events').length;
-  assert.ok(covQueries.slice(0, complexN).every((x) => x === 'full'), 'first pass = full scan per complex prop');
-  assert.ok(covQueries.slice(complexN).length > 0 && covQueries.slice(complexN).every((x) => x === 'delta'), 'second pass = since-watermark delta per complex prop (no full re-scan)');
+  assert.deepEqual(covQueries, ['full', 'delta'], 'one batched scan per source and pass: the first full, the second the since-watermark delta (no full re-scan)');
   index.close();
 });
 

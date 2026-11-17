@@ -177,6 +177,7 @@ export class ValueIndexViews {
         persisted: sync.persisted,
         running: sync.running,
         indexed_properties: sync.indexed_properties,
+        ...(sync.indexed_keys ? { indexed_keys: sync.indexed_keys } : {}),
         total_values: sync.total_values,
         total_runs: sync.total_runs,
         seconds_since_last_sync: secsSince,

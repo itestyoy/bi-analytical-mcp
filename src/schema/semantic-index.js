@@ -55,7 +55,9 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     // an event name belongs to the source that declares it, so a pairing that source does not have cannot be written down
     source_event: refView('source_event', '{ source, event }', () => 'The properties that event carries.'),
     source_column: refView('source_column', '{ source, column }', () => 'One column: its meaning, values, NULL coverage.', paging),
-    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app.', { ...paging, ...include }),
+    // a key of a complex property's elements (src/complex-keys.js), as the data shows it — the property's
+    // view lists its keys
+    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app; with field, one key of an array\'s or a struct\'s elements (the property\'s view lists them).', { ...paging, ...include, field: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]{0,127}$', description: 'A key of the elements, as the property\'s keys list it.' } }),
   };
 
   // The single-view fields, written once.

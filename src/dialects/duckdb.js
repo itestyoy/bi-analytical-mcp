@@ -129,6 +129,54 @@ export class DuckDBDialect extends Dialect {
     return { join: lateral(elements('json_extract_string')), element: cast(`${e}.v`) };
   }
 
+  // ── the keys of a complex property (src/complex-keys.js) ──
+  // A JSON array's elements as a list of JSON (a row whose value is no JSON array: none), a native list
+  // as it is; a key's value and a scalar element read as text, as BigQuery's JSON_VALUE reads them.
+  complexElements(st) {
+    const src = this.quoteIdent(st.column);
+    if (st.encoding === 'native') return src;
+    let path = '$';
+    if (st.key != null) { this.ident(st.key); path = `$."${st.key}"`; }
+    return `COALESCE(${this._whenJson(src, `json_extract(${src}, '${path}[*]')`, `json_type(${src}, '${path}') = 'ARRAY'`)}, [])`;
+  }
+
+  unnestJoin(arr, alias) {
+    this.ident(alias);
+    return { join: `CROSS JOIN LATERAL (SELECT unnest(${arr}) AS v) AS ${alias}`, el: `${alias}.v` };
+  }
+
+  elementKeys(e) {
+    return `(CASE WHEN json_type(${e}) = 'OBJECT' THEN json_keys(${e}) WHEN json_type(${e}) IN ('VARCHAR', 'BIGINT', 'UBIGINT', 'DOUBLE', 'BOOLEAN') THEN [''] ELSE []::VARCHAR[] END)`;
+  }
+
+  elementField(e, field, st) {
+    this.ident(field);
+    if (st.encoding === 'native') return `CAST(struct_extract(${e}, '${field}') AS VARCHAR)`;
+    return `json_extract_string(${e}, '$."${field}"')`;
+  }
+
+  elementText(e, st) {
+    return st.encoding === 'native' ? `CAST(${e} AS VARCHAR)` : `json_extract_string(${e}, '$')`;
+  }
+
+  // (a list comprehension, not a lambda: the arrow `x -> …` is deprecated in DuckDB's newer releases)
+  anyElement(arr, body) { return `(len([x FOR x IN ${arr} IF ${body('x')}]) > 0)`; }
+
+  keyValueList(pairs) {
+    return `[${pairs.map(([k, v]) => `{'k': ${this.sqlLiteral(k)}, 'v': ${v}}`).join(', ')}]`;
+  }
+
+  structOf(ref, field) { return `struct_extract(${ref}, '${field}')`; }
+
+  quantilesJson(x, points) {
+    const n = Math.floor(Number(points));
+    return `CAST(to_json(quantile_cont(${x}, [${Array.from({ length: n + 1 }, (_, i) => (i / n).toFixed(4)).join(', ')}])) AS VARCHAR)`;
+  }
+
+  sampleList(text, cond, n) { return `CAST(to_json((list(${text}) FILTER (WHERE ${cond}))[1:${Math.floor(Number(n))}]) AS VARCHAR)`; }
+
+  complexText(expr, st) { return st.json || st.encoding === 'native' ? `CAST(${expr} AS VARCHAR)` : expr; }
+
   /** STRING holding a JSON array → a native VARCHAR[] list (so it can be unnested as native). */
   jsonParseArray(column) {
     return this._whenJson(column, `json_extract_string(${column}, '$[*]')`, `json_type(${column}) = 'ARRAY'`);

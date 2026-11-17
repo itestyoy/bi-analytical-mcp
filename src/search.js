@@ -14,6 +14,7 @@
 
 import { FuzzyIndex } from './fuzzy.js';
 import { keyRef, keyView } from './engine/value-index-views.js';
+import { parseKeyId, keyPath } from './complex-keys.js';
 
 const round3 = (n) => (n == null ? null : Math.round(n * 1000) / 1000);
 const NAME_WEIGHT = 2; // a name/id match outranks a description match
@@ -117,6 +118,16 @@ export class CatalogSearch {
       events: appliesOf(p.source)[p.name] || null,
       score: round3(score), match,
     }));
+    // THE KEYS OF COMPLEX PROPERTIES' ELEMENTS, as the data shows them (src/complex-keys.js) — dynamic like
+    // the values, so searched live: a key found is named { source, property, field }, its view's address
+    const keyItems = c.facts.flatMap((f) => (this.valueIndex.keys?.(f) || []).filter((k) => k.field !== '').map((k) => ({ source: f, property: k.property, field: k.field })));
+    if (keyItems.length) {
+      const keys = new FuzzyIndex(keyItems, { keys: [{ name: 'name', get: (k) => k.field }], tiebreak: (k) => `${k.source}.${k.property}.${k.field}` });
+      for (const { item: k, score, match } of keys.search(query, opts)) {
+        property_matches.push({ property: k.property, field: k.field, path: keyPath(k.property, k.field), source: k.source, type: 'key', events: appliesOf(k.source)[k.property] || null, score: round3(score), match });
+      }
+      property_matches.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    }
     const column_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
       source: d.source, column: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
@@ -139,6 +150,9 @@ export class CatalogSearch {
     // An indexed value belongs to (source, key): an event property of that source ({ property }), or one
     // of its columns ({ column }) — which, the catalog says (keyRef), as the views take them.
     const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
+      // a value of a key of a complex property's elements: named by the property and the key
+      const ofKey = parseKeyId(v.property);
+      if (ofKey) return { value: v.value, freq: v.freq, source: v.source, property: ofKey.property, ...(ofKey.field ? { field: ofKey.field } : {}), path: keyPath(ofKey.property, ofKey.field), type: 'key', events: appliesOf(v.source)[ofKey.property] || null, score: round3(v.score ?? 1), match: v.match || 'exact' };
       const ref = keyRef(c, v.source, v.property);
       const base = { value: v.value, freq: v.freq, source: v.source, ...ref, score: round3(v.score ?? 1), match: v.match || 'exact' };
       const type = ref.property !== undefined ? c.eventPropertySpec(v.property, v.source)?.type ?? null : c.models[v.source]?.dimensions?.[v.property]?.type ?? null;
@@ -155,7 +169,7 @@ export class CatalogSearch {
     // the name — and a value equal to the word ranks above one that only contains it (US before USD)
     const q = String(query).toLowerCase();
     // (a value match names its value — beside the column or property that carries it)
-    const nameOf = (m) => String(m.value ?? m.event ?? m.property ?? m.column ?? '').toLowerCase();
+    const nameOf = (m) => String(m.value ?? m.event ?? m.field ?? m.property ?? m.column ?? '').toLowerCase();
     // (a short word — two or three letters — names a thing only where a word of the name begins with it:
     // 'ad' is in ad_shown, not in breadcrumbs)
     const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -208,7 +222,9 @@ export class CatalogSearch {
     // the schema's best matches, the closest first (an event before a column at the same score)
     const named = [
       ...(event_names.length ? [{ score: event_names[0].score, text: `See what event '${event_names[0].event}' of source '${event_names[0].source}' carries: semantic_index({ request: { source: '${event_names[0].source}', event: '${event_names[0].event}' } }).` }] : []),
-      ...(property_matches.length ? [{ score: property_matches[0].score, text: `Drill into property '${property_matches[0].property}' of source '${property_matches[0].source}' for its real values + cardinality: semantic_index({ request: { source: '${property_matches[0].source}', property: '${property_matches[0].property}' } }).` }] : []),
+      ...(property_matches.length ? [{ score: property_matches[0].score, text: property_matches[0].field
+        ? `Drill into key '${property_matches[0].path}' of source '${property_matches[0].source}' for its real values + cardinality: semantic_index({ request: { source: '${property_matches[0].source}', property: '${property_matches[0].property}', field: '${property_matches[0].field}' } }).`
+        : `Drill into property '${property_matches[0].property}' of source '${property_matches[0].source}' for its real values + cardinality: semantic_index({ request: { source: '${property_matches[0].source}', property: '${property_matches[0].property}' } }).` }] : []),
       ...(column_matches.length ? [{ score: column_matches[0].score, text: `Column '${column_matches[0].column}' of source '${column_matches[0].source}' matches — drill its values with semantic_index({ request: { source: '${column_matches[0].source}', column: '${column_matches[0].column}' } }).` }] : []),
       // (a recipe is said to cover the task only where it matches it closely — a loose one is listed, not recommended)
       ...(recipe_matches.length && (recipe_matches[0].match === 'exact' || recipe_matches[0].score >= RECIPE_CLOSE) ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),

@@ -7,6 +7,7 @@
 
 import { openStore } from './store.js';
 import { rankFuzzy } from './fuzzy.js';
+import { parseKeyId } from './complex-keys.js';
 
 // Cap on the candidate set scanned for a FUZZY value match (the index is small —
 // top-N values per property — so this comfortably covers it without unbounded cost).
@@ -27,6 +28,15 @@ export class ValueIndex {
   upsertProperty(source, property, spec = {}) {
     this.store.values.replaceProperty(source, property, spec);
   }
+
+  /** A complex property's keys as the data shows them (src/complex-keys.js) — every key of `source`, or one property's. */
+  keys(source, property = null) { return this.store.values.keys ? this.store.values.keys(source, property) : []; }
+
+  /** Record a key of a complex property: last seen, its values counted, a numeric key's summary. */
+  putKey(source, property, field, info) { this.store.values.putKey?.(source, property, field, info); }
+
+  /** Forget a key (its parent is gone from the schema). */
+  removeKey(source, property, field) { this.store.values.removeKey?.(source, property, field); }
 
   /** Per-event_name coverage for a property OF `source`: [{ event_name, row_count, non_null, null_count }]. */
   coverage(source, property) {
@@ -194,11 +204,15 @@ export class ValueIndex {
     const runs = this.store.runs.all();
     const fmt = (r) => (r ? { id: r.id, started_at: r.started_at, finished_at: r.finished_at, status: r.status, properties_indexed: r.properties_indexed, values_written: r.values_written, errors: r.errors, error: r.error, duration_ms: (r.finished_at != null && r.started_at != null) ? r.finished_at - r.started_at : null } : null);
     const lastFinished = runs.find((r) => r.finished_at != null) || null;
-    const { properties, values } = this.store.values.counts();
+    const { properties: rows, values } = this.store.values.counts();
+    // a complex property's keys are kept as rows of their own (src/complex-keys.js): counted apart
+    const keys = (this.store.values.properties?.() || []).filter((k) => parseKeyId(k.property)).length;
+    const properties = rows - keys;
     return {
       persisted: this.store.persistent,
       running: runs.some((r) => r.status === 'running'),
       indexed_properties: properties,
+      indexed_keys: keys,
       total_values: values,
       total_runs: runs.length,
       last_run: fmt(runs[0]),

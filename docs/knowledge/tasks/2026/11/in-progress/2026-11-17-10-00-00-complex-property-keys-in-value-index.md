@@ -77,6 +77,26 @@ app; min / max / percentiles for a numeric key — found by search and readable 
 6. The complex pass is batched per source: a key discovery query, one coverage query, one stats query and one
    examples query for all its complex properties (was two dbt calls per property).
 
+## BigQuery dry run (2026-11-17, production `bi.fct_analytics_events`, the indexer's own SQL, one day)
+
+Run with the owner's go-ahead; dry run only (nothing billed). Estimates are BigQuery's upper bounds.
+
+- The generated SQL compiles — after one fix: a native `ARRAY<JSON>` column (the ad-unit lists,
+  `block_reasons`, …) was read with `CAST(JSON AS STRING)`, which BigQuery refuses ("Invalid cast from JSON to
+  STRING"). Its elements are now read as JSON (`itemsJson` in `complexStorage`: JSON_VALUE / JSON_KEYS).
+- The events view is a UNION ALL of the prod table (partitioned by `event_date`) and a dev view that parses
+  raw JSON and cannot be pruned: ~64 GB of every query on the view is the dev branch, whatever the window.
+  `environment = 'prod'` drops that branch (a one-day `COUNT(*)` of words_selected: 80 GB → 16.4 GB). The
+  indexer puts no such filter — this is true of every index query today (the scalar pass too), not only of
+  the key pass. Decision for the owner: index prod only (a filter on the catalog's required column), or not.
+- One day, prod only: key discovery 16.4 GB, coverage 48.5 GB (event_name / bundle_id / time of every row),
+  key values ≈ 16 GB, examples ≈ 16 GB. As run today (no environment filter) each is ~80–112 GB.
+- The old pass ran a coverage query PER complex property (~112 GB each as run today, ~40 GB prod-only, even
+  for the smallest column) plus an examples query each: 11 properties ≈ 2 TB a day by these estimates; the
+  batched pass is ~4 queries per source.
+- The first sync after deploy counts every key over the whole window once: words_selected alone is ~2.7 TB
+  over 180 days (prod only) per query that reads it (coverage, values).
+
 ## Review fixes (2026-11-17)
 
 - All of a group's queries run before any write (a failed whole-history count of a new key no longer loses

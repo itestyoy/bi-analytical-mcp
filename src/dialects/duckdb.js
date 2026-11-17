@@ -152,12 +152,12 @@ export class DuckDBDialect extends Dialect {
 
   elementField(e, field, st) {
     this.ident(field);
-    if (st.encoding === 'native') return `CAST(struct_extract(${e}, '${field}') AS VARCHAR)`;
+    if (st.encoding === 'native' && !st.itemsJson) return `CAST(struct_extract(${e}, '${field}') AS VARCHAR)`;
     return `json_extract_string(${e}, '$."${field}"')`;
   }
 
   elementText(e, st) {
-    return st.encoding === 'native' ? `CAST(${e} AS VARCHAR)` : `json_extract_string(${e}, '$')`;
+    return st.encoding === 'native' && !st.itemsJson ? `CAST(${e} AS VARCHAR)` : `json_extract_string(${e}, '$')`;
   }
 
   // (a list comprehension, not a lambda: the arrow `x -> …` is deprecated in DuckDB's newer releases)

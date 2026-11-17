@@ -586,7 +586,8 @@ export class Catalog {
    * own column (key null) or a key of the event-data payload; `encoding` native (a warehouse array or struct) or
    * json; `json` whether the warehouse holds it as its JSON type (false: a text of JSON; null: not known — the
    * SQL then reads either); `struct` a native ONE
-   * struct, not an array of them (a JSON value says per row which it is); `dtype` the warehouse's type, the
+   * struct, not an array of them (a JSON value says per row which it is); `itemsJson` a native array of JSON
+   * values (its elements read as JSON; `json` then says so of them); `dtype` the warehouse's type, the
    * declared one until grounding reads it (a native struct's fields are read off it). Also asked of a text
    * property the value index finds holding JSON (src/complex-keys.js holdsJson).
    */
@@ -596,11 +597,15 @@ export class Catalog {
     if (!spec) return null;
     const dtype = spec.column ? (spec.data_type || null) : (this.models[fact]?.event_data_type || null);
     const encoding = spec.column ? (spec.encoding || 'json') : 'json';
+    // a native array of JSON values (BigQuery ARRAY<JSON>, DuckDB JSON[]): its elements are JSON, read as a JSON
+    // array's are (their keys, a key's value) — a JSON value casts to no text
+    const itemsJson = encoding === 'native' && /^\s*(ARRAY\s*<\s*JSON\s*>|JSON\s*\[\d*\])\s*$/i.test(String(dtype || ''));
     return {
       column: spec.column || this.eventDataColumn(fact),
       key: spec.column ? null : name,
       encoding,
-      json: dtype ? /^jsonb?$/i.test(String(dtype).trim()) : null,
+      itemsJson,
+      json: itemsJson || (dtype ? /^jsonb?$/i.test(String(dtype).trim()) : null),
       struct: encoding === 'native' && (dtype ? isStructType(dtype) : String(spec.type || '').toLowerCase() === 'struct'),
       dtype,
     };

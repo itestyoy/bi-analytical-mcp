@@ -191,7 +191,8 @@ export class BackgroundIndexer {
       const spec = c.eventPropertySpec(name, fact);
       const st = c.complexStorage(name, fact);
       if (!spec || !st) return null;
-      const native = st.encoding === 'native';
+      // keys off the warehouse type (a native array / struct); a native array of JSON is read as JSON is
+      const native = st.encoding === 'native' && !st.itemsJson;
       const elems = d.complexElements(st);
       // a native struct's fields: the warehouse's type, else the catalog's declared `fields` (a type not read
       // yet) — and whether its elements are structs at all, so a struct is never read as a scalar element

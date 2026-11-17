@@ -189,12 +189,13 @@ export class BigQueryDialect extends Dialect {
 
   elementField(e, field, st) {
     this.ident(field);
-    if (st.encoding === 'native') return `CAST(${e}.${this.quoteIdent(field)} AS STRING)`;
+    if (st.encoding === 'native' && !st.itemsJson) return `CAST(${e}.${this.quoteIdent(field)} AS STRING)`;
     return `JSON_VALUE(${e}, '$.${field}')`;
   }
 
   elementText(e, st) {
-    return st.encoding === 'native' ? `CAST(${e} AS STRING)` : `JSON_VALUE(${e}, '$')`;
+    // (a JSON element — of a JSON array, or of a native ARRAY<JSON> — is read by JSON_VALUE: JSON casts to no text)
+    return st.encoding === 'native' && !st.itemsJson ? `CAST(${e} AS STRING)` : `JSON_VALUE(${e}, '$')`;
   }
 
   anyElement(arr, body) { return `EXISTS(SELECT 1 FROM UNNEST(${arr}) AS x WHERE ${body('x')})`; }

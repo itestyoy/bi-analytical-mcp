@@ -98,7 +98,7 @@ export class Dialect {
   downloadLink(_file) { throw new Error(`export is not written for the ${this.name} warehouse`); }
 
   // ── THE KEYS OF A COMPLEX PROPERTY, read by the value index (src/complex-keys.js) ──
-  // `st` is where its elements are (Catalog.complexStorage): { column, key, encoding, json, struct }. Every read
+  // `st` is where its elements are (Catalog.complexStorage): { column, key, encoding, json, struct, itemsJson }. Every read
   // below yields a text (or NULL), so a key's values are compared and counted alike on every warehouse.
 
   /** The property's elements as an array expression (a native array, a JSON array's elements; a JSON object

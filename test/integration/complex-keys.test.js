@@ -3,7 +3,9 @@
 // frames), one inside the event payload (the events source's rewards) — and an array of scalars'
 // elements, and counts each as a property: its values with frequencies, distinct count, the rows that
 // carry it per event, a number's min / max / quantiles. Then a delta: rows added after the sync, one of
-// them with a key the payload never had — counted on, and the new key counted over the whole history.
+// them with a key the payload never had — counted on, and the new key counted over the whole history. A
+// property the catalog declares a plain text but whose values are JSON objects (the crash custom keys) has
+// its keys found and counted alike.
 //
 // DATA ONLY: every expectation is the warehouse's own count, read with SQL written here.
 
@@ -38,6 +40,19 @@ async function truthRows(table, column, key, eventCol, { blobKey = null } = {}) 
   const arr = blobKey ? `json_extract(${column}, '$."${blobKey}"[*]')` : `json_extract(${column}, '$[*]')`;
   const { rows } = await wh.query(`SELECT ${eventCol} AS ev, count(*) AS n FROM ${table} WHERE json_valid(${column}) AND len([x FOR x IN ${arr} IF json_extract_string(x, '$."${key}"') IS NOT NULL]) > 0 GROUP BY 1 ORDER BY 1`);
   return Object.fromEntries(rows.map((r) => [String(r.ev), Number(r.n)]));
+}
+
+/** A JSON object in a text column: each value of `key` and its rows, and the rows per event that carry it. */
+async function truthObject(table, column, key, eventCol) {
+  const read = `json_extract_string(${column}, '$."${key}"')`;
+  const values = await wh.query(`SELECT ${read} AS v, count(*) AS n FROM ${table} WHERE json_valid(${column}) AND json_type(${column}) = 'OBJECT' AND ${read} IS NOT NULL GROUP BY 1 ORDER BY 1`);
+  const rows = await wh.query(`SELECT ${eventCol} AS ev, count(*) AS n FROM ${table} WHERE json_valid(${column}) AND json_type(${column}) = 'OBJECT' AND ${read} IS NOT NULL GROUP BY 1 ORDER BY 1`);
+  const keys = await wh.query(`SELECT DISTINCT unnest(json_keys(${column})) AS k FROM ${table} WHERE json_valid(${column}) AND json_type(${column}) = 'OBJECT' ORDER BY 1`);
+  return {
+    values: Object.fromEntries(values.rows.map((r) => [String(r.v), Number(r.n)])),
+    carried: Object.fromEntries(rows.rows.map((r) => [String(r.ev), Number(r.n)])),
+    keys: keys.rows.map((r) => String(r.k)),
+  };
 }
 
 const stored = (source, property, field) => Object.fromEntries(index.listValues(source, keyId(property, field), { limit: 1000 }).map((v) => [v.value, v.freq]));
@@ -85,6 +100,30 @@ test('the keys of an array inside the event payload, and an array of scalars\' e
   assert.deepEqual(stored('crashlytics', 'breadcrumbs_of_event_data', ''), await truthValues('fct_crashlytics_events', 'breadcrumbs_of_event_data', ''));
 });
 
+test('a text property the data shows holding a JSON object: its keys are found and counted, its own values kept', opts, async (t) => {
+  if (skip(t)) return;
+  const prop = 'custom_keys_of_event_data';
+  const { keys } = await truthObject('fct_crashlytics_events', prop, 'level', 'event_name');
+  assert.ok(keys.length > 0, 'the fixture holds objects');
+  assert.deepEqual(index.keys('crashlytics', prop).map((k) => k.field), keys);
+  for (const key of keys) {
+    const truth = await truthObject('fct_crashlytics_events', prop, key, 'event_name');
+    assert.deepEqual(stored('crashlytics', prop, key), truth.values, key);
+    assert.deepEqual(carried('crashlytics', prop, key), truth.carried, `${key}: the rows per event that carry it`);
+  }
+  // its own row is still the text property's: its values are the whole objects, as before
+  const { rows } = await wh.query(`SELECT ${prop} AS v, count(*) AS n FROM fct_crashlytics_events WHERE ${prop} IS NOT NULL GROUP BY 1`);
+  assert.deepEqual(Object.fromEntries(index.listValues('crashlytics', prop, { limit: 1000 }).map((v) => [v.value, v.freq])), Object.fromEntries(rows.map((r) => [String(r.v), Number(r.n)])));
+  // the views: the property says it holds JSON and lists its keys; a key is a view of its own
+  const view = await engine.semantic_index({ source: 'crashlytics', property: prop });
+  assert.equal(view.holds_json, true);
+  assert.deepEqual(view.keys.map((k) => k.field), keys);
+  const one = await engine.semantic_index({ source: 'crashlytics', property: prop, field: keys[0], limit: 100 });
+  assert.deepEqual(Object.fromEntries(one.sample_values.map((v) => [v.value, v.freq])), (await truthObject('fct_crashlytics_events', prop, keys[0], 'event_name')).values);
+  // a text that holds no JSON has no keys
+  await assert.rejects(Promise.resolve().then(() => engine.semantic_index({ source: 'crashlytics', property: 'issue_title_of_event_data', field: 'x' })), /no array or struct, and the index has seen no JSON in it/);
+});
+
 test('semantic_index: the property lists its keys, a key is a view of its own, and search finds it by its name', opts, async (t) => {
   if (skip(t)) return;
   const prop = await engine.semantic_index({ source: 'crashlytics', property: 'stack_frames_of_event_data' });
@@ -122,6 +161,12 @@ test('a delta adds to what is kept; a key the payload never had is counted over 
   // the new key: found in the delta, counted over everything there is
   assert.ok(index.keys('crashlytics', 'stack_frames_of_event_data').some((k) => k.field === 'module'), 'the new key is in the index after the next sync');
   assert.deepEqual(stored('crashlytics', 'stack_frames_of_event_data', 'module'), await truthValues('fct_crashlytics_events', 'stack_frames_of_event_data', 'module'));
+  // a text that holds an object is kept up by the delta too (its keys' own watermark)
+  for (const key of index.keys('crashlytics', 'custom_keys_of_event_data').map((k) => k.field)) {
+    const truth = await truthObject('fct_crashlytics_events', 'custom_keys_of_event_data', key, 'event_name');
+    assert.deepEqual(stored('crashlytics', 'custom_keys_of_event_data', key), truth.values, `custom key ${key} after the delta`);
+    assert.deepEqual(carried('crashlytics', 'custom_keys_of_event_data', key), truth.carried, `custom key ${key}: rows per event after the delta`);
+  }
   const line = index.keys('crashlytics', 'stack_frames_of_event_data').find((k) => k.field === 'line').numeric;
   const lines = Object.entries(await truthValues('fct_crashlytics_events', 'stack_frames_of_event_data', 'line')).flatMap(([v, n]) => Array(n).fill(Number(v)));
   assert.equal(line.count, lines.length, 'a number\'s count adds up across the delta');

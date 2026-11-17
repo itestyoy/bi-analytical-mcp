@@ -29,9 +29,10 @@
 //   values.valueCount(source, property) -> int (values STORED; vs distinct_count → capped?)
 //   values.properties()               -> [{source, property}] (every indexed pair)
 //   values.removeProperty(source, property)
-//   values.keys(source, property?)    -> [{ source, property, field, firstSeen, lastSeen, elements, numeric }] (a complex
-//                                        property's keys, as the data shows them — src/complex-keys.js)
-//   values.putKey(source, property, field, { lastSeen?, elements, numeric })   (first_seen kept from the first write)
+//   values.keys(source, property?)    -> [{ source, property, field, firstSeen, lastSeen, elements, numeric, watermark }]
+//                                        (a complex property's keys, as the data shows them — src/complex-keys.js)
+//   values.putKey(source, property, field, { lastSeen?, elements, numeric, watermark? })   (first_seen kept from the
+//                                        first write; watermark — the newest row its counts read — kept when not given)
 //   values.removeKey(source, property, field)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
@@ -237,10 +238,10 @@ export class MemoryBackend {
       removeProperty: (source, property) => !!bySource.get(source)?.delete(property),
       keys: (source, property = null) => [...keyRows.values()].filter((k) => k.source === source && (property == null || k.property === property))
         .sort((a, b) => cmp(a.property, b.property) || cmp(a.field, b.field)).map((k) => ({ ...k, numeric: k.numeric ? structuredClone(k.numeric) : null })),
-      putKey: (source, property, field, { lastSeen = null, elements = null, numeric = null } = {}) => {
+      putKey: (source, property, field, { lastSeen = null, elements = null, numeric = null, watermark = null } = {}) => {
         const id = `${source}\u0000${property}\u0000${field}`;
         const had = keyRows.get(id);
-        keyRows.set(id, { source, property, field, firstSeen: had?.firstSeen ?? Date.now(), lastSeen: lastSeen ?? had?.lastSeen ?? null, elements: elements ?? null, numeric: numeric ? structuredClone(numeric) : null });
+        keyRows.set(id, { source, property, field, firstSeen: had?.firstSeen ?? Date.now(), lastSeen: lastSeen ?? had?.lastSeen ?? null, elements: elements ?? null, watermark: watermark ?? had?.watermark ?? null, numeric: numeric ? structuredClone(numeric) : null });
       },
       removeKey: (source, property, field) => keyRows.delete(`${source}\u0000${property}\u0000${field}`),
     };
@@ -355,7 +356,7 @@ const TABLES = [
   // elements (field '' — its scalar elements). Its values and coverage are kept under the key's id in the
   // tables above; here, when it was first and last seen, how many of its values were counted, and a
   // numeric key's summary (JSON: count, min, max, quantiles).
-  { name: 'prop_keys', cache: true, key: ['source', 'property', 'field'], columns: ['source TEXT', 'property TEXT', 'field TEXT', 'first_seen INTEGER', 'last_seen INTEGER', 'elements INTEGER', 'numeric TEXT'] },
+  { name: 'prop_keys', cache: true, key: ['source', 'property', 'field'], columns: ['source TEXT', 'property TEXT', 'field TEXT', 'first_seen INTEGER', 'last_seen INTEGER', 'elements INTEGER', 'numeric TEXT', 'watermark INTEGER'] },
   { name: 'index_runs', cache: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'started_at INTEGER', 'finished_at INTEGER', 'status TEXT', 'properties_indexed INTEGER', 'values_written INTEGER', 'errors INTEGER', 'error TEXT'] },
   // Per-property timing within a run — detailed stats drilled into via semantic_index.
   // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
@@ -603,11 +604,11 @@ export class SqliteBackend {
         const rows = property == null
           ? s._all('SELECT * FROM prop_keys WHERE source = ? ORDER BY property, field', source)
           : s._all('SELECT * FROM prop_keys WHERE source = ? AND property = ? ORDER BY field', source, property);
-        return rows.map((r) => ({ source: r.source, property: r.property, field: r.field, firstSeen: r.first_seen ?? null, lastSeen: r.last_seen ?? null, elements: r.elements ?? null, numeric: (() => { try { return r.numeric ? JSON.parse(r.numeric) : null; } catch { return null; } })() }));
+        return rows.map((r) => ({ source: r.source, property: r.property, field: r.field, firstSeen: r.first_seen ?? null, lastSeen: r.last_seen ?? null, elements: r.elements ?? null, watermark: r.watermark ?? null, numeric: (() => { try { return r.numeric ? JSON.parse(r.numeric) : null; } catch { return null; } })() }));
       },
-      putKey(source, property, field, { lastSeen = null, elements = null, numeric = null } = {}) {
-        s._run('INSERT INTO prop_keys (source, property, field, first_seen, last_seen, elements, numeric) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property, field) DO UPDATE SET last_seen = COALESCE(excluded.last_seen, prop_keys.last_seen), elements = excluded.elements, numeric = excluded.numeric',
-          source, property, field, Date.now(), lastSeen, elements, numeric ? JSON.stringify(numeric) : null);
+      putKey(source, property, field, { lastSeen = null, elements = null, numeric = null, watermark = null } = {}) {
+        s._run('INSERT INTO prop_keys (source, property, field, first_seen, last_seen, elements, numeric, watermark) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property, field) DO UPDATE SET last_seen = COALESCE(excluded.last_seen, prop_keys.last_seen), elements = excluded.elements, numeric = excluded.numeric, watermark = COALESCE(excluded.watermark, prop_keys.watermark)',
+          source, property, field, Date.now(), lastSeen, elements, numeric ? JSON.stringify(numeric) : null, watermark);
       },
       removeKey(source, property, field) { s._run('DELETE FROM prop_keys WHERE source = ? AND property = ? AND field = ?', source, property, field); },
     };

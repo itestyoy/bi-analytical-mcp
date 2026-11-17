@@ -29,6 +29,21 @@ export const READABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 /** A key not seen in the data for this long is inactive — kept, and said so. */
 export const KEY_STALE_MS = 30 * 24 * 3600 * 1000;
 
+/**
+ * Whether a property's indexed values say it holds JSON — an object or an array in a text — as a payload
+ * declared a plain text often does (custom keys, a config): every value is written as one (it starts with
+ * `{` or `[`, a long one may be cut) and at least one reads as one. Its keys are then indexed as a declared
+ * array's are, its own values staying a text's.
+ */
+export function holdsJson(values) {
+  const list = (values || []).map((v) => (v && typeof v === 'object' ? v.value : v)).filter((v) => v != null);
+  if (!list.length || !list.every((v) => /^\s*[[{]/.test(String(v)))) return false;
+  return list.some((v) => { try { const x = JSON.parse(String(v)); return x !== null && typeof x === 'object'; } catch { return false; } });
+}
+
+/** Whether a warehouse type is ONE struct (BigQuery `STRUCT<…>`, DuckDB `STRUCT(…)`), not an array of them. */
+export const isStructType = (dtype) => /^\s*(STRUCT|ROW|RECORD)\b/i.test(String(dtype || '')) && !/(\[\d*\]\s*$)/.test(String(dtype));
+
 /** The quantile points kept per numeric key (0 %, 1 %, …, 100 %). */
 export const QUANTILE_POINTS = 100;
 

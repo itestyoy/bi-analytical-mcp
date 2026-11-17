@@ -574,14 +574,16 @@ export const semanticIndexMethods = {
         if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { source: '${propFact}', bundle: '<app>' } }) or include: ['coverage'].`];
       }
     }
-    // THE KEYS OF ITS ELEMENTS, as the data shows them (src/complex-keys.js) — each a view of its own
-    if (complex) {
-      const keys = this._complexKeys(propFact, propName);
+    // THE KEYS OF ITS ELEMENTS, as the data shows them (src/complex-keys.js) — each a view of its own; a
+    // text the data shows holding JSON has them too
+    const keys = this._complexKeys(propFact, propName);
+    if (complex || keys.length) {
+      if (!complex) out.holds_json = true;
       const named = keys.filter((k) => k.field !== '');
       const elements = keys.find((k) => k.field === '');
       if (named.length) {
         out.keys = named;
-        out.recommendations = [`Its elements hold ${named.length} key(s), as the data shows them: ${named.slice(0, 8).map((k) => k.field).join(', ')}${named.length > 8 ? ', …' : ''} — one's values, distinct count and coverage: semantic_index({ request: { source: '${propFact}', property: '${p}', field: '${named[0].field}' } }).`, ...out.recommendations.slice(0, 3)];
+        out.recommendations = [`Its ${complex ? 'elements hold' : 'JSON holds'} ${named.length} key(s), as the data shows them: ${named.slice(0, 8).map((k) => k.field).join(', ')}${named.length > 8 ? ', …' : ''} — one's values, distinct count and coverage: semantic_index({ request: { source: '${propFact}', property: '${p}', field: '${named[0].field}' } }).`, ...out.recommendations.slice(0, 3)];
       }
       if (elements) out.element_values = { ...elements, top: this.valueIndex.sampleValues(propFact, keyId(propName, ''), 10) };
     }
@@ -615,8 +617,9 @@ export const semanticIndexMethods = {
     const c = this.catalog;
     const source = input.source; const p = String(input.property); const field = String(input.field);
     if (c.attributeKind(source, p) !== 'property') throw this._notOf(source, p, 'property');
-    if (!c.isComplexEventProp(p, source)) throw new ToolError(`'${p}' of '${source}' is no array or struct: it has no keys of its own — its view is semantic_index({ request: { source: '${source}', property: '${p}' } }).`, { stage: 'validate', field: 'field' });
+    const complex = c.isComplexEventProp(p, source);
     const keys = this._complexKeys(source, p);
+    if (!complex && !keys.length) throw new ToolError(`'${p}' of '${source}' is no array or struct, and the index has seen no JSON in it: it has no keys of its own — its view is semantic_index({ request: { source: '${source}', property: '${p}' } }).`, { stage: 'validate', field: 'field' });
     const key = keys.find((k) => k.field === field);
     if (!key) {
       const named = keys.filter((k) => k.field !== '').map((k) => k.field);
@@ -637,7 +640,9 @@ export const semanticIndexMethods = {
       event_coverage: showFull ? coverage : carriers,
       recommendations: [
         `Values of '${key.path}' counted per element: ${listed.samples.slice(0, 5).map((v) => `'${v.value}' (${v.freq})`).join(', ') || 'none indexed yet'}${value_stats.distinct_count != null ? `; ${value_stats.distinct_count} distinct` : ''}.`,
-        `Read it in a build with an unnest stage over { property: '${p}' } (one row per element), then the element's '${field}'.`,
+        complex
+          ? `Read it in a build with an unnest stage over { property: '${p}' } (one row per element), then the element's '${field}'.`
+          : `Read it in a build as { property: '${p}', field: '${field}' } (where the JSON is an object), or with an unnest stage where it is an array.`,
         ...(key.active ? [] : [`Not seen in the data for a while (last ${key.last_seen}): the payload may no longer carry it.`]),
       ],
     };

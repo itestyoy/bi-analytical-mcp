@@ -17,6 +17,7 @@ import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measure
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
 import { physicalColumnType, isArrayPropertyType, groundedType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
+import { isStructType } from './complex-keys.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
 export { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
@@ -581,21 +582,25 @@ export class Catalog {
   }
 
   /**
-   * WHERE A COMPLEX PROPERTY'S ELEMENTS ARE, AND AS WHAT: { column, key, encoding, json, dtype } — its own
-   * column (key null) or a key of the event-data payload; `encoding` native (a warehouse array) or json; `json`
-   * whether the warehouse holds it as its JSON type (else a text of JSON); `dtype` the warehouse's type, the
-   * declared one until grounding reads it (a native struct's fields are read off it).
+   * WHERE A COMPLEX PROPERTY'S ELEMENTS ARE, AND AS WHAT: { column, key, encoding, json, struct, dtype } — its
+   * own column (key null) or a key of the event-data payload; `encoding` native (a warehouse array or struct) or
+   * json; `json` whether the warehouse holds it as its JSON type (else a text of JSON); `struct` a native ONE
+   * struct, not an array of them (a JSON value says per row which it is); `dtype` the warehouse's type, the
+   * declared one until grounding reads it (a native struct's fields are read off it). Also asked of a text
+   * property the value index finds holding JSON (src/complex-keys.js holdsJson).
    */
   complexStorage(name, fact) {
     fact = this._fact(fact);
     const spec = this.eventPropertySpec(name, fact);
     if (!spec) return null;
     const dtype = spec.column ? (spec.data_type || null) : (this.models[fact]?.event_data_type || null);
+    const encoding = spec.column ? (spec.encoding || 'json') : 'json';
     return {
       column: spec.column || this.eventDataColumn(fact),
       key: spec.column ? null : name,
-      encoding: spec.column ? (spec.encoding || 'json') : 'json',
+      encoding,
       json: /^jsonb?$/i.test(String(dtype || '').trim()),
+      struct: encoding === 'native' && (dtype ? isStructType(dtype) : String(spec.type || '').toLowerCase() === 'struct'),
       dtype,
     };
   }

@@ -98,10 +98,11 @@ export class Dialect {
   downloadLink(_file) { throw new Error(`export is not written for the ${this.name} warehouse`); }
 
   // ── THE KEYS OF A COMPLEX PROPERTY, read by the value index (src/complex-keys.js) ──
-  // `st` is where its elements are (Catalog.complexStorage): { column, key, encoding, json }. Every read
+  // `st` is where its elements are (Catalog.complexStorage): { column, key, encoding, json, struct }. Every read
   // below yields a text (or NULL), so a key's values are compared and counted alike on every warehouse.
 
-  /** The property's elements as an array expression (a native array, or a JSON array's elements). */
+  /** The property's elements as an array expression (a native array, a JSON array's elements; a JSON object
+   *  or a native struct the one element it is). */
   complexElements(_st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
   /** A FROM-clause join binding each element of `arr` — { join, el }: `el` reads the element. */
   unnestJoin(_arr, _alias) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }

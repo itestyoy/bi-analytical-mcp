@@ -156,13 +156,15 @@ export class BigQueryDialect extends Dialect {
   // ── the keys of a complex property (src/complex-keys.js) ──
   // JSON_QUERY_ARRAY reads a JSON column and a text of JSON alike: its elements are of the same kind
   // (JSON, or a text of JSON), and JSON_VALUE reads either; JSON_KEYS takes JSON only, so a text element
-  // is parsed first (SAFE: a malformed one has no keys).
+  // is parsed first (SAFE: a malformed one has no keys). A JSON object is the one element it is (JSON_QUERY
+  // gives it in the same kind), a native struct an array of it.
   complexElements(st) {
     const col = this.quoteIdent(st.column);
-    if (st.encoding === 'native') return col;
-    if (st.key == null) return `JSON_QUERY_ARRAY(${col}, '$')`;
-    this.ident(st.key);
-    return `JSON_QUERY_ARRAY(${col}, '$.${st.key}')`;
+    if (st.encoding === 'native') return st.struct ? `ARRAY(SELECT x FROM UNNEST([${col}]) AS x WHERE x IS NOT NULL)` : col;
+    if (st.key != null) this.ident(st.key);
+    const path = st.key == null ? '$' : `$.${st.key}`;
+    const node = `JSON_QUERY(${col}, '${path}')`;
+    return `(CASE JSON_TYPE(${st.json ? node : `SAFE.PARSE_JSON(${node})`}) WHEN 'object' THEN [${node}] ELSE JSON_QUERY_ARRAY(${col}, '${path}') END)`;
   }
 
   unnestJoin(arr, alias) {

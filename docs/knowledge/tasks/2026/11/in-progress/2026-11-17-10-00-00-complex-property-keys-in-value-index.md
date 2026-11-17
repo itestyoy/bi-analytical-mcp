@@ -70,7 +70,11 @@ app; min / max / percentiles for a numeric key — found by search and readable 
    property is complex.
 4. Address `{ source, property, field }`; store id `<property>[].<field>` (`<property>[]` for an array of
    scalars' elements), internal.
-5. The complex pass is batched per source: a key discovery query, one coverage query, one stats query and one
+5. A JSON object (not an array) is one element, and so is one native struct: its keys are indexed the same
+   way. A text property the catalog declares plain whose indexed values are all JSON (`holdsJson` — e.g. the
+   crash custom keys) gets its keys indexed too, with no declaration; its own row stays the scalar pass's,
+   so its keys keep their own watermark (`prop_keys.watermark`).
+6. The complex pass is batched per source: a key discovery query, one coverage query, one stats query and one
    examples query for all its complex properties (was two dbt calls per property).
 
 ## Steps
@@ -86,6 +90,8 @@ app; min / max / percentiles for a numeric key — found by search and readable 
 
 - test/integration/complex-keys.test.js (4) — keys, values, coverage per event, numeric count / min / max,
   views, search, a delta with a new key — against SQL run on the DuckDB fixture.
-- test/unit/complex-keys.test.js — key ids, struct type parsing, quantile / numeric merge, the store's key
+- the same file: a text column holding a JSON object (custom keys) — its keys, values and coverage, also
+  after a delta; the native one-struct SQL run by hand on DuckDB (no fixture column of that type).
+- test/unit/complex-keys.test.js — key ids, JSON detection, struct type parsing, quantile / numeric merge, the store's key
   registry on both backends.
 - Not verified: the BigQuery dialect's SQL has not been run anywhere.

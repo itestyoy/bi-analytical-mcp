@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { keyId, parseKeyId, structFieldsOfType, mergeQuantiles, mergeNumeric, percentilesOf, QUANTILE_POINTS } from '../../src/complex-keys.js';
+import { keyId, parseKeyId, holdsJson, isStructType, structFieldsOfType, mergeQuantiles, mergeNumeric, percentilesOf, QUANTILE_POINTS } from '../../src/complex-keys.js';
 import { openStore } from '../../src/store.js';
 import { ValueIndex } from '../../src/value-index.js';
 import { tempDir } from '../helpers/temp-dir.js';
@@ -28,6 +28,18 @@ test('the fields of a native struct type, on either warehouse', () => {
   ]);
   assert.deepEqual(structFieldsOfType('ARRAY<STRING>'), []);
   assert.deepEqual(structFieldsOfType(null), []);
+});
+
+test('a text holds JSON when every value is written as an object or an array and one reads as one', () => {
+  assert.equal(holdsJson([{ value: '{"level":"12"}', freq: 3 }, { value: '{"level":"1' }]), true, 'a cut value still starts as one');
+  assert.equal(holdsJson(['[1, 2]']), true);
+  assert.equal(holdsJson(['{"a":1}', 'plain']), false);
+  assert.equal(holdsJson(['{not json']), false);
+  assert.equal(holdsJson([]), false);
+  assert.equal(isStructType('STRUCT<a INT64>'), true);
+  assert.equal(isStructType('STRUCT(a INTEGER)'), true);
+  assert.equal(isStructType('STRUCT(a INTEGER)[]'), false);
+  assert.equal(isStructType('ARRAY<STRUCT<a INT64>>'), false);
 });
 
 const quantilesOf = (xs) => { const s = [...xs].sort((a, b) => a - b); return Array.from({ length: QUANTILE_POINTS + 1 }, (_, p) => s[Math.round((p / QUANTILE_POINTS) * (s.length - 1))]); };

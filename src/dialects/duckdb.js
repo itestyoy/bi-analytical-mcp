@@ -130,14 +130,15 @@ export class DuckDBDialect extends Dialect {
   }
 
   // ── the keys of a complex property (src/complex-keys.js) ──
-  // A JSON array's elements as a list of JSON (a row whose value is no JSON array: none), a native list
-  // as it is; a key's value and a scalar element read as text, as BigQuery's JSON_VALUE reads them.
+  // A JSON array's elements as a list of JSON, a JSON object as the one element it is (a row whose value
+  // is neither: none); a native list as it is, a native struct as a list of it; a key's value and a scalar
+  // element read as text, as BigQuery's JSON_VALUE reads them.
   complexElements(st) {
     const src = this.quoteIdent(st.column);
-    if (st.encoding === 'native') return src;
+    if (st.encoding === 'native') return st.struct ? `[x FOR x IN [${src}] IF x IS NOT NULL]` : src;
     let path = '$';
     if (st.key != null) { this.ident(st.key); path = `$."${st.key}"`; }
-    return `COALESCE(${this._whenJson(src, `json_extract(${src}, '${path}[*]')`, `json_type(${src}, '${path}') = 'ARRAY'`)}, [])`;
+    return `COALESCE(${this._whenJson(src, `(CASE json_type(${src}, '${path}') WHEN 'ARRAY' THEN json_extract(${src}, '${path}[*]') WHEN 'OBJECT' THEN [json_extract(${src}, '${path}')] END)`)}, [])`;
   }
 
   unnestJoin(arr, alias) {

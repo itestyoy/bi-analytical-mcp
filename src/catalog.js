@@ -598,15 +598,17 @@ export class Catalog {
     const dtype = spec.column ? (spec.data_type || null) : (this.models[fact]?.event_data_type || null);
     const encoding = spec.column ? (spec.encoding || 'json') : 'json';
     // a native array of JSON values (BigQuery ARRAY<JSON>, DuckDB JSON[]): its elements are JSON, read as a JSON
-    // array's are (their keys, a key's value) — a JSON value casts to no text
-    const itemsJson = encoding === 'native' && /^\s*(ARRAY\s*<\s*JSON\s*>|JSON\s*\[\d*\])\s*$/i.test(String(dtype || ''));
+    // array's are (their keys, a key's value) — a JSON value casts to no text. A bare JSON there is the same
+    // column: an introspection that reports a REPEATED column by its element's type says JSON
+    const itemsJson = encoding === 'native' && /^\s*(ARRAY\s*<\s*JSON\s*>|JSON\s*\[\d*\]|JSON)\s*$/i.test(String(dtype || ''));
     return {
       column: spec.column || this.eventDataColumn(fact),
       key: spec.column ? null : name,
       encoding,
       itemsJson,
       json: itemsJson || (dtype ? /^jsonb?$/i.test(String(dtype).trim()) : null),
-      struct: encoding === 'native' && (dtype ? isStructType(dtype) : String(spec.type || '').toLowerCase() === 'struct'),
+      // ONE native struct only where the catalog declares one (an array's reported RECORD is its element's)
+      struct: encoding === 'native' && String(spec.type || '').toLowerCase() === 'struct' && (!dtype || isStructType(dtype)),
       dtype,
     };
   }

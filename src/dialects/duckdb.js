@@ -169,6 +169,8 @@ export class DuckDBDialect extends Dialect {
 
   structOf(ref, field) { return `struct_extract(${ref}, '${field}')`; }
 
+  finiteNumber(x) { return `(CASE WHEN isnan(${x}) OR isinf(${x}) THEN NULL ELSE ${x} END)`; }
+
   quantilesJson(x, points) {
     const n = Math.floor(Number(points));
     return `CAST(to_json(quantile_cont(${x}, [${Array.from({ length: n + 1 }, (_, i) => (i / n).toFixed(4)).join(', ')}])) AS VARCHAR)`;

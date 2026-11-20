@@ -77,6 +77,19 @@ app; min / max / percentiles for a numeric key — found by search and readable 
 6. The complex pass is batched per source: a key discovery query, one coverage query, one stats query and one
    examples query for all its complex properties (was two dbt calls per property).
 
+## Production findings after deploy (2026-11-20)
+
+- Runs 273/274: the REPEATED JSON ad-unit lists failed with "Invalid cast from JSON to STRING" — the project's
+  `mcp_relation_columns` reports a REPEATED column by its element's type (JSON), not ARRAY<JSON>; fixed
+  (a native array whose type reads JSON is an array of JSON). Run 277: they index, element values correct.
+- Run 277: words_selected keys found (4; `word_dictionary` is declared but absent in the data) with coverage,
+  but `values_counted: 0` for all. Cause (BigQuery query over one prod day): 240 of 82.5 M `word_name` values
+  cast to NaN/±inf (`nan`, `inf`, …), so MIN/MAX of the numeric read were NaN; dbt prints them as bare `NaN`,
+  the answer was unparseable and read as no rows. Fixed: a numeric read is finite only (`finiteNumber`);
+  `parseShowJson` reads bare NaN/Infinity as null; keys the coverage found with no row of values fail the
+  group (nothing written); a kept key with no values whose rows carry it is recounted over the whole history.
+- Run 277's batch fell back to per-property; its reason went to the server log only — now a run note.
+
 ## BigQuery dry run (2026-11-17, production `bi.fct_analytics_events`, the indexer's own SQL, one day)
 
 Run with the owner's go-ahead; dry run only (nothing billed). Estimates are BigQuery's upper bounds.

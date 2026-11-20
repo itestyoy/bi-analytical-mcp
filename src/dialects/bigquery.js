@@ -207,6 +207,8 @@ export class BigQueryDialect extends Dialect {
   // APPROX_QUANTILES skips NULLs and returns points + 1 values (min … max)
   quantilesJson(x, points) { return `TO_JSON_STRING(APPROX_QUANTILES(${x}, ${Math.floor(Number(points))}))`; }
 
+  finiteNumber(x) { return `IF(IS_NAN(${x}) OR IS_INF(${x}), NULL, ${x})`; }
+
   sampleList(text, cond, n) { return `TO_JSON_STRING(ARRAY_AGG(IF(${cond}, ${text}, NULL) IGNORE NULLS LIMIT ${Math.floor(Number(n))}))`; }
 
   // a JSON value or a native array as its JSON text (a text of JSON is that already)

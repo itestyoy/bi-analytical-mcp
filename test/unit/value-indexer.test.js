@@ -583,6 +583,8 @@ test('a key first seen in a delta whose whole-history count fails is counted by 
   const runner = { show: async (_d, sql) => {
     const delta = /\bWHERE\b/.test(sql);
     if (/AS keyrows/.test(sql)) return { ok: true, rows: [{ p: i, k: 'word_name', n: 3 }, ...(delta ? [{ p: i, k: 'word_dictionary', n: 1 }] : [])] };
+    // the values of every key the query reads: one row each
+    if (/AS dc\b/.test(sql)) return { ok: true, rows: [...sql.matchAll(/'k': '([a-z_]+)'/g)].map((m) => ({ p: i, k: m[1], dc: 1, nn: 1, num_n: 0 })) };
     if (/AS row_count/.test(sql)) {
       // the whole-history count of the new key: a coverage query with no WHERE during the delta pass
       if (!delta && failLate && index.stats('events', prop)?.dataWatermark != null) return { ok: false, stderr: 'timed out' };
@@ -604,5 +606,26 @@ test('a key first seen in a delta whose whole-history count fails is counted by 
   assert.equal(index.stats('events', prop).dataWatermark, 2000);
   assert.deepEqual(index.keys('events', prop).map((k) => k.field), ['word_dictionary', 'word_name']);
   assert.equal(index.coverage('events', keyId(prop, 'word_dictionary')).find((e) => e.event_name === 'level_completed').non_null, 5, 'counted over the whole history');
+  index.close();
+});
+
+test('keys the coverage found whose values come back as no rows are not written empty: the group fails, and says why', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const prop = 'words_selected_of_event_data';
+  const i = catalog.complexEventProps('events').indexOf(prop);
+  const counts = (sql, n) => Object.fromEntries([...sql.matchAll(/AS (c\d+(?:_\d+)?)\b/g)].map((m) => [m[1], n]));
+  const notes = [];
+  index.recordRunNote = (_id, note) => notes.push(note);
+  const runner = { show: async (_d, sql) => {
+    if (/AS keyrows/.test(sql)) return { ok: true, rows: [{ p: i, k: 'word_name', n: 3 }] };
+    if (/AS row_count/.test(sql)) return { ok: true, rows: [{ ev: 'level_completed', row_count: 5, wm: 1000, ...counts(sql, 4) }] };
+    return { ok: true, rows: [] }; // the values answer lost (an unparseable one reads as no rows)
+  } };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, logger: () => {} });
+  await bi._indexComplexCoverage(1, 'events');
+  assert.deepEqual(index.keys('events', prop), [], 'no key written with no values');
+  assert.equal(index.stats('events', prop)?.dataWatermark ?? null, null, 'nor the property: scanned again next sync');
+  assert.ok(notes.some((n) => /came back as no rows/.test(n) && n.includes(`${prop}[].word_name`)), notes.join(' | '));
   index.close();
 });

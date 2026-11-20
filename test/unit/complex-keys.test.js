@@ -95,3 +95,22 @@ for (const kind of ['memory', 'sqlite']) {
     store.close?.();
   });
 }
+
+// Where a complex property's elements are read from: a native array of JSON values is read as JSON whether
+// the introspection reports it as ARRAY<JSON> or by its element's type (JSON); one native struct only where
+// the catalog declares one — an array's reported RECORD is its element's, never one struct.
+test('a native array of JSON is read as JSON whatever spelling its type has; one struct only where declared', async () => {
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const c = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
+  const name = c.complexEventProps('events').find((n) => /^words_selected_of/.test(n));
+  const spec = c.eventPropertySpec(name, 'events');
+  const storage = (encoding, data_type, type) => { Object.assign(spec, { column: name, encoding, data_type, type }); const st = c.complexStorage(name, 'events'); return { itemsJson: st.itemsJson, json: st.json, struct: st.struct }; };
+  assert.deepEqual(storage('native', 'JSON', 'array'), { itemsJson: true, json: true, struct: false });
+  assert.deepEqual(storage('native', 'ARRAY<JSON>', 'array'), { itemsJson: true, json: true, struct: false });
+  assert.deepEqual(storage('native', 'JSON[]', 'array'), { itemsJson: true, json: true, struct: false });
+  assert.deepEqual(storage('native', 'ARRAY<STRING>', 'array'), { itemsJson: false, json: false, struct: false });
+  assert.deepEqual(storage('native', 'RECORD', 'array<struct>'), { itemsJson: false, json: false, struct: false });
+  assert.deepEqual(storage('native', 'STRUCT<a INT64>', 'struct'), { itemsJson: false, json: false, struct: true });
+  assert.deepEqual(storage('json', 'JSON', 'array<struct>'), { itemsJson: false, json: true, struct: false });
+  assert.equal(storage('json', undefined, 'array<struct>').json, null, 'a type not known: neither');
+});

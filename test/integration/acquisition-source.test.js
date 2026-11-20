@@ -83,7 +83,7 @@ before(async () => {
 
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
-const q = (input) => engine.query_model({ context_id: ctx, ...input });
+const q = (input) => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, ...input });
 
 // EVERY AGGREGATION THE TASK CHOSE over the marked amounts, asked in ONE ungrouped query (MetricFlow
 // takes all eight metrics in one call); each check is named by the question it answers.
@@ -151,7 +151,7 @@ test('grouped by an attribute of the same source: cost by media_source; and the 
 // the moment named, so they stay exactly 12.
 test('the same-day contract prevents fan-out: 12 first launches stay 12 rows', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: 'acq_join_day', source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'acq_join_day', source: 'events' });
   for (const step of [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
     { stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'media_source' }] },
@@ -190,7 +190,7 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
 
   // …and a pipeline can still READ the opted-out column: the seed carries one loader batch per
   // row, so grouping by it yields one row per (player, day) — 13.
-  const s = await engine.build_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'acq_batches', source: 'acquisition' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
@@ -210,13 +210,13 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   // (test/helpers/recipe-coverage.js).
   const out = await declare(engine, recipes.get('governed_measure_by_name').semantic_payload);
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['total_spend'] }] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['total_spend'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].total_spend), 17.5), `total_spend=${r.rows[0].total_spend}`);
 
   // it groups like any other measure — by the source's own attribute, and through a declared
   // relationship exactly as a task measure does: a sum, so both are the marginals of ONE query
-  const g = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
+  const g = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'total_spend');
   assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);
@@ -284,33 +284,33 @@ test('a required_filter column: an answer over all its values is warned, a filte
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'applovin_cost', type: 'simple', measure: 'applovin_cost' }, { name: 'meta_cost', type: 'simple', measure: 'meta_cost' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const all = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
+  const all = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(all.ok, true, JSON.stringify(all.error));
   assert.ok(near(num(all.rows[0].cost), 17.5), `cost=${all.rows[0].cost}`);
   assert.ok(warned(all), `cost folds every media_source: ${JSON.stringify(all.warnings)}`);
-  const own = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['applovin_cost'] }] });
+  const own = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['applovin_cost'] }] });
   assert.ok(near(num(own.rows[0].applovin_cost), 8.25), `applovin_cost=${own.rows[0].applovin_cost}`);
   assert.ok(!warned(own), `a measure whose case compares the column folds the rows it names: ${JSON.stringify(own.warnings)}`);
   assert.ok(warnedOf(own, 'campaign'), `applovin's rows: campaign is required of them: ${JSON.stringify(own.warnings)}`);
-  const meta = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['meta_cost'] }] });
+  const meta = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['meta_cost'] }] });
   assert.ok(near(num(meta.rows[0].meta_cost), 5.75), `meta_cost=${meta.rows[0].meta_cost}`);
   assert.ok(!warnedOf(meta, 'media_source') && !warnedOf(meta, 'campaign'), `meta's rows: campaign is not required of them: ${JSON.stringify(meta.warnings)}`);
-  const one = await e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost', 'applovin_cost'] }] });
+  const one = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost', 'applovin_cost'] }] });
   assert.equal(one.ok, true, JSON.stringify(one.error));
   assert.ok(near(num(one.rows[0].cost), 8.25) && near(num(one.rows[0].applovin_cost), 8.25), JSON.stringify(one.rows));
   assert.ok(!warned(one), JSON.stringify(one.warnings));
 
   const plain = await declare(e, { name: 'reqf_plain', semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }], metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }] });
-  const unfiltered = await e.query_model({ context_id: plain.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
+  const unfiltered = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: plain.context_id, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.ok(near(num(unfiltered.rows[0].cost), 17.5), `cost=${unfiltered.rows[0].cost}`);
   assert.ok(warned(unfiltered), `an answer over every media_source is warned: ${JSON.stringify(unfiltered.warnings)}`);
-  const filtered = await e.query_model({ context_id: plain.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost'] }] });
+  const filtered = await e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: plain.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'acquisition', column: 'media_source' }, { value: 'applovin' }] }] }, { stage: 'metrics', metrics: ['cost'] }] });
   assert.ok(near(num(filtered.rows[0].cost), 8.25), `cost=${filtered.rows[0].cost}`);
   assert.ok(!warned(filtered), JSON.stringify(filtered.warnings));
 
   // a build over the model's rows: warned without a where on the column, not with one
   const build = async (name, steps) => {
-    const s = await e.build_model({ action: 'start', name, source: 'acquisition' });
+    const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name, source: 'acquisition' });
     await e.build_model({ action: 'add_steps', context_id: s.context_id, steps });
     return e.build_model({ action: 'materialize', context_id: s.context_id });
   };

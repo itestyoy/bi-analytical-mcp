@@ -72,7 +72,7 @@ before(async () => {
 
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
-const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
+const q = (ctx, input) => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, ...input });
 
 // SEED_DATA §10: fatal crashes by issue -> NullPointer 4, OutOfMemory 2. The dimension is an
 // event-scoped PAYLOAD property of the crash fact, resolved against that fact only.
@@ -157,7 +157,7 @@ test('metrics from BOTH facts in one query: launches 12, fatal 6', opts, async (
 // u1 (3 crashes) and u2 (2) reached a second one, u3 (1) did not.
 test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: 'crash_repeat', source: 'crashlytics' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'crash_repeat', source: 'crashlytics' });
   assert.ok(s.context_id, 'start returns a context_id');
   const a = await engine.build_model({
     action: 'add_steps',
@@ -194,7 +194,7 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
   // the rows where `cond` holds: a count over a case that yields 1 there and nothing elsewhere
   const rowsWhere = (cond) => ({ fn: 'count', args: [{ fn: 'case', cases: [{ when: [cond], then: { value: 1 } }] }] });
-  const s0 = await engine.build_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
+  const s0 = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'fatal_flag', source: 'crashlytics' });
   await engine.build_model({ action: 'add_steps', context_id: s0.context_id, steps: [{ stage: 'aggregate', measures: [
     { name: 'true_text', expr: rowsWhere({ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }) },
     { name: 'false_upper', expr: rowsWhere({ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'FALSE' }] }) },
@@ -209,7 +209,7 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.equal(num(got.either), num(want.yes) + num(want.no), "[in ['true', false]] both");
   assert.equal(num(got.flipped), num(want.yes), "['true' = the column] the constant on the left");
   // a constant that is no boolean is refused in the call, naming the column
-  const s = await engine.build_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'fatal_bad', source: 'crashlytics' });
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
 });
 
@@ -219,7 +219,7 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   const names = (await wh.query('select distinct event_name as e from fct_crashlytics_events order by 1')).rows.map((r) => r.e);
   const perPlayer = (await wh.query('select player_id_of_internal as u, count(*) as n from fct_crashlytics_events where is_fatal_of_event_data group by 1')).rows;
   const fatal = { event_name: names, where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }] };
-  const s = await engine.build_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'fatal_step', source: 'crashlytics' });
   await engine.build_model({
     action: 'add_steps', context_id: s.context_id,
     steps: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] }] });
@@ -228,7 +228,7 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   assert.equal(c.rows.length, perPlayer.length, 'one row per player with a fatal crash');
   assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, perPlayer.filter((r) => num(r.n) >= 2).length, 'and a second one');
   // a constant that is no flag is refused as the step is added, naming the property
-  const bad = await engine.build_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
+  const bad = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_model({
     action: 'add_steps', context_id: bad.context_id,
     steps: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }, { name: 'again', event_name: names }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
@@ -238,7 +238,7 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
 test('columns named like keywords (group, order) flow through the stages as columns, counted from the rows', opts, async (t) => {
   if (skip(t)) return;
   const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
-  const s = await engine.build_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'keyword_cols', source: 'crashlytics' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'compute', name: 'group', expr: { fn: 'coalesce', args: [{ column: 'app_version' }, { value: 'none' }] } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', expr: { fn: 'count' } }] },
@@ -256,7 +256,7 @@ test('columns named like keywords (group, order) flow through the stages as colu
 test('a raw expression takes its columns in args, with functions, keywords and strings around them in its text; named in the text it is refused', opts, async (t) => {
   if (skip(t)) return;
   const want = (await wh.query("select count(*) as n from fct_crashlytics_events where is_fatal_of_event_data")).rows[0];
-  const s = await engine.build_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'raw_cols', source: 'crashlytics' });
   // the same column written by name in the text is refused when the step is added
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [

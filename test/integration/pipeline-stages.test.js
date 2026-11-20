@@ -791,7 +791,7 @@ test('a table-wide statistic is ONE row, and its numbers scale the rows as liter
 
 /** A pipeline over the events source, materialized; its rows. */
 async function condPipe(steps) {
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps });
   const built = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
@@ -875,10 +875,10 @@ test('one ungrouped aggregate over events carrying every condition and expressio
   assert.equal(num(row.twice_sum), doubled, '[raw positional args] sum of {1} * 2 over `order`');
 
   // [text vs boolean] an order compares no flag: refused as the step is added
-  const flag = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  const flag = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events' });
   await assert.rejects(engine.build_model({ action: 'add_steps', context_id: flag.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'bundle_id' }, { value: false }] }] }] }), /text column in the warehouse/);
   // [raw positional args] a column named in its text is refused
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
   // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
   for (const sql of ['order * 2', '"order" * 2']) {
@@ -893,7 +893,7 @@ test('a read of a built model filters and keeps groups with the same grammar: a 
   if (skip(t)) return;
   const { context_id } = await condPipe([{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
   const want = await truth("select count(*) as n from fct_analytics_events where event_name like 'level%' or event_name = 'tutorial'");
-  const read = await engine.query_model({ context_id, steps: [
+  const read = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
   ] });
@@ -901,7 +901,7 @@ test('a read of a built model filters and keeps groups with the same grammar: a 
   // the names whose count is the smallest or the largest: a where on the measure the aggregate made
   const counts = (await wh.query('select event_name, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => num(r.n));
   const lo = Math.min(...counts); const hi = Math.max(...counts);
-  const kept = await engine.query_model({ context_id, steps: [
+  const kept = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id, steps: [
     { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
     { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'n' }, { value: lo }] }, { fn: 'eq', args: [{ column: 'n' }, { value: hi }] }] }] },
   ] });
@@ -929,13 +929,13 @@ test('a semantic measure over a case and a where step before the metrics step ta
   const picked = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   const pickedLevels = await truth('select sum(level_id_of_event_data) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   assert.ok(picked > 0 && pickedLevels > picked, '[measure over a case] the fixture has such rows, some above level 1');
-  const r = await engine.query_model({ context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['picked', 'picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['picked', 'picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.deepEqual([num(r.rows[0].picked), num(r.rows[0].picked_levels)], [picked, pickedLevels], '[count / sum over a case] the rows either condition holds for, and their level ids');
 
   // 'a where step before the metrics step names what it compares as group_by does, and takes the text operators and or too'
   const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
-  const w = await engine.query_model({
+  const w = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks',
     context_id: built.context_id, time_range: { start: '2020-01-01', end: '2030-12-31' },
     steps: [
       { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'contains', args: [{ source: 'events', column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ source: 'events', column: 'event_name' }, { value: 'tutorial' }] }] }] },
@@ -953,7 +953,7 @@ test('a time window whose bounds carry their own offset is those instants, whate
   // read as Anchorage wall-clock instead, the window would move nine hours later — and hold another count
   const local = await truth("select count(*) as n from fct_analytics_events where device_time >= '2026-01-02 09:00:00' and device_time <= '2026-01-04 08:59:59'");
   assert.ok(want > 0 && want < all && want !== local, 'the fixture tells the readings apart');
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const built = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
@@ -969,7 +969,7 @@ test('a project stage drops the columns it names and keeps the rest; the next st
   ]);
   assert.equal(rows.length, want);
   // once session_number is dropped the next stage cannot name it — refused as the step is added
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events' });
   await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }] }] }), (e) => !(e instanceof assert.AssertionError));
 });
 
@@ -980,7 +980,7 @@ test('a query over a built model computes a sample stddev, variance, median and 
   const { context_id } = await condPipe([{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'session_number' }] }] }]);
   const md = await truth('select quantile_cont(session_number, 0.5) as n from fct_analytics_events');
   const p9 = await truth('select quantile_cont(session_number, 0.9) as n from fct_analytics_events');
-  const read = await engine.query_model({ context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'sd', expr: { fn: 'stddev', args: [{ column: 'session_number' }] } }, { name: 'vr', expr: { fn: 'variance', args: [{ column: 'session_number' }] } }, { name: 'md', expr: { fn: 'median', args: [{ column: 'session_number' }] } }, { name: 'p9', expr: { fn: 'percentile', args: [{ column: 'session_number' }], percentile: 0.9 } }] }] });
+  const read = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'sd', expr: { fn: 'stddev', args: [{ column: 'session_number' }] } }, { name: 'vr', expr: { fn: 'variance', args: [{ column: 'session_number' }] } }, { name: 'md', expr: { fn: 'median', args: [{ column: 'session_number' }] } }, { name: 'p9', expr: { fn: 'percentile', args: [{ column: 'session_number' }], percentile: 0.9 } }] }] });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
@@ -995,7 +995,7 @@ test('a query over a built model reads columns named with reserved words (order,
     { stage: 'compute', name: 'group', expr: { column: 'event_name' } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', expr: { fn: 'count' } }] },
   ]);
-  const read = await engine.query_model({ context_id, steps: [
+  const read = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'group' }, { value: 'tutorial' }] }] },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'select', expr: { fn: 'sum', args: [{ column: 'order' }] } }] },
     { stage: 'order_by', keys: [{ key: 'select', direction: 'desc' }] },
@@ -1015,7 +1015,7 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
     ] },
   ];
   // the prefix is built first: the counts then read the checkpoint's table, not the source
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'bundle_id' }] }] }] });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'bundle_id' }] }] }] });
   const prefix = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(prefix.build?.ok, true, JSON.stringify(prefix.error || prefix.build));
   const added = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: counts });
@@ -1024,7 +1024,7 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
   assert.equal(after.build?.ok, true, JSON.stringify(after.error || after.build));
   assert.deepEqual([num(after.rows[0].yes), num(after.rows[0].no)], [truthy, all - truthy]);
   // a draft started from the prefix's task reads the same table, and the same column in it
-  const from = await engine.build_model({ action: 'start', name: `cond_${seq++}`, from_task: prefix.task_id, steps: counts });
+  const from = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, from_task: prefix.task_id, steps: counts });
   const built = await engine.build_model({ action: 'materialize', context_id: from.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.deepEqual([num(built.rows[0].yes), num(built.rows[0].no)], [truthy, all - truthy]);
@@ -1048,7 +1048,7 @@ test('a joined text column, under the name the join gave it, is compared with a 
 
 test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] },
     { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
@@ -1074,7 +1074,7 @@ test('a time column compared with an expression that yields a moment keeps the r
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(num(rows[0].n), want);
-  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cond_${seq++}`, source: 'events' });
   await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { fn: 'length', args: [{ column: 'event_name' }] }] }] }] }), /is a moment/);
 });
 
@@ -1462,7 +1462,7 @@ const byPlayer = (rows) => Object.fromEntries(rows.map((r) => [String(r.player_i
 
 /** Build a draft from `steps`, materializing after each index listed in `pointsAt` (1-based). */
 async function cpBuild(name, steps, pointsAt = []) {
-  const { context_id } = await engine.build_model({ action: 'start', name, source: 'events' });
+  const { context_id } = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name, source: 'events' });
   let last = null;
   for (let i = 0; i < steps.length; i += 1) {
     await engine.build_model({ action: 'add_steps', context_id, steps: [steps[i]] });
@@ -1514,7 +1514,7 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
   assert.ok(players.length >= 2, 'several players in the prefix');
 
   // [fork] a fork inherits the prefix: same numbers as an independent recompute
-  const fork = await engine.build_model({ action: 'fork', context_id, after: 3, name: 'cp_fork' });
+  const fork = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id, after: 3, name: 'cp_fork' });
   assert.deepEqual(fork.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] inherits the checkpoint');
   const tail = { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'total_score' }, { value: 1 }] }] };
   await engine.build_model({ action: 'add_steps', context_id: fork.context_id, steps: [tail] });
@@ -1547,7 +1547,7 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
 
   // [fork] the inherited model is NOT rebuilt in a fork: a second fork branched over the changed
   // table carries the change into its own result.
-  const fork2 = await engine.build_model({ action: 'fork', context_id, after: 3, name: 'cp_fork2' });
+  const fork2 = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id, after: 3, name: 'cp_fork2' });
   assert.deepEqual(fork2.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] the second fork inherits the same checkpoint');
   await engine.build_model({ action: 'add_steps', context_id: fork2.context_id, steps: [tail] });
   const tampered = await engine.build_model({ action: 'materialize', context_id: fork2.context_id });
@@ -1611,7 +1611,7 @@ const pipeRows = (...steps) => pipeRowsFrom('crashlytics', ...steps);
 
 /** …over any source. */
 async function pipeRowsFrom(source, ...steps) {
-  const s = await engine.build_model({ action: 'start', name: `cx_${seq++}`, source });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `cx_${seq++}`, source });
   for (const step of steps) {
     const r = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
@@ -1919,7 +1919,7 @@ test('15. the complex properties are discoverable with their declared shape', op
 // it ran, and an unbalanced `{%` that would fail compilation — the build must succeed regardless.
 
 async function countWhere(name, condition, description) {
-  const s = await engine.build_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name, source: 'events', ...(description ? { description } : {}) });
   assert.ok(s.context_id, JSON.stringify(s));
   // the event name under a column of its own: a constant compared with the event-name column itself is
   // checked against the catalog's events first, and the literal is to reach the warehouse
@@ -1958,7 +1958,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));
-  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['s1', 'sj'] }] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['s1', 'sj'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(Number(r.rows[0].s1), 8, 'the control: 8 players at step_1');
   assert.equal(Number(r.rows[0].sj ?? 0), 0, 'evaluated, the Jinja value would have counted the same 8');

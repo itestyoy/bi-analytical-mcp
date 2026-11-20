@@ -23,6 +23,11 @@ const deploymentFile = (recipes) => {
   return f;
 };
 
+/** A served request without what the loader fills from the recipe (src/recipes.js aboutOf): a start's
+ *  description and question, a query's name too — each test below compares the rest. */
+const bare = (req, fields = ['description', 'question']) => (req && typeof req === 'object' ? Object.fromEntries(Object.entries(req).filter(([k]) => !fields.includes(k))) : req);
+const bareQuery = (q) => bare(q, ['name', 'description', 'question']);
+
 test('a deployment file ADDS to the system recipes instead of replacing them', () => {
   const mine = deploymentFile([
     { id: 'my_domain_recipe', task_type: 'engagement', title: 'Mine', when_to_use: 'my game', hack: 'x' },
@@ -133,9 +138,10 @@ test('a deployment recipe in the earlier { name, pipeline } shape, or with its l
     { id: 'today', task_type: 't', title: 'today', when_to_use: '', hack: '', pipeline_payload: { action: 'start', name: 'today', source: 'events', steps } },
   ]);
   const recipes = loadRecipes(SYSTEM, mine);
-  assert.deepEqual(recipes.get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: window, steps });
-  assert.deepEqual(recipes.get('old_list').pipeline_payload, { action: 'start', name: 'old_list', source: 'events', steps });
-  assert.deepEqual(recipes.get('today').pipeline_payload, { action: 'start', name: 'today', source: 'events', steps });
+  assert.deepEqual(bare(recipes.get('old_shape').pipeline_payload), { action: 'start', name: 'old_shape', source: 'events', time_range: window, steps });
+  assert.equal(recipes.get('old_shape').pipeline_payload.description, 'kept', 'a description the recipe gives is kept');
+  assert.deepEqual(bare(recipes.get('old_list').pipeline_payload), { action: 'start', name: 'old_list', source: 'events', steps });
+  assert.deepEqual(bare(recipes.get('today').pipeline_payload), { action: 'start', name: 'today', source: 'events', steps });
 });
 
 // Its stages and its semantic payload, written in an earlier spelling, are served in today's: the
@@ -186,7 +192,7 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   // a recipe written today is served as it is
   const today = { name: 'today', semantic_models: s.semantic_models, metrics: s.metrics };
   const again = loadRecipes(SYSTEM, deploymentFile([{ id: 'today', task_type: 't', title: 'today', when_to_use: '', hack: '', semantic_payload: today }])).get('today').semantic_payload;
-  assert.deepEqual(again, today);
+  assert.deepEqual(bare(again), today);
 });
 
 // An example query written for an earlier version names its metrics, group_by and where beside its steps
@@ -201,9 +207,9 @@ test('a deployment recipe\'s example query with metrics, group_by, where and ord
   const written = [{ metrics: ['x'], order_by: keys }, today, { metrics: ['x'], group_by: daily.group_by, where: [recent], steps: [limit], order_by: keys }];
   const mine = deploymentFile([{ id: 'old_query', task_type: 't', title: 'old', when_to_use: '', hack: '', example_queries: written }]);
   const [old, kept, all] = loadRecipes(SYSTEM, mine).get('old_query').example_queries;
-  assert.deepEqual(old, { steps: [{ stage: 'metrics', metrics: ['x'] }, { stage: 'order_by', keys }] });
-  assert.deepEqual(kept, today, 'a query in today\'s spelling is served as written');
-  assert.deepEqual(all, { steps: [{ stage: 'where', conditions: [recent] }, daily, limit, { stage: 'order_by', keys }] });
+  assert.deepEqual(bareQuery(old), { steps: [{ stage: 'metrics', metrics: ['x'] }, { stage: 'order_by', keys }] });
+  assert.deepEqual(bareQuery(kept), today, 'a query in today\'s spelling is served as written');
+  assert.deepEqual(bareQuery(all), { steps: [{ stage: 'where', conditions: [recent] }, daily, limit, { stage: 'order_by', keys }] });
 });
 
 // …and a pipeline step or a measure that folded some rows with an aggregate's `where` is served as the
@@ -260,13 +266,28 @@ test('a deployment recipe\'s example query with { model, attribute } refs is ser
   };
   const mine = deploymentFile([{ id: 'old_refs', task_type: 't', title: 'old', when_to_use: '', hack: '', semantic_payload, example_queries: [old] }]);
   const [served] = loadRecipes(SYSTEM, mine).get('old_refs').example_queries;
-  assert.deepEqual(served, {
+  assert.deepEqual(bareQuery(served), {
     dry_run: true, include: ['plan'],
     steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] },
       { stage: 'metrics', metrics: ['n'], group_by: [{ source: 'users', column: 'country' }, { source: 'events', property: 'level_id_of_event_data' }, { semantic_model: ['events'], dimension: 'late' }] },
     ],
   });
+});
+
+// A start and a query say what they are for (a name, a description, the person's question — required by
+// both tools): what a recipe's request leaves out is the recipe's own word — its title as the description,
+// what it is for as the question, its id as a query's name — and what it says is kept.
+test('a recipe\'s requests are served with a description, a question and a query\'s name — the recipe\'s own where it gives none', () => {
+  const steps = [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }];
+  const query = { steps: [{ stage: 'metrics', metrics: ['x'] }] };
+  const mine = deploymentFile([
+    { id: 'Launch_Count', task_type: 't', title: 'Launches per day', when_to_use: 'How many players launch the game each day?', hack: '', pipeline_payload: { action: 'start', name: 'launches', source: 'events', steps }, example_queries: [query, { ...query, name: 'mine', question: 'Mine?' }] },
+  ]);
+  const r = loadRecipes(SYSTEM, mine).get('Launch_Count');
+  assert.equal(r.pipeline_payload.description, 'Launches per day');
+  assert.equal(r.pipeline_payload.question, 'How many players launch the game each day?');
+  assert.deepEqual(r.example_queries.map((q) => [q.name, q.description, q.question]), [['launch_count', 'Launches per day', 'How many players launch the game each day?'], ['mine', 'Launches per day', 'Mine?']]);
 });
 
 // The same for an experiment block written for an earlier version: its columns are named by flat

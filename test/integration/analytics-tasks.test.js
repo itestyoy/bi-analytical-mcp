@@ -74,7 +74,7 @@ async function buildRecipe(t, id) {
   assert.equal(out.parse.ok, true, `parse failed for ${id}: ${JSON.stringify(out.parse.error || out.parse)}`);
   return out.context_id;
 }
-const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
+const q = (ctx, input) => engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, ...input });
 
 // ── 1. metric_types: measure_over_metric_time ────────────────────────────────
 // #6: a numeric value that arrives as STRING is aggregable once it is read as a number (cast).
@@ -350,7 +350,7 @@ test('a task dimension over a time column is read at its grain (week), or at the
 test('a semantic layer over a built table: sessions and events per session, by the country at the session\'s start', opts, async (t) => {
   if (skip(t)) return;
   const raw = engine.raw || engine;
-  const started = await raw.build_model({
+  const started = await raw.build_model({ description: 'what the test computes', question: 'what the test asks',
     action: 'start', name: 'sess', source: 'events', materialize: true,
     steps: [
       { stage: 'aggregate', group_by: ['player_id_of_internal', 'session_number'], measures: [{ name: 'session_start', expr: { fn: 'min', args: [{ column: 'device_time' }] } }, { name: 'n_events', expr: { fn: 'count' } }] },
@@ -532,7 +532,7 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const query = { context_id: created.context_id, time_range: { start: '2026-01-03', end: '2026-01-05' } };
   const cumulative = { stage: 'metrics', metrics: ['daily', 'two_day', 'to_date'], group_by: [{ time: 'metric_time', grain: 'day' }] };
   const byDay = [{ stage: 'order_by', keys: [{ key: 'metric_time_day' }] }];
-  const r = await engine.query_model({ ...query, steps: [cumulative, ...byDay] });
+  const r = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', ...query, steps: [cumulative, ...byDay] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const got = r.rows.map((x) => [num(x.daily), num(x.two_day), num(x.to_date)]);
   const days = ['2026-01-03', '2026-01-04', '2026-01-05'];
@@ -543,19 +543,19 @@ test('a cumulative metric over a time_range sums the days before the range that 
   // a where step after the metrics step filters the RESULT, not the rows a metric folds (that is a where
   // step before it, or the window): the days it keeps carry the sums the whole query gave them, the days
   // before them included
-  const later = await engine.query_model({ ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
+  const later = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
   assert.equal(later.ok, true, JSON.stringify(later.error));
   assert.deepEqual(later.rows.map((x) => [num(x.daily), num(x.two_day), num(x.to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
   // a windowed metric is a value per metric_time bucket: a query of it without metric_time is refused in
   // the call, saying so — before any task — and one with no window stands without it
-  await assert.rejects(() => engine.raw.query_model({ ...query, steps: [{ stage: 'metrics', metrics: ['two_day'] }] }), /'two_day' accumulates over a trailing 2 days? — .*groups by metric_time/);
-  const whole = await engine.query_model({ ...query, steps: [{ stage: 'metrics', metrics: ['to_date'] }] });
+  await assert.rejects(() => engine.raw.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', ...query, steps: [{ stage: 'metrics', metrics: ['two_day'] }] }), /'two_day' accumulates over a trailing 2 days? — .*groups by metric_time/);
+  const whole = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', ...query, steps: [{ stage: 'metrics', metrics: ['to_date'] }] });
   assert.equal(whole.ok, true, JSON.stringify(whole.error));
   // past the last event, a windowed metric whose window holds no event is 0 — not a missing value — on
   // every day of the range, at the day's grain and a week's
   const last = [...day.keys()].sort().at(-1);
   const after = (n) => new Date(Date.parse(`${last}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
-  const tail = await engine.query_model({ context_id: created.context_id, time_range: { start: after(-1), end: after(6) }, steps: [{ stage: 'metrics', metrics: ['two_day'], group_by: [{ time: 'metric_time', grain: 'day' }] }, ...byDay] });
+  const tail = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: created.context_id, time_range: { start: after(-1), end: after(6) }, steps: [{ stage: 'metrics', metrics: ['two_day'], group_by: [{ time: 'metric_time', grain: 'day' }] }, ...byDay] });
   assert.equal(tail.ok, true, JSON.stringify(tail.error));
   const tailDays = Array.from({ length: 8 }, (_, i) => after(i - 1));
   assert.deepEqual(tail.rows.map((x) => [String(x.metric_time_day).slice(0, 10), x.two_day == null ? null : num(x.two_day)]), tailDays.map((d) => [d, at(after(tailDays.indexOf(d) - 2)) + at(d)]));

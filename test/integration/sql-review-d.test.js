@@ -61,7 +61,7 @@ const truth = async (sql) => (await wh.query(sql)).rows;
 
 /** A pipeline over `source`, its steps added and materialized: its rows. */
 async function pipe(source, steps) {
-  const s = await engine.build_model({ action: 'start', name: `sqlrev_d_${seq++}`, source });
+  const s = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: `sqlrev_d_${seq++}`, source });
   const a = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps });
   assert.ok(!a.error, `add_steps: ${JSON.stringify(a.error)}`);
   const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });

@@ -29,6 +29,11 @@
 //   values.valueCount(source, property) -> int (values STORED; vs distinct_count → capped?)
 //   values.properties()               -> [{source, property}] (every indexed pair)
 //   values.removeProperty(source, property)
+//   values.keys(source, property?)    -> [{ source, property, field, firstSeen, lastSeen, elements, numeric, watermark }]
+//                                        (a complex property's keys, as the data shows them — src/complex-keys.js)
+//   values.putKey(source, property, field, { lastSeen?, elements, numeric, watermark? })   (first_seen kept from the
+//                                        first write; watermark — the newest row its counts read — kept when not given)
+//   values.removeKey(source, property, field)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
@@ -51,11 +56,15 @@
 //   errors.get(id)                    -> row | null   (args and detail in full)
 //   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
 //   errors.prune({ before, keep })    -> removed count (older than `before`, beyond the newest `keep`)
-//   taskLog.put({ id, at, tool, source, text, how })   (a task started — what it computes and how, src/task-index.js)
-//   taskLog.has(id) -> bool;  taskLog.setVector(id, model, vec)
-//   taskLog.missing(model, limit)     -> [{ id, text }] (no vector of this model yet, oldest first)
-//   taskLog.range({ since, until, model? }) -> [{ id, at, tool, source, text, vector? }] (with a model: its vectors; oldest first)
-//   taskLog.count({ since, until })   -> how many tasks the window holds
+//   taskLog.put({ id, at, tool, source, text, how, question? })   (a task started — what it computes and how, and the
+//                                     person's question it answers, src/task-index.js)
+//   taskLog.has(id) -> bool;  taskLog.setVector(id, model, vec, by?)   (by: 'computation' | 'question' — two spaces,
+//                                     each with a vector of its own)
+//   taskLog.missing(model, limit, by?) -> [{ id, text }] (no vector of this model yet in that space, oldest first;
+//                                     by question: the question as `text`, only the tasks that have one)
+//   taskLog.range({ since, until, model?, by? }) -> [{ id, at, tool, source, text, question?, vector? }] (with a
+//                                     model: that space's vectors; by question: only the tasks that have one; oldest first)
+//   taskLog.count({ since, until, by? }) -> how many tasks the window holds (by question: with one)
 //   taskLog.hows(ids)                 -> Map(id → how) (only the tasks asked for: a how may be large)
 //   reset()                           (wipe every table but memory, the error log and the task log — MCP_DB_RESET)
 //   close()
@@ -65,6 +74,8 @@ import { cosineSimilarity } from './embeddings.js';
 import { setting } from './settings.js';
 
 const require = createRequire(import.meta.url);
+/** Code-point order, as SQLite's ORDER BY sorts text — never the locale's. */
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 // ───────────────────────── in-memory backend (no persistence) ─────────────────────────
 // The universal fallback when no persistent backend is available. Mirrors the SQLite
@@ -77,6 +88,7 @@ export class MemoryBackend {
     // coverage:[{event_name,row_count,non_null}], ... }. Each SOURCE owns its own index space, so
     // two events facts can carry the same property name without sharing a row.
     const bySource = new Map();
+    const keyRows = new Map(); // `${source}\0${property}\0${field}` → a complex property's key (prop_keys)
     const entryOf = (source, property) => bySource.get(source)?.get(property) || null;
     const putEntry = (source, property, e) => {
       let m = bySource.get(source);
@@ -98,17 +110,20 @@ export class MemoryBackend {
       upsert: () => {},
     };
 
-    const taskLog = new Map(); // id → { id, at, tool, source, text, model, vector }
+    const taskLog = new Map(); // id → { id, at, tool, source, text, model, vector, question, qmodel, qvector }
     const byTime = (a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    // the space a read is in: the line of what a task computes, or the person's question (its own vector)
+    const spaceOf = (by) => (by === 'question' ? { text: 'question', model: 'qmodel', vector: 'qvector' } : { text: 'text', model: 'model', vector: 'vector' });
+    const inWindow = (r, since, until) => (since == null || r.at >= since) && (until == null || r.at <= until);
     this.taskLog = {
-      put: (r) => { const had = taskLog.get(r.id); taskLog.set(r.id, { ...had, id: r.id, at: had?.at ?? r.at, tool: r.tool ?? null, source: r.source ?? null, text: String(r.text), how: r.how != null ? structuredClone(r.how) : null }); },
+      put: (r) => { const had = taskLog.get(r.id); taskLog.set(r.id, { ...had, id: r.id, at: had?.at ?? r.at, tool: r.tool ?? null, source: r.source ?? null, text: String(r.text), how: r.how != null ? structuredClone(r.how) : null, question: r.question ?? null }); },
       has: (id) => taskLog.has(id),
-      setVector: (id, model, vec) => { const r = taskLog.get(id); if (r) { r.model = model; r.vector = Array.from(vec); } },
-      missing: (model, limit = 1000) => [...taskLog.values()].filter((r) => r.model !== model).sort(byTime).slice(0, limit).map((r) => ({ id: r.id, text: r.text })),
-      range: ({ since = null, until = null, model = null }) => [...taskLog.values()]
-        .filter((r) => (model == null || (r.model === model && r.vector)) && (since == null || r.at >= since) && (until == null || r.at <= until))
-        .sort(byTime).map((r) => ({ id: r.id, at: r.at, tool: r.tool, source: r.source, text: r.text, ...(model != null ? { vector: [...r.vector] } : {}) })),
-      count: ({ since = null, until = null } = {}) => [...taskLog.values()].filter((r) => (since == null || r.at >= since) && (until == null || r.at <= until)).length,
+      setVector: (id, model, vec, by = 'computation') => { const r = taskLog.get(id); const sp = spaceOf(by); if (r) { r[sp.model] = model; r[sp.vector] = Array.from(vec); } },
+      missing: (model, limit = 1000, by = 'computation') => { const sp = spaceOf(by); return [...taskLog.values()].filter((r) => r[sp.text] != null && r[sp.model] !== model).sort(byTime).slice(0, limit).map((r) => ({ id: r.id, text: r[sp.text] })); },
+      range: ({ since = null, until = null, model = null, by = 'computation' }) => { const sp = spaceOf(by); return [...taskLog.values()]
+        .filter((r) => r[sp.text] != null && (model == null || (r[sp.model] === model && r[sp.vector])) && inWindow(r, since, until))
+        .sort(byTime).map((r) => ({ id: r.id, at: r.at, tool: r.tool, source: r.source, text: r.text, ...(r.question != null ? { question: r.question } : {}), ...(model != null ? { vector: [...r[sp.vector]] } : {}) })); },
+      count: ({ since = null, until = null, by = 'computation' } = {}) => { const sp = spaceOf(by); return [...taskLog.values()].filter((r) => r[sp.text] != null && inWindow(r, since, until)).length; },
       hows: (ids) => new Map(ids.filter((id) => taskLog.get(id)?.how != null).map((id) => [id, structuredClone(taskLog.get(id).how)])),
     };
 
@@ -221,6 +236,14 @@ export class MemoryBackend {
       properties: () => [...allEntries()].map(({ source, property }) => ({ source, property })),
       // Drop everything stored for one property (a column gone from the table) — no full reindex.
       removeProperty: (source, property) => !!bySource.get(source)?.delete(property),
+      keys: (source, property = null) => [...keyRows.values()].filter((k) => k.source === source && (property == null || k.property === property))
+        .sort((a, b) => cmp(a.property, b.property) || cmp(a.field, b.field)).map((k) => ({ ...k, numeric: k.numeric ? structuredClone(k.numeric) : null })),
+      putKey: (source, property, field, { lastSeen = null, elements = null, numeric = null, watermark = null } = {}) => {
+        const id = `${source}\u0000${property}\u0000${field}`;
+        const had = keyRows.get(id);
+        keyRows.set(id, { source, property, field, firstSeen: had?.firstSeen ?? Date.now(), lastSeen: lastSeen ?? had?.lastSeen ?? null, elements: elements ?? null, watermark: watermark ?? had?.watermark ?? null, numeric: numeric ? structuredClone(numeric) : null });
+      },
+      removeKey: (source, property, field) => keyRows.delete(`${source}\u0000${property}\u0000${field}`),
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -329,6 +352,11 @@ const TABLES = [
   // combo — so a pipeline-model step scoped to a concrete bundle_id AND event_name can warn the
   // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
   { name: 'prop_bundle_event_coverage', cache: true, key: ['source', 'property', 'bundle', 'event_name'], columns: ['source TEXT', 'property TEXT', 'bundle TEXT', 'event_name TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  // The KEYS of a complex property, as the data shows them (src/complex-keys.js): one row per key of its
+  // elements (field '' — its scalar elements). Its values and coverage are kept under the key's id in the
+  // tables above; here, when it was first and last seen, how many of its values were counted, and a
+  // numeric key's summary (JSON: count, min, max, quantiles).
+  { name: 'prop_keys', cache: true, key: ['source', 'property', 'field'], columns: ['source TEXT', 'property TEXT', 'field TEXT', 'first_seen INTEGER', 'last_seen INTEGER', 'elements INTEGER', 'numeric TEXT', 'watermark INTEGER'] },
   { name: 'index_runs', cache: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'started_at INTEGER', 'finished_at INTEGER', 'status TEXT', 'properties_indexed INTEGER', 'values_written INTEGER', 'errors INTEGER', 'error TEXT'] },
   // Per-property timing within a run — detailed stats drilled into via semantic_index.
   // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
@@ -343,7 +371,7 @@ const TABLES = [
   { name: 'server_meta', kept: true, key: ['key'], columns: ['key TEXT', 'value TEXT'] },
   // what each task computed, as a line of text and its vector (src/task-index.js) — the questions asked,
   // kept across a reset like the memory: a record of use, not something the server re-derives
-  { name: 'task_log', kept: true, key: ['id'], columns: ['id TEXT', 'at INTEGER', 'tool TEXT', 'source TEXT', 'text TEXT', 'model TEXT', 'vector BLOB', 'how TEXT'] },
+  { name: 'task_log', kept: true, key: ['id'], columns: ['id TEXT', 'at INTEGER', 'tool TEXT', 'source TEXT', 'text TEXT', 'model TEXT', 'vector BLOB', 'how TEXT', 'question TEXT', 'qmodel TEXT', 'qvector BLOB'] },
   // with what reproduces an error: the context's state, the code of the model that failed, the runtime
   { name: 'errors', kept: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'at INTEGER', 'source TEXT', 'severity TEXT', 'tool TEXT', 'stage TEXT', 'field TEXT', 'code TEXT', 'context_id TEXT', 'task_id TEXT', 'message TEXT', 'args TEXT', 'detail TEXT', 'context TEXT', 'files TEXT', 'runtime TEXT'] },
 ];
@@ -439,18 +467,31 @@ export class SqliteBackend {
     const toBlob = (v) => Buffer.from(new Float32Array(v).buffer);
     const fromBlob = (b) => { const u = new Uint8Array(b); return Array.from(new Float32Array(u.buffer, u.byteOffset, u.byteLength / 4)); };
     this.taskLog = {
-      put(r) { s._run('INSERT INTO task_log (id, at, tool, source, text, how) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET tool = excluded.tool, source = excluded.source, text = excluded.text, how = excluded.how', r.id, r.at, r.tool ?? null, r.source ?? null, String(r.text), r.how != null ? JSON.stringify(r.how) : null); },
+      put(r) { s._run('INSERT INTO task_log (id, at, tool, source, text, how, question) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET tool = excluded.tool, source = excluded.source, text = excluded.text, how = excluded.how, question = excluded.question', r.id, r.at, r.tool ?? null, r.source ?? null, String(r.text), r.how != null ? JSON.stringify(r.how) : null, r.question ?? null); },
       has(id) { return !!s._get('SELECT 1 AS x FROM task_log WHERE id = ?', id); },
-      setVector(id, model, vec) { s._run('UPDATE task_log SET model = ?, vector = ? WHERE id = ?', model, toBlob(vec), id); },
-      missing(model, limit = 1000) { return s._all('SELECT id, text FROM task_log WHERE model IS NULL OR model != ? ORDER BY at, id LIMIT ?', model, limit); },
-      range({ since = null, until = null, model = null }) {
-        const rows = model == null
-          ? s._all('SELECT id, at, tool, source, text FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', since, since, until, until)
-          : s._all('SELECT id, at, tool, source, text, vector FROM task_log WHERE model = ? AND vector IS NOT NULL AND (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id', model, since, since, until, until);
-        return rows.map((r) => ({ id: r.id, at: Number(r.at), tool: r.tool, source: r.source, text: r.text, ...(r.vector ? { vector: fromBlob(r.vector) } : {}) }));
+      // TWO SPACES, each with a vector of its own: what a task computes (`text`: model, vector) and the
+      // person's question it answers (`question`: qmodel, qvector) — `by` picks one
+      setVector(id, model, vec, by = 'computation') {
+        if (by === 'question') s._run('UPDATE task_log SET qmodel = ?, qvector = ? WHERE id = ?', model, toBlob(vec), id);
+        else s._run('UPDATE task_log SET model = ?, vector = ? WHERE id = ?', model, toBlob(vec), id);
       },
-      count({ since = null, until = null } = {}) {
-        return Number(s._get('SELECT COUNT(*) AS n FROM task_log WHERE (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?)', since, since, until, until).n);
+      missing(model, limit = 1000, by = 'computation') {
+        return by === 'question'
+          ? s._all('SELECT id, question AS text FROM task_log WHERE question IS NOT NULL AND (qmodel IS NULL OR qmodel != ?) ORDER BY at, id LIMIT ?', model, limit)
+          : s._all('SELECT id, text FROM task_log WHERE model IS NULL OR model != ? ORDER BY at, id LIMIT ?', model, limit);
+      },
+      range({ since = null, until = null, model = null, by = 'computation' }) {
+        const q = by === 'question';
+        const [m, v] = q ? ['qmodel', 'qvector'] : ['model', 'vector'];
+        const asked = q ? 'question IS NOT NULL AND ' : '';
+        const rows = model == null
+          ? s._all(`SELECT id, at, tool, source, text, question FROM task_log WHERE ${asked}(? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id`, since, since, until, until)
+          : s._all(`SELECT id, at, tool, source, text, question, ${v} AS vec FROM task_log WHERE ${asked}${m} = ? AND ${v} IS NOT NULL AND (? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?) ORDER BY at, id`, model, since, since, until, until);
+        return rows.map((r) => ({ id: r.id, at: Number(r.at), tool: r.tool, source: r.source, text: r.text, ...(r.question != null ? { question: r.question } : {}), ...(r.vec ? { vector: fromBlob(r.vec) } : {}) }));
+      },
+      count({ since = null, until = null, by = 'computation' } = {}) {
+        const asked = by === 'question' ? 'question IS NOT NULL AND ' : '';
+        return Number(s._get(`SELECT COUNT(*) AS n FROM task_log WHERE ${asked}(? IS NULL OR at >= ?) AND (? IS NULL OR at <= ?)`, since, since, until, until).n);
       },
       hows(ids) {
         const out = new Map();
@@ -559,6 +600,17 @@ export class SqliteBackend {
           }
         });
       },
+      keys(source, property = null) {
+        const rows = property == null
+          ? s._all('SELECT * FROM prop_keys WHERE source = ? ORDER BY property, field', source)
+          : s._all('SELECT * FROM prop_keys WHERE source = ? AND property = ? ORDER BY field', source, property);
+        return rows.map((r) => ({ source: r.source, property: r.property, field: r.field, firstSeen: r.first_seen ?? null, lastSeen: r.last_seen ?? null, elements: r.elements ?? null, watermark: r.watermark ?? null, numeric: (() => { try { return r.numeric ? JSON.parse(r.numeric) : null; } catch { return null; } })() }));
+      },
+      putKey(source, property, field, { lastSeen = null, elements = null, numeric = null, watermark = null } = {}) {
+        s._run('INSERT INTO prop_keys (source, property, field, first_seen, last_seen, elements, numeric, watermark) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property, field) DO UPDATE SET last_seen = COALESCE(excluded.last_seen, prop_keys.last_seen), elements = excluded.elements, numeric = excluded.numeric, watermark = COALESCE(excluded.watermark, prop_keys.watermark)',
+          source, property, field, Date.now(), lastSeen, elements, numeric ? JSON.stringify(numeric) : null, watermark);
+      },
+      removeKey(source, property, field) { s._run('DELETE FROM prop_keys WHERE source = ? AND property = ? AND field = ?', source, property, field); },
     };
 
     this.runs = {

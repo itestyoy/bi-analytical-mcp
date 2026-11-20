@@ -721,7 +721,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
     });
   }
   assert.ok(expected.get('level_restarted') > 0, 'T41: the fixture has restarts to find');
-  const p = await engine.build_model({ action: 'start', name: 'restarts', source: 'events' });
+  const p = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'restarts', source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: p.context_id, steps: [
     { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
     { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_started' }] }, { fn: 'eq', args: [{ column: 'prev' }, { value: 'level_started' }] }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
@@ -756,7 +756,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const rr = await readDone(rb.task_id);
   assert.equal(rr.status, 'done', `T43 from_rebuild: ${JSON.stringify(rr.error)}`);
   assert.equal(rr.events, n, 'T43: the eventstream over the rebuild finds the table it builds on');
-  const pq = await engine.build_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
+  const pq = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
   await engine.build_model({ action: 'add_steps', context_id: pq.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const pm = await engine.build_model({ action: 'materialize', context_id: pq.context_id });
   const counted = await one(engine.query_model({ task_ids: [pm.task_id] }));
@@ -768,12 +768,12 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   // group — refused before anything runs, naming the way to the events.
   const semantic = /task \w+ is of a semantic layer/;
   const coreDone = async (id) => { for (;;) { const r = await one(engine.query_model({ task_ids: [id] })); if (r.status !== 'running') return r; } };
-  const layer = await engine.build_model({ action: 'start', name: 'sem_layer', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] }], materialize: true });
+  const layer = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'sem_layer', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] }], materialize: true });
   const parsed = await coreDone(layer.materialize.task_id);
   assert.equal(parsed.status, 'done', `T44 the layer parses: ${JSON.stringify(parsed.error)}`);
   const asStream = (from_task) => engine.build_retentioneering_model({ name: 'from_sem', from_task, path: ['player_id_of_internal'], columns: { event: 'event_name', time: 'device_time' } });
   await assert.rejects(asStream(layer.materialize.task_id), (e) => e.field === 'from_task' && semantic.test(e.message), 'T44: a semantic layer\'s build');
-  const stored = await engine.query_model({ context_id: layer.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ time: 'metric_time', grain: 'day' }] }], materialize: true });
+  const stored = await engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: layer.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ time: 'metric_time', grain: 'day' }] }], materialize: true });
   const result = await coreDone(stored.task_id);
   assert.equal(result.status, 'done', `T44 the metric query stores its result: ${JSON.stringify(result.error)}`);
   await assert.rejects(asStream(stored.task_id), (e) => e.field === 'from_task' && semantic.test(e.message), 'T44: a metric query stored with materialize');
@@ -784,9 +784,9 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   // T45 — the other way round: an eventstream's task is no table a build starts from (said as it is, not
   // as a restart), the query tool of the core does not read a path-analysis context, and a refused start
   // leaves no context behind
-  await assert.rejects(engine.build_model({ action: 'start', name: 'from_rete', from_task: againStart.task_id }),
+  await assert.rejects(engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'from_rete', from_task: againStart.task_id }),
     (e) => e.field === 'from_task' && /was started by build_retentioneering_model, and only a pipeline build or a metric query run with materialize: true holds a table to start from/.test(e.message), 'T45: from an eventstream\'s task');
-  await assert.rejects(engine.query_model({ context_id: againStart.context_id, steps: [{ stage: 'limit', limit: 1 }] }), (e) => e.field === 'context_id' && /holds no semantic layer and no pipeline table/.test(e.message), 'T45: query_model on a path-analysis context');
+  await assert.rejects(engine.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: againStart.context_id, steps: [{ stage: 'limit', limit: 1 }] }), (e) => e.field === 'context_id' && /holds no semantic layer and no pipeline table/.test(e.message), 'T45: query_model on a path-analysis context');
   const contexts = () => engine.ctxs.list().length;
   const count = contexts();
   await assert.rejects(engine.build_retentioneering_model({ name: 'bad_path', from_task: second.task_id, path: ['no_such_column'], columns: { event: 'ev', time: 'device_time' } }), (e) => e.field === 'path' && /'no_such_column' is not a column of/.test(e.message), 'T45: a start refused at its rows\' columns');

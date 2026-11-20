@@ -440,13 +440,13 @@ test('the card declaration (display) is structural: each kind is a closed branch
   assert.match(displayProblems({ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, ['d', 'a', 'b', 'c']).join(' | '), /declare a single y/, 'a split with two value columns');
   // the declaration lives on display_model_result alone: no other tool takes one
   const metrics = [{ stage: 'metrics', metrics: ['m'] }];
-  assert.equal(validateInput(validators.query_model, { context_id: 'abc123abc123', steps: metrics, display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
+  assert.equal(validateInput(validators.query_model, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123abc123', steps: metrics, display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
   for (const tool of ['query_model', 'query_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
   assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', steps: metrics }).ok, false, 'task_ids with a query');
   assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], steps: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with steps');
   // a read is only compiled at its start, never at a read of its task
-  assert.equal(validateInput(validators.query_model, { context_id: 'abc123abc123', steps: [{ stage: 'limit', limit: 5 }], dry_run: true }).ok, true, 'a query compiled only');
+  assert.equal(validateInput(validators.query_model, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123abc123', steps: [{ stage: 'limit', limit: 5 }], dry_run: true }).ok, true, 'a query compiled only');
   assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], dry_run: true }).ok, false, 'task_ids with dry_run');
   assert.equal(validateInput(validators.query_model, {}).ok, false, 'neither a query nor a task');
   assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');

@@ -6,6 +6,7 @@
 import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
 import { conditionListSql } from './pipeline/compute.js';
+import { keyId, keyPath, READABLE_KEY, QUANTILE_POINTS, structFieldsOfType, mergeNumeric, holdsJson } from './complex-keys.js';
 
 const DAY_MS = 86400000;
 
@@ -145,121 +146,305 @@ export class BackgroundIndexer {
   }
 
   /**
-   * Boolean SQL: a COMPLEX (array / array<struct>) property is "present" on a row = the array
-   * exists AND is non-empty. Encoding decides the shape: a native REPEATED column is never NULL —
-   * only its LENGTH tells presence; an `encoding: json` column holds a whole JSON array and is
-   * measured by the dialect's JSON-array length, which accepts a STRING with JSON text AND a native
-   * JSON / jsonb column alike (data_type: json) — never by comparing the column to a string literal,
-   * an operator BigQuery does not define for JSON; a blob key uses the keyed JSON-array length.
-   * Used for per-event applicability coverage, so COUNT(CASE WHEN <this> THEN 1 END) never runs
-   * COUNT() over an ARRAY (which BigQuery rejects). NULL → NULL → not counted, on every path.
+   * The text properties of a source whose indexed values say they hold JSON — an object or an array in a
+   * text the catalog declares a plain one (src/complex-keys.js holdsJson): read off what the scalar pass
+   * stored, so a payload that starts carrying JSON has its keys indexed with no declaration. Their own row
+   * stays the scalar pass's; the complex pass adds their keys.
    */
-  _complexPresence(name, spec, fact) {
-    const d = getDialect(this.catalog.dialect);
-    if (spec.column) {
-      if (spec.encoding === 'native') return `${d.arrayLength(spec.column)} > 0`;
-      return `${d.jsonColumnArrayLength(spec.column)} > 0`; // JSON array in a STRING or a JSON-typed column
-    }
-    return `${d.jsonArrayLength(this.catalog.eventDataColumn(fact), name)} > 0`; // inside the event_data blob
+  _jsonHolders(fact) {
+    return this.catalog.scalarEventProps(fact).filter((name) => holdsJson(this.index.sampleValues?.(fact, name, this.maxValues) || []));
   }
 
   /**
-   * COVERAGE + EXAMPLES pass for COMPLEX event properties (arrays/structs). They are excluded from
-   * the scalar worklist — their values are nested, so there is no top-N-by-frequency or distinct
-   * count. Instead, per complex property, we compute:
-   *   • per-event/app COVERAGE (which events actually carry a non-empty array) — so applicability is
-   *     DATA-DERIVED like scalars, not "unknown → shown on every event"; and
-   *   • up to COMPLEX_SAMPLE_N raw EXAMPLE values (LIMIT, not ranked) so the caller sees the real
-   *     shape/contents of the array without unnesting.
-   * INCREMENTAL like the scalar path: with merge on and a stored watermark, only rows newer than it
-   * are scanned and the counts are ADDED to what is stored (examples kept unless the delta yields
-   * fresh ones); otherwise a full (windowed) scan replaces. Per-property (there are only a handful).
+   * THE COMPLEX PROPERTIES OF ONE SOURCE (arrays / structs), and THE KEYS OF THEIR ELEMENTS — read off the
+   * data, nothing declared (src/complex-keys.js). For a complex property: its presence coverage per event
+   * and per app, and a few raw EXAMPLES of its shape; for every key of its elements (a JSON element's keys
+   * as the data holds them, a native struct's fields as the warehouse types them; its scalar elements as
+   * the key '') what a scalar property gets — its top values with frequencies (an element each), distinct
+   * count, the rows that carry it per event and per app — and a number's count, min, max and quantiles.
+   *
+   * BATCHED PER SOURCE, as the scalar pass is: one query finds the keys, one counts every property's and
+   * every key's coverage, one counts every key's values, one takes every property's examples — whatever
+   * the number of properties (a dbt call costs seconds whatever it scans).
+   *
+   * INCREMENTAL like the scalar path: with merge on and a stored watermark, only rows newer than it are
+   * scanned and the counts are ADDED to what is stored; a key first seen in that delta is counted once over
+   * the whole history (the window) on its own, then kept up as the others are. Otherwise a full (windowed)
+   * scan replaces.
    */
   async _indexComplexCoverage(runId, fact) {
     const c = this.catalog;
-    const names = c.complexEventProps(fact);
+    const d = getDialect(c.dialect);
+    // declared arrays / structs, and text properties the data shows holding JSON (their own row the scalar
+    // pass's: `held`, only their keys are written here)
+    const declared = c.complexEventProps(fact);
+    const held = new Set(this._jsonHolders(fact));
+    const names = [...declared, ...held];
     if (!names.length) return { props: 0, values: 0 };
     const bundleCol = c.bundleColumn(fact);
     const ref = `{{ ref('${c.getModel(fact).dbt_model}') }}`;
     const evCol = c.eventNameColumn(fact);
     const timeCol = c.getModel(fact).time?.column;
-    const { andWin, whereWin } = this._winClauses(evCol, timeCol, fact);
-    const wmOf = (rows) => rows.reduce((mx, r) => { const v = r.wm == null ? null : (Number.isFinite(Number(r.wm)) ? Number(r.wm) : Date.parse(r.wm)); return (v != null && (mx == null || v > mx)) ? v : mx; }, null);
-    let done = 0;
-    let written = 0; // example value rows stored — counted into the run's values_written
-    // Per-property run diagnostics, same rows the scalar pass writes (semantic_index({ request: { run } })).
+    const windowCond = this._winClauses(evCol, timeCol, fact).whereWin.replace(/^ WHERE /, '');
     const timing = (fields) => this._recordTiming(runId, fields);
-    for (const name of names) {
+    const props = names.map((name, i) => {
       const spec = c.eventPropertySpec(name, fact);
-      if (!spec) continue;
-      const tProp = Date.now();
-      const presence = this._complexPresence(name, spec, fact);
-      const expr = this._valueExpr(name, fact);
+      const st = c.complexStorage(name, fact);
+      if (!spec || !st) return null;
+      // keys off the warehouse type (a native array / struct); a native array of JSON is read as JSON is
+      const native = st.encoding === 'native' && !st.itemsJson;
+      const elems = d.complexElements(st);
+      // a native struct's fields: the warehouse's type, else the catalog's declared `fields` (a type not read
+      // yet) — and whether its elements are structs at all, so a struct is never read as a scalar element
+      const declaredFields = Object.entries(spec.fields || {}).map(([f, t]) => ({ name: f, type: String(t?.type ?? t), scalar: !/struct|array|\[\]|</i.test(String(t?.type ?? t)) }));
+      const typed = native ? structFieldsOfType(st.dtype) : [];
+      const fields = native ? (typed.length ? typed : declaredFields) : null;
+      const structs = native && (fields.length > 0 || st.struct || /struct/i.test(String(spec.type || '')));
+      // present on a row = it has an element (a native array never NULL — only its length tells; a JSON
+      // value that is no array or object, or no JSON, has none). NULL → not counted, on every path.
+      return { i, name, spec, st, native, structs, held: held.has(name), presence: `${d.arrayLength(elems)} > 0`, expr: this._valueExpr(name, fact), elems, fields };
+    }).filter(Boolean);
+    // where its counts stand: a declared one's row's watermark; a held one's key pass's (the scalar pass
+    // moves its row's — src/complex-keys.js KEY_PASS)
+    const watermarkOf = (p) => (p.held ? this.index.keyPassMark(fact, p.name) : this.index.stats?.(fact, p.name)?.dataWatermark ?? null);
+    const fresh = this.merge && timeCol ? props.filter((p) => watermarkOf(p) != null) : [];
+    const newbies = props.filter((p) => !fresh.includes(p));
+    const groups = [];
+    // one delta per watermark: properties whose counts stand at different moments (a group that failed, a
+    // text found holding JSON later) would otherwise count the rows between them twice
+    const byWatermark = new Map();
+    for (const p of fresh) { const w = watermarkOf(p); if (!byWatermark.has(w)) byWatermark.set(w, []); byWatermark.get(w).push(p); }
+    for (const [w, ps] of [...byWatermark].sort((a, b) => a[0] - b[0])) {
+      const since = this._sinceClause(w, timeCol, fact);
+      groups.push({ props: ps, cond: since || windowCond, delta: !!since });
+    }
+    if (newbies.length) groups.push({ props: newbies, cond: windowCond, delta: false });
+    let done = 0; let written = 0;
+    // one group's scan; its error, or null — a group writes nothing unless all its queries ran
+    const scan = async (g, { record }) => {
+      const t0 = Date.now();
       try {
-        const prior = this.index.stats?.(fact, name);
-        const since = (this.merge && prior?.dataWatermark != null) ? this._sinceClause(prior.dataWatermark, timeCol, fact) : null;
-        const covWhere = since ? ` WHERE ${since}` : whereWin;
-        const sampWhere = ` WHERE ${presence}${since ? ` AND ${since}` : andWin}`;
-        // per-event[/app] presence coverage + the delta's max event time (for the watermark)
-        const sel = [`${evCol} AS ev`];
-        if (bundleCol) sel.push(`${bundleCol} AS app`);
-        sel.push('COUNT(*) AS row_count', `COUNT(CASE WHEN ${presence} THEN 1 END) AS nn`);
-        if (timeCol) sel.push(`MAX(${timeCol}) AS wm`);
-        const grp = bundleCol ? `${evCol}, ${bundleCol}` : `${evCol}`;
-        const cov = await this.runner.show(this.baseProjectDir, `SELECT ${sel.join(', ')} FROM ${ref}${covWhere} GROUP BY ${grp}`, 5000, this.scanTimeout);
-        if (!cov.ok) throw new Error([cov.error, cov.stderr, cov.stdout].filter((s) => s && String(s).trim()).join('\n').trim() || 'not ok');
-        const rows = cov.rows || [];
-        const deltaMax = wmOf(rows);
-
-        if (since && deltaMax == null) { // delta merge with no new rows → keep what is stored
-          done += 1;
-          timing({ source: fact, property: name, ms: Date.now() - tProp, valuesWritten: 0, status: 'ok' });
-          this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}': no new rows since watermark — kept stored`);
-          continue;
-        }
-
-        const roll = this._coverageFromRows(rows, 'nn', name, runId);
-        const total = roll.coverage.reduce((s, e) => s + (e.nonNull || 0), 0);
-        const rowsTotal = roll.coverage.reduce((s, e) => s + (e.rowCount || 0), 0);
-        // Fresh raw EXAMPLES (LIMIT, unordered) — the shape of the data, not frequencies.
-        let examples = [];
-        try {
-          // NB: no inline LIMIT — the row cap is the show() `limit` arg (same as the scalar
-          // top-values scan); an inline LIMIT inside dbt show's query wrapper returns nothing.
-          const ex = await this.runner.show(this.baseProjectDir, `SELECT ${expr} AS v FROM ${ref}${sampWhere}`, COMPLEX_SAMPLE_N, this.scanTimeout);
-          if (ex.ok) {
-            // DEDUP by value — examples show the SHAPE, and the store keys values by (property,value)
-            // (duplicates would collide). Distinct shapes are more informative than repeats anyway.
-            const seen = new Set();
-            examples = (ex.rows || []).map((r) => r.v).filter((v) => v != null).map((v) => String(v).slice(0, COMPLEX_SAMPLE_MAXLEN))
-              .filter((v) => (seen.has(v) ? false : (seen.add(v), true)))
-              .map((v) => ({ value: v, freq: null }));
-          }
-        } catch { /* examples are best-effort */ }
-
-        if (since) { // INCREMENTAL: add the delta's counts to what is stored
-          const stored = this._readStored(fact, name);
-          const merged = this._mergeStats({ ...stored, values: [] }, { values: [], coverage: roll.coverage, bundleCoverage: roll.bundleCoverage, cellCoverage: roll.cellCoverage, total, rowsTotal, distinct: null });
-          const keepExamples = examples.length ? examples : stored.values; // keep prior examples if the delta had none
-          written += keepExamples.length;
-          this.index.upsertProperty(fact, name, { values: keepExamples, distinctCount: null, totalCount: merged.total, nullCount: merged.nullCount, coverage: merged.coverage, bundleCoverage: merged.bundleCoverage, cellCoverage: merged.cellCoverage, dataWatermark: Math.max(prior.dataWatermark || 0, deltaMax ?? prior.dataWatermark) });
-          timing({ source: fact, property: name, ms: Date.now() - tProp, valuesWritten: keepExamples.length, totalCount: merged.total, status: 'ok' });
-          this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}': merged delta, ${merged.coverage.length} event(s) carry it`);
-        } else { // FULL (or first) scan → replace
-          written += examples.length;
-          this.index.upsertProperty(fact, name, { values: examples, distinctCount: null, totalCount: total, nullCount: rowsTotal - total, coverage: roll.coverage, bundleCoverage: roll.bundleCoverage, cellCoverage: roll.cellCoverage, ...(deltaMax != null ? { dataWatermark: deltaMax } : {}) });
-          timing({ source: fact, property: name, ms: Date.now() - tProp, valuesWritten: examples.length, totalCount: total, status: 'ok' });
-          this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}': ${roll.coverage.length} event(s) carry it, ${examples.length} example(s)`);
-        }
-        done += 1;
+        const out = await this._complexGroup(runId, fact, g, { d, ref, evCol, bundleCol, timeCol, windowCond });
+        done += out.props; written += out.values;
+        for (const p of g.props) timing({ source: fact, property: p.name, ms: Math.round((Date.now() - t0) / g.props.length), valuesWritten: out.valuesOf.get(p.name) || 0, totalCount: this.index.stats?.(fact, p.name)?.totalCount ?? null, status: 'ok' });
+        return null;
       } catch (e) {
         const why = e?.message || String(e);
-        timing({ source: fact, property: name, ms: Date.now() - tProp, status: 'error', error: why });
-        this.index.recordRunNote?.(runId, `complex-coverage scan failed [${name}]: ${why}`);
-        this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}' FAILED: ${why}`);
+        if (record) {
+          for (const p of g.props) timing({ source: fact, property: p.name, ms: Math.round((Date.now() - t0) / g.props.length), status: 'error', error: why });
+          this.index.recordRunNote?.(runId, `complex-coverage scan of '${fact}' failed [${g.props.map((p) => p.name).join(', ')}]: ${why}`);
+          this.logger?.(`sync #${runId} complex-coverage '${fact}' [${g.props.map((p) => p.name).join(', ')}] FAILED: ${why}`);
+        }
+        return why;
       }
+    };
+    for (const g of groups) {
+      // batched for speed; when the batch fails, each property on its own — one that the warehouse refuses
+      // does not keep the others of its source out of the index (as the scalar pass falls back)
+      const why = await scan(g, { record: g.props.length === 1 });
+      if (!why || g.props.length === 1) continue;
+      this.logger?.(`sync #${runId} complex-coverage '${fact}': the batch of ${g.props.length} failed (${why.split('\n')[0]}) — each property on its own`);
+      for (const p of g.props) await scan({ ...g, props: [p] }, { record: true });
     }
     return { props: done, values: written };
+  }
+
+  /** Run a dbt show; its rows, or throw with what dbt said. */
+  async _rows(sql, limit) {
+    const r = await this.runner.show(this.baseProjectDir, sql, limit, this.scanTimeout);
+    if (!r.ok) throw new Error([r.error, r.stderr, r.stdout].filter((x) => x && String(x).trim()).join('\n').trim() || 'not ok');
+    return r.rows || [];
+  }
+
+  /**
+   * One group of a source's complex properties scanned over one WHERE (`g.cond`: a delta, or the window):
+   * their keys found, their and their keys' coverage, their keys' values, their examples — and written.
+   */
+  async _complexGroup(runId, fact, g, { d, ref, evCol, bundleCol, timeCol, windowCond }) {
+    const now = Date.now();
+    const where = (cond) => (cond ? ` WHERE ${cond}` : '');
+    const valuesOf = new Map();
+
+    // 1) THE KEYS the data holds: a JSON element's own keys, a native struct's fields (its type), '' for a
+    //    scalar element. A key no JSON path reads as it is (a space, a dot) is left out, and said.
+    const found = new Map(g.props.map((p) => [p.name, new Set()]));
+    const jsonProps = g.props.filter((p) => !p.native);
+    for (const p of g.props.filter((x) => x.native)) {
+      const scalarFields = p.fields.filter((f) => f.scalar).map((f) => f.name);
+      // a struct whose fields are not known is not read (its text is no element value)
+      for (const k of p.structs ? scalarFields : ['']) found.get(p.name).add(k);
+      if (p.structs && !p.fields.length) this.index.recordRunNote?.(runId, `complex keys of '${fact}.${p.name}' not read: its struct's fields are neither in the warehouse type nor declared`);
+    }
+    if (jsonProps.length) {
+      const branches = jsonProps.map((p) => {
+        const e = d.unnestJoin(p.elems, 'e');
+        const k = d.unnestJoin(d.elementKeys(e.el, p.st), 'k');
+        return `SELECT ${p.i} AS p, ${k.el} AS k FROM ${ref} ${e.join} ${k.join}${where(g.cond)}`;
+      });
+      const rows = await this._rows(`SELECT p, k, COUNT(*) AS n FROM (${branches.join(' UNION ALL ')}) AS keyrows GROUP BY p, k`, 100000);
+      const skipped = [];
+      for (const r of rows) {
+        const prop = jsonProps.find((x) => x.i === Number(r.p));
+        const k = r.k == null ? null : String(r.k);
+        if (!prop || k == null) continue;
+        if (k === '' || READABLE_KEY.test(k)) found.get(prop.name).add(k); else skipped.push(`${prop.name}: '${k}'`);
+      }
+      if (skipped.length) this.index.recordRunNote?.(runId, `complex keys not read as fields (not a plain name): ${skipped.slice(0, 20).join(', ')}${skipped.length > 20 ? ', …' : ''}`);
+    }
+    const known = (p) => new Set(this.index.keys(fact, p.name).map((k) => k.field));
+    // the keys counted here: those found, and — on a delta — every key already kept (its rows without it
+    // add to its NULLs), but of a native struct only the fields its type has now (one the type dropped
+    // cannot be read); a key first seen in a delta is counted over the whole history on its own
+    const keysOf = new Map(); const freshKeys = new Map();
+    for (const p of g.props) {
+      const was = known(p);
+      const now_ = found.get(p.name);
+      const pool = p.native ? now_ : new Set([...now_, ...(g.delta ? was : [])]);
+      keysOf.set(p.name, [...pool].filter((k) => !g.delta || was.has(k)).sort());
+      freshKeys.set(p.name, g.delta ? [...now_].filter((k) => !was.has(k)).sort() : []);
+    }
+
+    // 2)–5) EVERY COUNT FIRST, then the writes: a query that fails leaves the group as it stood (its
+    //    watermark too), so the next sync scans it again whole — a key first seen in this delta is not lost
+    const counted = await this._complexCounts(fact, g.props, keysOf, g.cond, { d, ref, evCol, bundleCol, timeCol, withExamples: true });
+    const late = g.props.filter((p) => freshKeys.get(p.name).length);
+    const full = late.length ? await this._complexCounts(fact, late, freshKeys, windowCond, { d, ref, evCol, bundleCol, timeCol, withExamples: false }) : null;
+    // a key is seen when some element holds a value of it (a native struct's field the data stopped filling
+    // goes inactive, as a JSON key the payload dropped does)
+    const seenAt = (c) => ((c?.elements || 0) > 0 ? now : null);
+
+    for (const p of g.props) {
+      const cov = counted.coverage.get(p.name);
+      if (g.delta && counted.maxTime == null) { this.logger?.(`sync #${runId} complex-coverage '${fact}.${p.name}': no new rows since watermark — kept stored`); continue; }
+      const prior = this.index.stats?.(fact, p.name);
+      const examples = counted.examples.get(p.name) || [];
+      if (p.held) {
+        valuesOf.set(p.name, 0); // its own row is the scalar pass's
+      } else if (g.delta) {
+        const before = this._readStored(fact, p.name);
+        const merged = this._mergeStats({ ...before, values: [] }, { values: [], ...cov, distinct: null });
+        const keep = examples.length ? examples : before.values;
+        this.index.upsertProperty(fact, p.name, { values: keep, distinctCount: null, totalCount: merged.total, nullCount: merged.nullCount, coverage: merged.coverage, bundleCoverage: merged.bundleCoverage, cellCoverage: merged.cellCoverage, dataWatermark: Math.max(prior?.dataWatermark || 0, counted.maxTime ?? prior?.dataWatermark ?? 0) });
+        valuesOf.set(p.name, keep.length);
+      } else {
+        this.index.upsertProperty(fact, p.name, { values: examples, distinctCount: null, totalCount: cov.total, nullCount: cov.rowsTotal - cov.total, coverage: cov.coverage, bundleCoverage: cov.bundleCoverage, cellCoverage: cov.cellCoverage, ...(counted.maxTime != null ? { dataWatermark: counted.maxTime } : {}) });
+        valuesOf.set(p.name, examples.length);
+      }
+      for (const k of keysOf.get(p.name)) {
+        const c = counted.keys.get(`${p.name}\u0000${k}`);
+        valuesOf.set(p.name, valuesOf.get(p.name) + this._writeKey(fact, p, k, c, { merge: g.delta, seen: seenAt(c) }));
+      }
+      for (const k of freshKeys.get(p.name)) {
+        const c = full?.keys.get(`${p.name}\u0000${k}`);
+        valuesOf.set(p.name, valuesOf.get(p.name) + this._writeKey(fact, p, k, c, { merge: false, seen: seenAt(c) }));
+      }
+      if (p.held && counted.maxTime != null) this.index.setKeyPassMark(fact, p.name, Math.max(this.index.keyPassMark(fact, p.name) ?? 0, counted.maxTime));
+      this.logger?.(`sync #${runId} complex-coverage '${fact}.${p.name}': ${cov.coverage.filter((e) => e.nonNull > 0).length} event(s) carry it, ${keysOf.get(p.name).length} key(s)${g.delta ? ' (merged delta)' : ''}${freshKeys.get(p.name).length ? `, new key(s) ${freshKeys.get(p.name).map((k) => keyPath(p.name, k)).join(', ')} counted over the whole history` : ''}`);
+    }
+    return { props: g.props.filter((p) => !p.held).length, values: [...valuesOf.values()].reduce((a, b) => a + b, 0), valuesOf };
+  }
+
+  /**
+   * The counts of `props` and of their keys (`keysOf`: property → keys) over the rows `cond` keeps: each
+   * property's and each key's coverage per event and per app (one query), each key's values (one query —
+   * a second for its top values where the warehouse has no approximate top-K), and each property's
+   * examples (one query, when asked). → { coverage: Map(prop → roll), keys: Map(`prop\0key` → stats),
+   * examples: Map(prop → [{ value }]), maxTime }.
+   */
+  async _complexCounts(fact, props, keysOf, cond, { d, ref, evCol, bundleCol, timeCol, withExamples }) {
+    const where = cond ? ` WHERE ${cond}` : '';
+    const keyRead = (p, k, x) => (k ? d.elementField(x, k, p.st) : d.elementText(x, p.st));
+    // coverage: one row per event[/app] — its rows, each property's present on them, each key's
+    const sel = [`${evCol} AS ev`];
+    if (bundleCol) sel.push(`${bundleCol} AS app`);
+    sel.push('COUNT(*) AS row_count');
+    if (timeCol) sel.push(`MAX(${timeCol}) AS wm`);
+    const keyCols = [];
+    for (const p of props) {
+      sel.push(`COUNT(CASE WHEN ${p.presence} THEN 1 END) AS c${p.i}`);
+      keysOf.get(p.name).forEach((k, j) => {
+        sel.push(`COUNT(CASE WHEN ${d.anyElement(p.elems, (x) => `${keyRead(p, k, x)} IS NOT NULL`)} THEN 1 END) AS c${p.i}_${j}`);
+        keyCols.push({ p, k, col: `c${p.i}_${j}` });
+      });
+    }
+    const covRows = await this._rows(`SELECT ${sel.join(', ')} FROM ${ref}${where} GROUP BY ${bundleCol ? `${evCol}, ${bundleCol}` : evCol}`, 5000);
+    const wm = covRows.reduce((mx, r) => { const v = r.wm == null ? null : (Number.isFinite(Number(r.wm)) ? Number(r.wm) : Date.parse(r.wm)); return (v != null && (mx == null || v > mx)) ? v : mx; }, null);
+    const roll = (col, name) => {
+      const r = this._coverageFromRows(covRows, col, name, null);
+      const total = r.coverage.reduce((s, e) => s + (e.nonNull || 0), 0);
+      const rowsTotal = r.coverage.reduce((s, e) => s + (e.rowCount || 0), 0);
+      return { ...r, total, rowsTotal };
+    };
+    const coverage = new Map(props.map((p) => [p.name, roll(`c${p.i}`, p.name)]));
+    const keys = new Map(keyCols.map(({ p, k, col }) => [`${p.name}\u0000${k}`, { cov: roll(col, keyPath(p.name, k)) }]));
+
+    // values: one row per (property, key) over its elements — the key's value as a text
+    const withKeys = props.filter((p) => keysOf.get(p.name).length);
+    if (withKeys.length) {
+      const branches = withKeys.map((p) => {
+        const e = d.unnestJoin(p.elems, 'e');
+        const kv = d.unnestJoin(d.keyValueList(keysOf.get(p.name).map((k) => [k, keyRead(p, k, e.el)])), 'kv');
+        return `SELECT ${p.i} AS p, ${d.structOf(kv.el, 'k')} AS k, ${d.structOf(kv.el, 'v')} AS v FROM ${ref} ${e.join} ${kv.join}${where}`;
+      });
+      const kvRows = `(${branches.join(' UNION ALL ')}) AS kvrows`;
+      const num = d.fromText('v', 'float');
+      const top = d.approxTopK('v', this.maxValues);
+      const statRows = await this._rows(`SELECT p, k, ${top ? `${top} AS top, ` : ''}${d.approxCountDistinct('v')} AS dc, COUNT(v) AS nn, COUNT(${num}) AS num_n, MIN(${num}) AS num_min, MAX(${num}) AS num_max, ${d.quantilesJson(num, QUANTILE_POINTS)} AS q FROM ${kvRows} WHERE v IS NOT NULL GROUP BY p, k`, 100000);
+      const tops = new Map();
+      if (!top) {
+        const exact = await this._rows(`SELECT p, k, v, n FROM (SELECT p, k, v, COUNT(*) AS n FROM ${kvRows} WHERE v IS NOT NULL GROUP BY p, k, v) AS counted QUALIFY ROW_NUMBER() OVER (PARTITION BY p, k ORDER BY n DESC, v) <= ${this.maxValues}`, 1000000);
+        for (const r of exact) { const id = `${r.p}\u0000${r.k}`; if (!tops.has(id)) tops.set(id, []); tops.get(id).push({ value: String(r.v), freq: Number(r.n) }); }
+      }
+      for (const r of statRows) {
+        const p = withKeys.find((x) => x.i === Number(r.p));
+        if (!p) continue;
+        const k = r.k == null ? '' : String(r.k);
+        const entry = keys.get(`${p.name}\u0000${k}`);
+        if (!entry) continue;
+        const parseQ = (q) => { let a = q; if (typeof a === 'string') { try { a = JSON.parse(a); } catch { a = null; } } return Array.isArray(a) ? a.map(Number).filter(Number.isFinite) : null; };
+        entry.values = (top ? d.parseTopK(r.top) : tops.get(`${r.p}\u0000${r.k}`) || []).map((v) => ({ value: String(v.value), freq: v.freq }));
+        entry.distinct = r.dc == null ? null : Number(r.dc);
+        entry.elements = Number(r.nn) || 0;
+        const n = Number(r.num_n) || 0;
+        entry.numeric = n ? { count: n, min: Number(r.num_min), max: Number(r.num_max), quantiles: parseQ(r.q) } : null;
+      }
+    }
+
+    // examples: a few raw values of each property, the shape of what it holds
+    const examples = new Map();
+    const shown = props.filter((p) => !p.held); // a held property's own examples are its values
+    if (withExamples && shown.length) {
+      const exRow = (await this._rows(`SELECT ${shown.map((p) => `${d.sampleList(d.complexText(p.expr, p.st), p.presence, COMPLEX_SAMPLE_N)} AS s${p.i}`).join(', ')} FROM ${ref}${where}`, 1))[0] || {};
+      for (const p of shown) {
+        let list = exRow[`s${p.i}`];
+        if (typeof list === 'string') { try { list = JSON.parse(list); } catch { list = []; } }
+        const seen = new Set();
+        examples.set(p.name, (Array.isArray(list) ? list : []).filter((v) => v != null).map((v) => (typeof v === 'string' ? v : JSON.stringify(v)).slice(0, COMPLEX_SAMPLE_MAXLEN))
+          .filter((v) => (seen.has(v) ? false : (seen.add(v), true))).map((v) => ({ value: v, freq: null })));
+      }
+    }
+    return { coverage, keys, examples, maxTime: wm };
+  }
+
+  /**
+   * Write one key's counts under its id (src/complex-keys.js keyId) — merged into what is stored when
+   * `merge` (a delta), else replacing it — and its registry row: when it was last seen in the data, how
+   * many of its values were counted, a number's summary.
+   */
+  _writeKey(fact, p, k, counted, { merge, seen }) {
+    if (!counted) return 0;
+    const id = keyId(p.name, k);
+    const cov = counted.cov;
+    const delta = { values: counted.values || [], coverage: cov.coverage, bundleCoverage: cov.bundleCoverage, cellCoverage: cov.cellCoverage, total: cov.total, rowsTotal: cov.rowsTotal, distinct: counted.distinct ?? null };
+    const prior = merge ? this.index.keys(fact, p.name).find((x) => x.field === k) : null;
+    const r = merge && prior ? this._mergeStats(this._readStored(fact, id), delta) : { ...delta, nullCount: cov.rowsTotal - cov.total };
+    this.index.upsertProperty(fact, id, { values: r.values, distinctCount: r.distinct, totalCount: r.total, nullCount: r.nullCount, coverage: r.coverage, bundleCoverage: r.bundleCoverage, cellCoverage: r.cellCoverage });
+    this.index.putKey(fact, p.name, k, {
+      lastSeen: seen ?? prior?.lastSeen ?? null,
+      elements: (merge && prior ? (prior.elements || 0) : 0) + (counted.elements || 0),
+      numeric: merge && prior ? mergeNumeric(prior.numeric, counted.numeric) : counted.numeric || null,
+    });
+    return r.values.length;
   }
 
   /**
@@ -603,8 +788,18 @@ export class BackgroundIndexer {
     // way. Prune against the FULL target set (not the high-card-filtered one) so a skipped
     // high-cardinality field is kept, not mistaken for a removed column.
     const desired = new Set(allTargets.map(label));
-    // complex props are coverage-only targets (indexed by their own pass) — never prune them
-    for (const f of c.facts) for (const prop of c.complexEventProps(f)) desired.add(label({ source: f, property: prop }));
+    // complex props are coverage-only targets (indexed by their own pass) — never prune them, nor the keys
+    // of their elements the data showed (src/complex-keys.js), nor those of a text that holds JSON; the keys
+    // of a property that is neither any more go
+    for (const f of c.facts) {
+      const complex = new Set(c.complexEventProps(f));
+      for (const prop of complex) desired.add(label({ source: f, property: prop }));
+      for (const prop of this._jsonHolders(f)) complex.add(prop);
+      for (const k of this.index.keys?.(f, null, { marks: true }) || []) {
+        if (complex.has(k.property)) desired.add(label({ source: f, property: keyId(k.property, k.field) }));
+        else this.index.removeKey?.(f, k.property, k.field);
+      }
+    }
     const orphans = (this.index.properties?.() || []).filter((k) => !desired.has(label(k)));
     for (const k of orphans) this.index.removeProperty?.(k.source, k.property);
     if (orphans.length) this.logger?.(`sync #${runId} pruned ${orphans.length} field(s) no longer in the schema: ${orphans.slice(0, 8).map(label).join(', ')}${orphans.length > 8 ? ', …' : ''}`);

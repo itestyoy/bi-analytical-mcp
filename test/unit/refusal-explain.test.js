@@ -29,7 +29,7 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
   const e = engine();
   // one tree of each level's grammar: a metric query's where step over a dimension, a pipeline where over a column
   const levels = [
-    ['query_model', { source: 'users', column: 'country' }, (conditions) => ({ context_id: 'abc123', steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['x'] }] })],
+    ['query_model', { source: 'users', column: 'country' }, (conditions) => ({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123', steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['x'] }] })],
     ['build_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
   ];
   for (const [tool, subject, call] of levels) {
@@ -57,7 +57,7 @@ test('a join stage names its contract\'s parts in one field, on — the earlier 
 
 test('a read\'s condition is the one grammar over the stored table\'s columns, and a refusal names the form it meant', () => {
   const e = engine();
-  const read = (steps) => refusal(e, 'query_model', { context_id: 'abc123', steps });
+  const read = (steps) => refusal(e, 'query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123', steps });
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] }]), null);
   // a column against another column, an expression on either side: a read's too
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'gt', args: [{ fn: 'length', args: [{ column: 'a' }] }, { column: 'b' }] }] }]), null);
@@ -85,11 +85,11 @@ test('an aggregate takes no where — over a window as folding rows — and a fu
 test('a query is started without an offset: paging is the read\'s, by row numbers of the result', () => {
   const e = engine();
   const metrics = [{ stage: 'metrics', metrics: ['x'] }];
-  assert.match(refusal(e, 'query_model', { context_id: 'abc123', steps: metrics, offset: 10 }), /unexpected property 'offset'/);
+  assert.match(refusal(e, 'query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123', steps: metrics, offset: 10 }), /unexpected property 'offset'/);
   assert.match(refusal(e, 'query_model', { context_id: 'abc123', offset: 10 }), /unexpected property 'offset'/);
   assert.match(refusal(e, 'query_model', { context_id: 'abc123', queries: [{ limit: 5, offset: 10 }] }), /unexpected property 'offset'/);
   // a start's limit is the rows its task keeps; a read's offset/limit page them
-  assert.equal(refusal(e, 'query_model', { context_id: 'abc123', steps: metrics, limit: 10 }), null);
+  assert.equal(refusal(e, 'query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123', steps: metrics, limit: 10 }), null);
   assert.equal(refusal(e, 'query_model', { task_ids: ['abc123abc123'], offset: 100, limit: 10 }), null);
 });
 
@@ -97,7 +97,7 @@ test('a request of its own written among views, raw in a read, and a source name
   const e = engine();
   const guide = refusal(e, 'semantic_index', { views: [{ source: 'events' }, { guide: 'research' }] });
   assert.match(guide, /\{ guide \} is a request of its own, not one of views/);
-  const raw = refusal(e, 'query_model', { context_id: 'abc123', steps: [{ stage: 'where', conditions: [{ fn: 'raw', sql: '{1} > 0', args: [{ column: 'x' }] }] }] });
+  const raw = refusal(e, 'query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abc123', steps: [{ stage: 'where', conditions: [{ fn: 'raw', sql: '{1} > 0', args: [{ column: 'x' }] }] }] });
   assert.match(raw, /raw SQL is taken only by a pipeline build/);
   assert.throws(() => e._ctx('users'), /'users' is a source of the catalog, not a context/);
   assert.throws(() => e._ctx('abc123'), /No context has that id/);

@@ -27,30 +27,33 @@ const engine = () => settle(new Engine({
 }));
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }] };
 
-test('a draft keeps its description, reports it, and hands it to the fork', async () => {
+test('a draft keeps its description and its question, reports them, and a fork says its own', async () => {
   const e = engine();
   const note = 'revenue per player for the payer-share question';
-  const start = await e.build_model({ action: 'start', name: 'lbl', source: 'events', description: note });
+  const asked = 'What share of players pay, and how much do they spend?';
+  const start = await e.build_model({ question: asked, action: 'start', name: 'lbl', source: 'events', description: note });
   assert.equal(start.description, note, 'the start response echoes what it recorded');
+  assert.equal(start.question, asked);
   await e.build_model({ action: 'add_steps', context_id: start.context_id, steps: [AGG] });
 
   const described = await e.context({ action: 'describe', context_id: start.context_id });
   assert.equal(described.draft?.description, note);
+  assert.equal(described.draft?.question, asked);
   const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.name === 'lbl');
   assert.equal(listed.description, note, 'a listing says why the context exists, not only what is in it');
+  assert.equal(listed.question, asked, '…and the question it answers');
   assert.equal('context_id' in listed, false, 'and not its id: that is the key of whoever built it');
 
-  // a fork inherits the parent's note (it is the same question, one variant on)…
-  const fork = await e.build_model({ action: 'fork', context_id: start.context_id, name: 'lbl_fork' });
-  assert.equal(e.ctxs.get(fork.context_id).state.draft.description, note);
-  // …and can say what makes it different instead
-  const fork2 = await e.build_model({ action: 'fork', context_id: start.context_id, name: 'lbl_payers', description: 'same, but payers only' });
-  assert.equal(e.ctxs.get(fork2.context_id).state.draft.description, 'same, but payers only');
+  // a fork is a draft of its own: it says what makes it different, and the question it answers
+  const fork = await e.build_model({ question: 'Do payers spend more on weekends?', action: 'fork', context_id: start.context_id, name: 'lbl_payers', description: 'same, but payers only' });
+  assert.equal(e.ctxs.get(fork.context_id).state.draft.description, 'same, but payers only');
+  assert.equal(e.ctxs.get(fork.context_id).state.draft.question, 'Do payers spend more on weekends?');
+  await assert.rejects(() => e.build_model({ action: 'fork', context_id: start.context_id, name: 'lbl_bare' }), /description|question/, 'a fork that says neither is refused');
 });
 
 test('the description belongs to the draft, not to every action on it', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'lbl2', source: 'events', description: 'x' });
+  const { context_id } = await e.build_model({ question: 'what the test asks', action: 'start', name: 'lbl2', source: 'events', description: 'x' });
   // add_steps / materialize describe a STEP, not the pipeline: a note there would have nowhere to go
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id, steps: [AGG], description: 'nope' }),
@@ -89,14 +92,19 @@ test('a governed task keeps its description', async () => {
 
 });
 
-test('no description means no empty field in the response', async () => {
+test('a start and a query that do not say what they are for are refused, naming the field', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'plain', source: 'events' });
+  await assert.rejects(() => e.build_model({ action: 'start', name: 'plain', source: 'events', description: 'x' }), /question/);
+  await assert.rejects(() => e.build_model({ action: 'start', name: 'plain', source: 'events', question: 'x?' }), /description/);
+  await assert.rejects(() => e.build_model({ action: 'start', name: 'plain', source: 'events', description: '', question: 'x?' }), /description/, 'an empty one says nothing');
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'plain', source: 'events' });
+  await assert.rejects(() => e.query_model({ context_id, steps: [{ stage: 'limit', limit: 1 }] }), /name|description|question/);
+  await assert.rejects(() => e.query_model({ context_id, queries: [{ name: 'q_one', description: 'd', steps: [{ stage: 'limit', limit: 1 }] }] }), /question/, 'each query of a batch says it too');
   const described = await e.context({ action: 'describe', context_id });
-  assert.ok(!('description' in (described.draft || {})), 'nothing is invented for a draft that said nothing');
+  assert.equal(described.draft.question, 'what the test asks');
   const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.name === 'plain');
-  assert.ok(!('description' in listed));
-  assert.ok(!('task_notes' in listed));
+  assert.equal(listed.description, 'what the test computes');
+  assert.ok(!('task_notes' in listed), 'nothing is invented that was not said');
 });
 
 // The listing is a PAGE, most recently used first: a server keeps every conversation's contexts, and the
@@ -105,7 +113,7 @@ test('no description means no empty field in the response', async () => {
 test('context list pages the contexts, most recently used first, and search narrows them — none with its id', async () => {
   const e = engine();
   const ids = [];
-  for (let i = 0; i < 5; i += 1) ids.push((await e.build_model({ action: 'start', name: `pg${i}`, source: 'events', description: i === 2 ? 'the payer funnel' : `draft ${i}` })).context_id);
+  for (let i = 0; i < 5; i += 1) ids.push((await e.build_model({ question: 'what the test asks', action: 'start', name: `pg${i}`, source: 'events', description: i === 2 ? 'the payer funnel' : `draft ${i}` })).context_id);
   e.ctxs.touch(ids[1]); // used last
   const first = await e.context({ action: 'list', limit: 2 });
   assert.equal(first.total, 5);

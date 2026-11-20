@@ -201,7 +201,7 @@ test('python stage on BigFrames: an astype string the frame does not take is war
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } }));
   const cast = (dtype) => ({ ...PY_STAGE, functions: [{ name: 'cast', params: ['df'], body: `df['revenue'] = df['revenue'].astype('${dtype}')\nreturn df` }], steps: [{ call: 'cast', args: {} }], output: { columns: ['player_id_of_internal', 'revenue'] } });
   const step = async (dtype) => {
-    const s = await e.build_model({ action: 'start', name: 'cast', source: 'events' });
+    const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'cast', source: 'events' });
     await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
     return stepNotes(await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [cast(dtype)] })).filter((n) => n.includes('astype('));
   };
@@ -233,7 +233,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
 test('incremental builder: add_steps python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
   const p = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [PY_STAGE] });
   assert.deepEqual(stepEffect(p).columns_added.map((c) => c.name), ['revenue_z']);
@@ -710,14 +710,14 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
 
   // 1. incrementally: the aggregate, then the big stage
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'bigpy', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'bigpy', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
   const added = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [big] });
   assert.equal(added.steps_added[added.steps_added.length - 1]?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
 
   // 2. both stages at once
   const e2 = engine();
-  const s2 = await e2.build_model({ action: 'start', name: 'bigpy2', source: 'events' });
+  const s2 = await e2.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'bigpy2', source: 'events' });
   const many = await e2.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [AGG, big] });
   assert.equal(many.steps_added?.length, 2, JSON.stringify(many.error || many).slice(0, 300));
 
@@ -738,7 +738,7 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
   const e = engine();
-  const raw = await e.build_model({ action: 'start', name: 'raw_py', source: 'events' });
+  const raw = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'raw_py', source: 'events' });
   const added = await e.build_model({ action: 'add_steps', context_id: raw.context_id, steps: [PY_STAGE] });
   const [said] = nudge(added);
   assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(stepNotes(added))}`);
@@ -748,13 +748,13 @@ test('a python stage with no preparation before it is told so; one after an SQL 
   assert.match(said, /nothing to change/, 'and it stays a recommendation, not a verdict');
 
   // 2. the same stage after an aggregate → nothing to say
-  const prepared = await e.build_model({ action: 'start', name: 'prep_py', source: 'events' });
+  const prepared = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'prep_py', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: prepared.context_id, steps: [AGG] });
   const after = await e.build_model({ action: 'add_steps', context_id: prepared.context_id, steps: [PY_STAGE] });
   assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
 
   // 3. a where alone counts too — narrowing is preparation
-  const scoped = await e.build_model({ action: 'start', name: 'scoped_py', source: 'events' });
+  const scoped = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'scoped_py', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: scoped.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
   await e.build_model({ action: 'add_steps', context_id: scoped.context_id, steps: [AGG] });
   const scopedPy = await e.build_model({ action: 'add_steps', context_id: scoped.context_id, steps: [PY_STAGE] });

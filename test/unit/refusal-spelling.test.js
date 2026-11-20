@@ -26,7 +26,7 @@ const text = (res) => (res.errors || []).join(' | ');
 
 const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', steps: [st] });
 /** A build whose only step is its semantic layer, over `source`. */
-const layer = (source, step) => check('build_model', { action: 'start', name: 'spell_task', source, steps: [{ stage: 'semantic_model', ...step }] });
+const layer = (source, step) => check('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'spell_task', source, steps: [{ stage: 'semantic_model', ...step }] });
 const measure = (name, expr) => stage({ stage: 'aggregate', measures: [{ name, expr }] });
 
 test("a pipeline measure refuses `avg` (and `mean`, `quantile`) and says how it is spelled here", () => {
@@ -109,10 +109,10 @@ test('sum_boolean is refused with the list of functions, and no word-for-word ad
 // and a context is `context_id` in every tool: the earlier spellings are refused, with this server's
 // name in the refusal (a hint, not an alias).
 test("a read's measure list is `measures`, and `aggregations` is refused with that name", () => {
-  const res = check('query_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const res = check('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
   assert.equal(res.ok, false);
   assert.match(text(res), /'aggregations' — here that field is called 'measures'/);
-  assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
+  assert.equal(check('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
 });
 
 // A list a tool runs in order is `steps` in every tool, its items tagged by what they are. What changed
@@ -129,20 +129,20 @@ test("a query's earlier fields are refused; its steps say them today", () => {
     { context_id: 'ctxabc123456', transform: { group_by: ['event_name'] } },
     { context_id: 'ctxabc123456', metrics: ['revenue'] },
     { context_id: 'ctxabc123456', metrics: ['revenue'], group_by: [country], where: [US], order_by: keys },
-    { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { metrics: ['revenue'], order_by: keys }] },
-    { context_id: 'ctxabc123456', steps: [{ ...revenue, group_by: [{ model: 'users', attribute: 'country' }] }] },
-    { context_id: 'ctxabc123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }] }, revenue] },
-    { context_id: 'ctxabc123456', steps: [revenue], dry_run: true, include_plan: true },
+    { context_id: 'ctxabc123456', queries: [{ name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [revenue] }, { metrics: ['revenue'], order_by: keys }] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [{ ...revenue, group_by: [{ model: 'users', attribute: 'country' }] }] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }] }, revenue] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [revenue], dry_run: true, include_plan: true },
   ]) assert.equal(check('query_model', earlier).ok, false, JSON.stringify(earlier));
   for (const today of [
-    { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] },
-    { context_id: 'ctxabc123456', steps: [{ stage: 'where', conditions: [US] }, { ...revenue, group_by: [country] }, { stage: 'order_by', keys }] },
-    { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { steps: [revenue, { stage: 'order_by', keys }] }] },
-    { context_id: 'ctxabc123456', steps: [revenue], dry_run: true, include: ['plan'] },
-    { context_id: 'ctxabc123456', steps: [revenue, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue' }, { value: 100 }] }] }, { stage: 'limit', limit: 3 }] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [{ stage: 'where', conditions: [US] }, { ...revenue, group_by: [country] }, { stage: 'order_by', keys }] },
+    { context_id: 'ctxabc123456', queries: [{ name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [revenue] }, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [revenue, { stage: 'order_by', keys }] }] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [revenue], dry_run: true, include: ['plan'] },
+    { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [revenue, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue' }, { value: 100 }] }] }, { stage: 'limit', limit: 3 }] },
   ]) assert.equal(check('query_model', today).ok, true, JSON.stringify(today));
   // a list of no steps says nothing: there is no query without its metrics step
-  assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [] }).ok, false);
+  assert.equal(check('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'ctxabc123456', steps: [] }).ok, false);
 });
 
 // The builders' "show me more" is the one list `include`; an action that answers with no shape (preview)
@@ -162,7 +162,7 @@ test('a pipeline step names its context with context_id; `draft_id` is refused w
   assert.match(text(res), /'draft_id' — here that field is called 'context_id'/);
   assert.equal(check('build_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
   // a start may omit its action (the default) and name a context to start the draft in
-  assert.equal(check('build_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
+  assert.equal(check('build_model', { description: 'what the test computes', question: 'what the test asks', name: 'started', source: 'events', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
 });
 
 // `count(*)` is a SQL habit; here the rows are counted by a count with no argument. The refusal for
@@ -236,7 +236,7 @@ test('a formula over aggregates in a measure is pointed at a derived metric, and
 });
 
 test('a name pattern is said in words', () => {
-  assert.match(text(check('build_model', { action: 'start', name: 'x', source: 'events' })), /`name` must be a name of 3 to 41 lowercase letters, digits and underscores, a letter first/);
+  assert.match(text(check('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'x', source: 'events' })), /`name` must be a name of 3 to 41 lowercase letters, digits and underscores, a letter first/);
 });
 
 // What agents tripped on, said in the refusal: another tool's field name told its name here (a projection's
@@ -244,10 +244,10 @@ test('a name pattern is said in words', () => {
 // said with what it is (a join's time), and an array written as one of its items shown as a list.
 test('the refusals agents met say the fix: keep / confidence / note, context_id at the top, what a missing part is, a list', () => {
   const said = (tool, input) => text(check(tool, input));
-  assert.match(said('build_model', { action: 'start', name: 'scd', source: 'users', steps: [{ stage: 'project', columns: ['country'] }] }), /unexpected property 'columns' — here that field is called 'keep'/);
+  assert.match(said('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'scd', source: 'users', steps: [{ stage: 'project', columns: ['country'] }] }), /unexpected property 'columns' — here that field is called 'keep'/);
   assert.match(said('experiment', { action: 'analyze', metric: 'proportion', control: { n: 100, conversions: 10 }, variants: [{ n: 100, conversions: 15 }], alpha: 0.05 }), /here that field is called 'confidence' \(confidence = 1 − alpha/);
   assert.match(said('memory', { action: 'record', notes: [{ finding: 'x', about: [{ source: 'events' }] }] }), /unexpected property 'finding' — here that field is called 'note'/);
-  assert.match(said('query_model', { queries: [{ context_id: 'abcabcabcabc', steps: [{ stage: 'metrics', metrics: ['x'] }] }] }), /`queries\.0` has an unexpected property 'context_id' — it is written once, at the top of the request beside queries/);
-  assert.match(said('build_model', { action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] }), /missing required property 'time' — A column of the rows: the moment the version of users valid then is joined/);
-  assert.match(said('build_model', { action: 'start', name: 'arr', source: 'events', steps: [{ stage: 'aggregate', group_by: 'event_name', measures: [{ name: 'n', expr: { fn: 'count' } }] }] }), /`steps\.0\.group_by` must be an array — write \["event_name"\]/);
+  assert.match(said('query_model', { queries: [{ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcabcabcabc', steps: [{ stage: 'metrics', metrics: ['x'] }] }] }), /`queries\.0` has an unexpected property 'context_id' — it is written once, at the top of the request beside queries/);
+  assert.match(said('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] }), /missing required property 'time' — A column of the rows: the moment the version of users valid then is joined/);
+  assert.match(said('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'arr', source: 'events', steps: [{ stage: 'aggregate', group_by: 'event_name', measures: [{ name: 'n', expr: { fn: 'count' } }] }] }), /`steps\.0\.group_by` must be an array — write \["event_name"\]/);
 });

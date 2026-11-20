@@ -97,6 +97,35 @@ export class Dialect {
   /** The address a person opens one exported file at. */
   downloadLink(_file) { throw new Error(`export is not written for the ${this.name} warehouse`); }
 
+  // ── THE KEYS OF A COMPLEX PROPERTY, read by the value index (src/complex-keys.js) ──
+  // `st` is where its elements are (Catalog.complexStorage): { column, key, encoding, json, struct, itemsJson }. Every read
+  // below yields a text (or NULL), so a key's values are compared and counted alike on every warehouse.
+
+  /** The property's elements as an array expression (a native array, a JSON array's elements; a JSON object
+   *  or a native struct the one element it is). */
+  complexElements(_st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** A FROM-clause join binding each element of `arr` — { join, el }: `el` reads the element. */
+  unnestJoin(_arr, _alias) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** The top-level key names of a JSON element `e` (an array): a scalar element is the one key '' (the
+   *  element itself), a null one none. */
+  elementKeys(_e, _st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** A key's value in element `e`, as its text (NULL where absent or not a scalar). */
+  elementField(_e, _field, _st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** A scalar element's text. */
+  elementText(_e, _st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** Whether some element of `arr` satisfies `body(x)` (x names the element). */
+  anyElement(_arr, _body) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** An array of { k, v } structs from [[key name, text expression]] — one row per key once unnested. */
+  keyValueList(_pairs) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** A field of a struct a join bound (`keyValueList`'s k / v). */
+  structOf(ref, field) { return `${ref}.${field}`; }
+  /** QUANTILE_POINTS + 1 quantile points of a numeric expression, as JSON text of an array. */
+  quantilesJson(_x, _points) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** Up to `n` values of a text expression where `cond` holds, as JSON text of an array. */
+  sampleList(_text, _cond, _n) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** A complex value as its JSON text (for an example of its shape). */
+  complexText(expr, _st) { return expr; }
+
   /** A validated identifier, quoted — a column a caller named may be a keyword (group, order). */
   quoteIdent(name) {
     return `"${this.ident(name)}"`;

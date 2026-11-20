@@ -18,7 +18,7 @@ const ajv = new Ajv({ allErrors: true, strict: false });
 
 /** Every mode of the tools that declare an answer's shape, as calls. */
 async function calls(engine) {
-  const draft = await engine.build_model({ action: 'start', name: 'outputs', source: engine.catalog.facts[0] });
+  const draft = await engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'outputs', source: engine.catalog.facts[0] });
   return [
     ['context', { action: 'list' }],
     ['context', { action: 'describe', context_id: draft.context_id }],

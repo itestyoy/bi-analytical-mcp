@@ -22,21 +22,21 @@ const mr = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], 
 
 test('build_model: start returns a draft + source column count (full list on include columns)', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'inc', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'inc', source: 'events' });
   assert.match(s.context_id, /\w+/);
   assert.equal(s.action, 'start');
   assert.deepEqual(s.steps, []);
   assert.ok(s.column_count > 0, 'source column count reported');
   assert.equal(s.available_columns, undefined, 'full list not dumped by default');
   // opt in to the full list.
-  const full = await e.build_model({ action: 'start', name: 'inc2', source: 'events', include: ['columns'] });
+  const full = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'inc2', source: 'events', include: ['columns'] });
   assert.ok(full.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns surfaced with include columns');
   assert.ok(Array.isArray(s.recommendations) && s.recommendations.length > 0);
 });
 
 test('build_model: add_steps propagates columns; bad step is rejected without mutating the draft', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'inc', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'inc', source: 'events' });
   const a1 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [mr], include: ['columns'] });
   assert.equal(stepEffect(a1).step_index, 1);
   const cols = a1.available_columns.map((c) => c.name);
@@ -57,7 +57,7 @@ test('build_model: add_steps propagates columns; bad step is rejected without mu
 // steps array — the O(n²) token saver. include: ['steps'] restores the full list on demand.
 test('build_model: add_steps returns only the applied step by default; include steps gives the full list', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'lean', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'lean', source: 'events' });
   const a1 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
   const a2 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['currency_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   // lean by default: the applied step + a count, NOT the whole steps array.
@@ -83,7 +83,7 @@ test('build_model: add_steps returns only the applied step by default; include s
 // #1: by default add_steps returns a DIFF (what this stage changed), not the whole schema.
 test('build_model: add_steps returns a column diff by default', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'diff', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'diff', source: 'events' });
   const a1 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] });
   assert.equal(a1.available_columns, undefined, 'no full dump by default');
   assert.ok(typeof a1.column_count === 'number' && a1.column_count > 0);
@@ -104,7 +104,7 @@ test('build_model: add_steps returns a column diff by default', async () => {
 
 test('build_model: discard drops the draft; later actions error cleanly', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'inc', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'inc', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] });
   const d = await e.build_model({ action: 'discard', context_id: s.context_id });
   assert.equal(d.discarded, true);
@@ -114,10 +114,10 @@ test('build_model: discard drops the draft; later actions error cleanly', async 
 
 test('build_model: starting again in the same context resets the draft', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'first', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'first', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] });
   // reuse the same context_id: a fresh start wipes prior steps + renames.
-  const s2 = await e.build_model({ action: 'start', context_id: s.context_id, name: 'second', source: 'events' });
+  const s2 = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', context_id: s.context_id, name: 'second', source: 'events' });
   assert.equal(s2.context_id, s.context_id);
   assert.equal(s2.name, 'second');
   assert.deepEqual(s2.steps, []);
@@ -127,7 +127,7 @@ test('build_model: starting again in the same context resets the draft', async (
 
 test('build_model: schema rejects malformed actions', async () => {
   const e = engine();
-  await assert.rejects(() => e.build_model({ action: 'start' }), 'start requires name');
+  await assert.rejects(() => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start' }), 'start requires name');
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: 'ctx_deadbeef' }), 'add_steps requires steps');
   // one step is a list of one: there is no second action for it
   await assert.rejects(() => e.build_model({ action: 'add_step', context_id: 'ctx_deadbeef', step: { stage: 'limit', limit: 1 } }), /add_steps/);
@@ -137,9 +137,9 @@ test('build_model: schema rejects malformed actions', async () => {
 // Strictness: each action rejects fields that do not belong to it (no silent ignoring).
 test('build_model: schema rejects action-irrelevant fields', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'strict', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'strict', source: 'events' });
   // start must not carry a step (its first ones are `steps`).
-  await assert.rejects(() => e.build_model({ action: 'start', name: 'strict_step', source: 'events', step: mr }), /unexpected property 'step'/, 'start + step rejected');
+  await assert.rejects(() => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'strict_step', source: 'events', step: mr }), /unexpected property 'step'/, 'start + step rejected');
   // add_steps must not carry start-only fields.
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [mr], source: 'events' }), 'add_steps + source rejected');
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [mr], name: 'x' }), 'add_steps + name rejected');
@@ -147,14 +147,14 @@ test('build_model: schema rejects action-irrelevant fields', async () => {
   await assert.rejects(() => e.build_model({ action: 'preview', context_id: s.context_id, step: mr }), 'preview + step rejected');
   await assert.rejects(() => e.build_model({ action: 'materialize', context_id: s.context_id, materialized: 'view' }), 'commit + materialized rejected');
   // start MAY carry context_id (legitimate context reuse) — not rejected.
-  const reuse = await e.build_model({ action: 'start', context_id: s.context_id, name: 'reused', source: 'events' });
+  const reuse = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', context_id: s.context_id, name: 'reused', source: 'events' });
   assert.equal(reuse.context_id, s.context_id);
 });
 
 // a join on its contract: every part named — for a slowly-changing model the moment of the version.
 test('build_model: a join names its contract\'s parts and exposes the joined columns', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'pit', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'pit', source: 'events' });
   const ok = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{
     stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }],
   }], include: ['columns'] });
@@ -162,7 +162,7 @@ test('build_model: a join names its contract\'s parts and exposes the joined col
   const pv = await e.build_model({ action: 'preview', context_id: s.context_id });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'pipeline renders with the windowed join');
   // a part left out is refused by the schema: the contract is closed, every part required
-  const s2 = await e.build_model({ action: 'start', name: 'pit2', source: 'events' });
+  const s2 = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] }),
     /`steps\.0\.on` is missing required property 'time'/,
@@ -177,27 +177,27 @@ test('build_model: a join names its contract\'s parts and exposes the joined col
 // compute op=elapsed_days: the retention-day primitive is wired + input-validated at add_steps.
 test('build_model: compute elapsed_days adds an int column and requires from+to', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'ret', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'ret', source: 'events' });
   // from an event timestamp to now → a whole-24h-day column (retention day).
   const ok = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'ret_day', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }, { now: true }] } }], include: ['columns'] });
   const col = ok.available_columns.find((c) => c.name === 'ret_day');
   assert.ok(col && col.type === 'int', 'elapsed_days adds an int column');
   // missing an endpoint is rejected by schema (from+to both required).
-  const s2 = await e.build_model({ action: 'start', name: 'ret2', source: 'events' });
+  const s2 = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'ret2', source: 'events' });
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'compute', name: 'bad', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }] } }] }), 'elapsed_days needs from AND to');
 });
 
 // #2: array ops are type-checked at add_steps (not only at commit/runtime).
 test('build_model: array op on a non-array column is rejected at add_steps', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'arr', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'arr', source: 'events' });
   // array_last over a string column → rejected when the stage is ADDED, with a fix hint.
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'player_id_of_internal' }] } }] }),
     /not an array/,
   );
   // correct flow: json_parse_array (string → array) first, then array_last passes validation.
-  const s2 = await e.build_model({ action: 'start', name: 'arr2', source: 'events' });
+  const s2 = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'arr2', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [{ column: 'player_id_of_internal' }] } }] });
   const ok = await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'arr' }] } }] });
   assert.equal(ok.steps_count, 2, 'array_last on a parsed array column is accepted');
@@ -215,7 +215,7 @@ test('build_model grounds source columns to the physical relation', async () => 
   const runner = { relationColumns: async () => ({ ok: true, columns: physical.map((name) => ({ name })) }) };
   const e = settle(new Engine({ resultCards: true, catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/grounding', workspaceRoot: tempDir('gr') }) }));
 
-  const s = await e.build_model({ action: 'start', name: 'grounded', source: 'events', include: ['columns'] });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'grounded', source: 'events', include: ['columns'] });
   const names = s.available_columns.map((c) => c.name);
   assert.ok(names.includes('result_of_event_data'), 'a physically-present column is offered');
   assert.ok(!names.includes('complete_time_of_event_data'), 'a phantom catalog column is NOT offered');
@@ -237,7 +237,7 @@ test('build_model grounds source columns to the physical relation', async () => 
 // as-is, exactly as before, so offline/test behaviour is unchanged.
 test('build_model: grounding is skipped without a runner (declared columns as-is)', async () => {
   const e = engine(); // no runner
-  const s = await e.build_model({ action: 'start', name: 'noground', source: 'events', include: ['columns'] });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'noground', source: 'events', include: ['columns'] });
   assert.ok(s.available_columns.some((c) => c.name === 'complete_time_of_event_data'), 'declared column offered (cannot verify physically offline)');
   assert.equal(s.not_materialized, undefined);
 });
@@ -245,7 +245,7 @@ test('build_model: grounding is skipped without a runner (declared columns as-is
 // add_steps: several steps at once, with the per-step effect of each folded into one reply.
 test('build_model: add_steps applies several steps at once with a per-step breakdown', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'multi', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'multi', source: 'events' });
   const r = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
     mr,
@@ -266,7 +266,7 @@ test('build_model: add_steps applies several steps at once with a per-step break
 
 test('build_model: add_steps is atomic — a bad stage rolls back the whole batch', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'atomic', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'atomic', source: 'events' });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
@@ -281,7 +281,7 @@ test('build_model: add_steps is atomic — a bad stage rolls back the whole batc
 // A refused step is named by its place in `steps` — add_steps' own field — one step or several.
 test('build_model: a refused step of add_steps is steps[i], whether one is sent or several', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'field', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'field', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 5 }] });
   const bad = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_col' }, { value: 1 }] }] };
   const alone = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [bad] }).catch((err) => err);
@@ -296,7 +296,7 @@ test('build_model: a refused step of add_steps is steps[i], whether one is sent 
 // A count counts rows without an argument; a sketch (hll_*) reads one, like every other aggregate.
 test('build_model: an aggregate without an argument is a count only — a sketch is refused without one', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'hll', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'hll', source: 'events' });
   for (const fn of ['hll_init', 'hll_merge', 'hll_merge_partial']) {
     await assert.rejects(
       () => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'x', expr: { fn } }] }] }),
@@ -326,7 +326,7 @@ test('data_freshness re-queries after each index scan (reflects new data, not a 
 // ── P1: pointwise editing — edit_step mutates in place + revalidates; a fork goes back to step N ──
 test('build_model: edit_step mutates in place, and a fork of steps 1..N goes back to step N', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'edit', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'edit', source: 'events' });
   const d = s.context_id;
   await e.build_model({ action: 'add_steps', context_id: d, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }] });
   await e.build_model({ action: 'add_steps', context_id: d, steps: [mr] });
@@ -339,20 +339,20 @@ test('build_model: edit_step mutates in place, and a fork of steps 1..N goes bac
   assert.deepEqual(whole.steps[0].conditions[0].args[1], { value: 'tutorial' }, 'step 1 replaced in place');
   assert.deepEqual([ed.step.index, ed.steps_count], [1, 2], 'edit does not change the step count');
   // back to step 1: a fork of steps 1..1, the original untouched
-  const back = await e.build_model({ action: 'fork', context_id: d, name: 'edit_back', after: 1, include: ['steps'] });
+  const back = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: d, name: 'edit_back', after: 1, include: ['steps'] });
   assert.deepEqual(back.steps.map((x) => [x.index, x.stage]), [[1, 'where']]);
   assert.equal(e.ctxs.get(d).state.draft.stages.length, 2, 'the original keeps its steps');
   // the actions that moved steps around are no actions of the tool
   for (const action of ['insert_step', 'delete_step', 'truncate']) await assert.rejects(() => e.build_model({ action, context_id: d, index: 1, after: 1 }), /invalid input/, action);
   // out-of-range index/after are rejected.
   await assert.rejects(() => e.build_model({ action: 'edit_step', context_id: d, index: 9, step: mr }), /out of range/);
-  await assert.rejects(() => e.build_model({ action: 'fork', context_id: d, name: 'edit_far', after: 9 }), /out of range/);
+  await assert.rejects(() => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: d, name: 'edit_far', after: 9 }), /out of range/);
 });
 
 // An edit that breaks a LATER step is rejected with that step's index; the draft is intact.
 test('build_model: an edit breaking a downstream step reports the step index, draft intact', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'brk', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'brk', source: 'events' });
   const d = s.context_id;
   await e.build_model({ action: 'add_steps', context_id: d, steps: [mr] }); // step 1: funnel exposes reached_a/completed
   await e.build_model({ action: 'add_steps', context_id: d, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'completed' }, { value: true }] }] }] }); // step 2 uses 'completed'
@@ -369,14 +369,14 @@ test('build_model: an edit breaking a downstream step reports the step index, dr
 // fork branches a NEW draft from a prefix WITHOUT touching the original.
 test('build_model: fork branches a new draft from step N; original untouched', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'orig', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'orig', source: 'events' });
   const d = s.context_id;
   await e.build_model({ action: 'add_steps', context_id: d, steps: [mr] });
   await e.build_model({ action: 'add_steps', context_id: d, steps: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   // a fork is a new thing with a name of its own: one without a name is refused, as the
   // retentioneering builder's fork is
-  await assert.rejects(() => e.build_model({ action: 'fork', context_id: d, after: 1 }), (err) => err.stage === 'validate' && /'name'/.test(err.message));
-  const fk = await e.build_model({ action: 'fork', context_id: d, name: 'variant', after: 1 });
+  await assert.rejects(() => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: d, after: 1 }), (err) => err.stage === 'validate' && /'name'/.test(err.message));
+  const fk = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id: d, name: 'variant', after: 1 });
   assert.notEqual(fk.context_id, d, 'fork is a NEW draft');
   assert.equal(fk.name, 'variant', 'under the name the call gives it');
   assert.equal(fk.copied_steps, 1);
@@ -396,7 +396,7 @@ test('build_model: fork branches a new draft from step N; original untouched', a
 // request they are now where the action takes it.
 test('build_model: include is refused on preview, materialize and discard', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'flags', source: 'events', steps: [mr] });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'flags', source: 'events', steps: [mr] });
   for (const action of ['preview', 'materialize', 'discard']) {
     for (const include of [['columns'], ['steps']]) {
       await assert.rejects(() => e.build_model({ action, context_id, include }), /invalid input/, `${action} with ${include}`);
@@ -407,7 +407,7 @@ test('build_model: include is refused on preview, materialize and discard', asyn
   }
   // the earlier include_* flags are no fields of a fork either: it says what it shows with include
   for (const flag of ['include_columns', 'include_steps']) {
-    await assert.rejects(() => e.build_model({ action: 'fork', context_id, name: 'flag_fork', after: 1, [flag]: true }), /invalid input.*unexpected property/, flag);
+    await assert.rejects(() => e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'fork', context_id, name: 'flag_fork', after: 1, [flag]: true }), /invalid input.*unexpected property/, flag);
   }
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 1, 'the refused calls changed nothing');
 });
@@ -415,11 +415,11 @@ test('build_model: include is refused on preview, materialize and discard', asyn
 // P3: a one_per_match funnel warns to filter completed=true (counts all starts otherwise).
 test('build_model: one_per_match funnel warns to filter completed', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'opm', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'opm', source: 'events' });
   const a = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ ...mr, rows: 'one_per_match' }] });
   assert.ok(stepNotes(a).some((r) => /one_per_match/.test(r) && /completed/.test(r)), 'warns that one_per_match counts all starts unless completed is filtered');
   // one_per_partition (default) does NOT raise the completed warning.
-  const s2 = await e.build_model({ action: 'start', name: 'opp', source: 'events' });
+  const s2 = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'opp', source: 'events' });
   const a2 = await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [mr] });
   assert.ok(!stepNotes(a2).some((r) => /one_per_match/.test(r)), 'no one_per_match warning for one_per_partition');
 });
@@ -445,7 +445,7 @@ test('drill_result reads only a drawn task, by the path and level of its card �
 
 /** Start a draft over `source` and add one step to it (a refusal throws). */
 async function addOne(e, source, stage) {
-  const s = await e.build_model({ action: 'start', name: 'guard_step', source });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'guard_step', source });
   return e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [stage] });
 }
 
@@ -551,7 +551,7 @@ test('_buildPipeline: dry_run returns SQL without building', async () => {
 // group key is never dropped by leaving keep out
 test('build_model: an unpivot without keep is refused, naming keep', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'unp', source: 'events', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'u', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'unp', source: 'events', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'u', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unpivot', columns: ['n', 'u'], name_column: 'm', value_column: 'v' }] }),
     /keep/,

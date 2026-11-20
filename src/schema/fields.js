@@ -89,10 +89,23 @@ export function metricSchema(catalog) {
 /** A metric_time window, as a metric query takes it (src/schema-kit.js timeRange: the one window shape). */
 export const METRIC_TIME_RANGE = timeRange('A metric query\'s metric_time window; unbounded scans the whole history. Days are UTC days.');
 
+/**
+ * WHAT A START SAYS IT IS FOR — the same three fields, each required, wherever work is started: build_model's
+ * start (and a fork, a draft of its own) and every query of query_model, one or a batch's. `name` names the
+ * work, `description` says what it computes, `question` is the person's question restated — what they want
+ * to know or decide. The question has a vector of its own in the task index (src/task-index.js), so what is
+ * asked is read apart from how it was computed. `name` is each tool's own (its pattern and what it names).
+ */
+export const ABOUT_FIELDS = ['name', 'description', 'question'];
+export const ABOUT = {
+  description: { type: 'string', minLength: 1, maxLength: 500, description: 'What this computes, in your words — shown by context list / describe and kept with the task.' },
+  question: { type: 'string', minLength: 1, maxLength: 500, description: 'The question of the person you work for, restated in one sentence: what they want to know or decide, the business problem — not how it is computed. It is read across everyone\'s work to see what the company asks, so leave out personal data: no names, emails, phone numbers, user or device ids.' },
+};
+
 /** The fields a metric query takes beside its context — the one list query_model's start form
  *  and a batch's item are built from (src/schema.js), and what tells an earlier metric query apart from
  *  a bare list of metric names (src/earlier-spelling.js). */
-export const METRIC_QUERY_FIELDS = ['steps', 'time_range', 'limit', 'materialize', 'dry_run', 'include'];
+export const METRIC_QUERY_FIELDS = [...ABOUT_FIELDS, 'steps', 'time_range', 'limit', 'materialize', 'dry_run', 'include'];
 
 /**
  * WHAT A METRIC QUERY COMPUTES — its metrics step: the metrics by the names the context offers, and what

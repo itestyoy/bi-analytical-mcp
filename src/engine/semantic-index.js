@@ -13,6 +13,7 @@ import { SUPPORTED_DIALECTS } from '../dialects/index.js';
 import { memoryView } from '../engine/helpers.js';
 import { REFS, refAt, refColumns } from '../schema/refs.js';
 import { keyRef, keyView } from './value-index-views.js';
+import { keyId, keyPath, parseKeyId, percentilesOf, KEY_STALE_MS } from '../complex-keys.js';
 
 /** The fields of a view that are its ref's (the rest — paging, include — are what the view reads). */
 const REF_KEYS = new Set(Object.values(REFS).flatMap((r) => r.fields));
@@ -45,7 +46,7 @@ export const semanticIndexMethods = {
     // — the generalizable technique to adapt it to a novel question.
     return {
       ...r,
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload or a pipeline_payload is a build_model start request: build_model({ request: <payload> }) starts the build with its steps (a semantic_payload\'s last, its semantic_model step) — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question — its name, description and question too: they are the recipe\'s, write the person\'s own. A semantic_payload or a pipeline_payload is a build_model start request: build_model({ request: <payload> }) starts the build with its steps (a semantic_payload\'s last, its semantic_model step) — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
     };
   },
 
@@ -130,7 +131,7 @@ export const semanticIndexMethods = {
     }
     if (input.event) return this._indexEvent(input);
     if (input.column) return this._indexColumn(input);
-    if (input.property) return this._indexProperty(input);
+    if (input.property) return input.field !== undefined ? this._indexKey(input) : this._indexProperty(input);
     if (input.bundle !== undefined && input.bundle !== false) return this._indexBundle(input);
     if (input.search) return this._indexSearch(input);
     if (input.notes) return this.notes.list({ limit: input.limit ?? 50, offset: input.offset ?? 0, about: input.about });
@@ -573,7 +574,82 @@ export const semanticIndexMethods = {
         if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { source: '${propFact}', bundle: '<app>' } }) or include: ['coverage'].`];
       }
     }
+    // THE KEYS OF ITS ELEMENTS, as the data shows them (src/complex-keys.js) — each a view of its own; a
+    // text the data shows holding JSON has them too
+    const keys = this._complexKeys(propFact, propName);
+    if (complex || keys.length) {
+      if (!complex) out.holds_json = true;
+      const named = keys.filter((k) => k.field !== '');
+      const elements = keys.find((k) => k.field === '');
+      if (named.length) {
+        out.keys = named;
+        out.recommendations = [`Its ${complex ? 'elements hold' : 'JSON holds'} ${named.length} key(s), as the data shows them: ${named.slice(0, 8).map((k) => k.field).join(', ')}${named.length > 8 ? ', …' : ''} — one's values, distinct count and coverage: semantic_index({ request: { source: '${propFact}', property: '${p}', field: '${named[0].field}' } }).`, ...out.recommendations.slice(0, 3)];
+      }
+      if (elements) out.element_values = { ...elements, top: this.valueIndex.sampleValues(propFact, keyId(propName, ''), 10) };
+    }
     this.notes.attach(out, { kind: 'property', source: propFact, name: p });
+    return out;
+  },
+
+  /** A complex property's keys as the index holds them: each one's counts, a number's summary, whether it is still seen. */
+  _complexKeys(source, property) {
+    const now = Date.now();
+    return this.valueIndex.keys(source, property).map((k) => {
+      const id = keyId(property, k.field);
+      const st = this.valueIndex.stats(source, id);
+      const numeric = k.numeric?.count && k.elements && k.numeric.count >= 0.9 * k.elements
+        ? { count: k.numeric.count, min: k.numeric.min, max: k.numeric.max, ...(percentilesOf(k.numeric.quantiles) ? { percentiles: percentilesOf(k.numeric.quantiles) } : {}) }
+        : null;
+      return {
+        field: k.field, path: keyPath(property, k.field),
+        values_counted: k.elements, rows_with_it: st?.totalCount ?? null, distinct_count: st?.distinctCount ?? null,
+        top_values: this.valueIndex.sampleValues(source, id, 3),
+        ...(numeric ? { numeric } : {}),
+        active: k.lastSeen == null || now - k.lastSeen < KEY_STALE_MS,
+        ...(k.lastSeen != null ? { last_seen: new Date(k.lastSeen).toISOString() } : {}),
+        ...(k.firstSeen != null ? { first_seen: new Date(k.firstSeen).toISOString() } : {}),
+      };
+    });
+  },
+
+  /** { source, property, field }: one key of a complex property's elements — its values, coverage per event and app, a number's summary. */
+  _indexKey(input) {
+    const c = this.catalog;
+    const source = input.source; const p = String(input.property); const field = String(input.field);
+    if (c.attributeKind(source, p) !== 'property') throw this._notOf(source, p, 'property');
+    const complex = c.isComplexEventProp(p, source);
+    const keys = this._complexKeys(source, p);
+    if (!complex && !keys.length) throw new ToolError(`'${p}' of '${source}' is no array or struct, and the index has seen no JSON in it: it has no keys of its own — its view is semantic_index({ request: { source: '${source}', property: '${p}' } }).`, { stage: 'validate', field: 'field' });
+    const key = keys.find((k) => k.field === field);
+    if (!key) {
+      const named = keys.filter((k) => k.field !== '').map((k) => k.field);
+      throw new ToolError(`'${field}' is no key the index has seen in the elements of '${p}'.${named.length ? ` Its keys: ${named.join(', ')}.` : ' The index has seen no keys there yet (the background value index may not have run).'}`, { stage: 'validate', field: 'field' });
+    }
+    const id = keyId(p, field);
+    const listed = this.indexViews.valueListing(source, id, input);
+    const elements = key.values_counted;
+    const value_stats = { ...listed.value_stats, values_counted: elements, top_share: listed.value_stats.top_freq != null && elements ? Math.round((listed.value_stats.top_freq / elements) * 1000) / 1000 : null };
+    const { nulls, coverage } = this.indexViews.nullCoverage(source, id, { eventScoped: true });
+    const carriers = coverage.filter((e) => e.applies);
+    const showFull = (input.include || []).includes('coverage');
+    const out = {
+      source, property: p, field, path: key.path, parent_type: c.eventPropertySpec(p, source)?.type ?? null,
+      active: key.active, ...(key.first_seen ? { first_seen: key.first_seen } : {}), ...(key.last_seen ? { last_seen: key.last_seen } : {}),
+      sample_values: listed.samples, distinct_count: value_stats.distinct_count, value_stats: { ...value_stats, rows_with_it: nulls.non_null_count, rows_without_it: nulls.null_count },
+      ...(key.numeric ? { numeric: key.numeric } : {}),
+      event_coverage: showFull ? coverage : carriers,
+      recommendations: [
+        `Values of '${key.path}' counted per element: ${listed.samples.slice(0, 5).map((v) => `'${v.value}' (${v.freq})`).join(', ') || 'none indexed yet'}${value_stats.distinct_count != null ? `; ${value_stats.distinct_count} distinct` : ''}.`,
+        complex
+          ? `Read it in a build with an unnest stage over { property: '${p}' } (one row per element), then the element's '${field}'.`
+          : `Read it in a build as { property: '${p}', field: '${field}' } (where the JSON is an object), or with an unnest stage where it is an array.`,
+        ...(key.active ? [] : [`Not seen in the data for a while (last ${key.last_seen}): the payload may no longer carry it.`]),
+      ],
+    };
+    if (c.bundleColumn(source)) {
+      const bcov = this.valueIndex.bundleCoverage(source, id);
+      if (bcov.length) out[showFull ? 'bundle_coverage' : 'bundle_coverage_summary'] = showFull ? bcov.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count })) : { populated_apps: bcov.filter((b) => b.non_null > 0).length, empty_apps: bcov.filter((b) => b.non_null === 0).length, populated: bcov.filter((b) => b.non_null > 0).map((b) => ({ bundle: b.bundle, non_null: b.non_null })) };
+    }
     return out;
   },
 
@@ -603,7 +679,8 @@ export const semanticIndexMethods = {
       throw new ToolError(`unknown app '${bundleId}'${input.source ? ` on source '${input.source}'` : ''}. Indexed apps: ${list(known)}`, { stage: 'validate', field: 'bundle' });
     }
     const block = (hit) => {
-      const cov = this.valueIndex.bundlePropertyCoverage(hit.source, bundleId);
+      // (a key of a complex property's elements is no property of the catalog: the property stands for it)
+      const cov = this.valueIndex.bundlePropertyCoverage(hit.source, bundleId).filter((r) => !parseKeyId(r.property));
       const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ ...keyRef(c, hit.source, r.property), non_null: r.non_null }));
       const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
       return {

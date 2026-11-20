@@ -244,7 +244,7 @@ test('a path by an event property, its events renamed by a value (with names of 
   const expected = counts(withLevel.map((x) => (x.e !== 'level_completed' || x.r == null ? x.e : x.r === 'win' ? 'level_won' : `level_completed_${x.r}`)));
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'renamed by value: the named value under its name, any other as <event>_<value>, every other event as it was');
   // an unknown parameter is refused before anything runs — by the pipeline that prepares the rows
-  await assert.rejects(engine.build_model({ action: 'start', name: 'x_rows', source: 'events', steps: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])] }), /invalid input|no_such/, 'an unknown parameter');
+  await assert.rejects(engine.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'x_rows', source: 'events', steps: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])] }), /invalid input|no_such/, 'an unknown parameter');
 });
 
 // A window in a timezone, and events made from an event's parameters by conditions: one start.

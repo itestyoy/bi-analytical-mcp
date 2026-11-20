@@ -6,6 +6,9 @@ import { refForms, REF_PLACES } from './refs.js';
 import { aboutSchema, aboutDefs } from './memory.js';
 import { timeRange } from '../schema-kit.js';
 
+/** Which of a task's two vectors is compared (src/task-index.js SPACES). */
+const TASK_SPACE = { enum: ['question', 'computation'], default: 'question', description: 'question (the default): by the person\'s question each task answers — what the company asks; computation: by what each computed.' };
+
 /**
  * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the
  * vocabulary it accepts, so "two views at once", "limit does not apply here" and "this source has
@@ -52,7 +55,9 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     // an event name belongs to the source that declares it, so a pairing that source does not have cannot be written down
     source_event: refView('source_event', '{ source, event }', () => 'The properties that event carries.'),
     source_column: refView('source_column', '{ source, column }', () => 'One column: its meaning, values, NULL coverage.', paging),
-    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app.', { ...paging, ...include }),
+    // a key of a complex property's elements (src/complex-keys.js), as the data shows it — the property's
+    // view lists its keys
+    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app; with field, one key of an array\'s or a struct\'s elements (the property\'s view lists them).', { ...paging, ...include, field: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]{0,127}$', description: 'A key of the elements, as the property\'s keys list it.' } }),
   };
 
   // The single-view fields, written once.
@@ -107,7 +112,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
       guide: field.guide,
     }),
     // what has been asked of this server (src/task-index.js): a record of the questions, never a way to their data
-    view('{ tasks }', 'What has been asked of this server: the past tasks most like a phrase (what each computed, when and how), or the themes of a period — never their data.', ['tasks'], {
+    view('{ tasks }', 'What has been asked of this server: the past tasks most like a phrase (the person\'s question, what each computed, when and how), or the themes of a period — never their data.', ['tasks'], {
       tasks: {
         anyOf: [
           {
@@ -116,6 +121,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
               search: { type: 'string', minLength: 1, description: 'What to find tasks like, in any language.' },
               time_range: timeRange('Only the tasks started within it.'),
               limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 10.' },
+              by: TASK_SPACE,
             },
           },
           {
@@ -126,6 +132,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
               about: { type: 'string', minLength: 1, description: 'Only the tasks like this phrase (e.g. "ad revenue"), clustered.' },
               min_similarity: { type: 'number', minimum: 0, maximum: 1, description: 'How like `about` a task must be (default 0.3 with the deployment\'s embedder, 0.1 without).' },
               clusters: { type: 'integer', minimum: 2, maximum: 20, description: 'Omitted, the number that separates them best.' },
+              by: TASK_SPACE,
             },
           },
         ],

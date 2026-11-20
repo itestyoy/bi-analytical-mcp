@@ -90,7 +90,7 @@ async function callErr(name, args) {
 
 /** A whole pipeline over MCP: start → add_steps → materialize. */
 async function mcpPipeline(source, steps, name) {
-  const s = await call('build_model', { action: 'start', name: name || `e2e_${seq++}`, source });
+  const s = await call('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: name || `e2e_${seq++}`, source });
   for (const step of steps) await call('build_model', { action: 'add_steps', context_id: s.context_id, steps: [step] });
   const built = await call('build_model', { action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
@@ -100,7 +100,7 @@ async function mcpPipeline(source, steps, name) {
 /** A semantic layer over MCP: a build whose only step is its semantic_model step, materialized in the
  *  same call, its parse read back with the tool the answer names. */
 async function mcpTask({ name, source, ...step }) {
-  const started = await call('build_model', { action: 'start', name, source, steps: [{ stage: 'semantic_model', ...step }], materialize: true });
+  const started = await call('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name, source, steps: [{ stage: 'semantic_model', ...step }], materialize: true });
   assert.ok(started.materialize?.task_id, JSON.stringify(started.materialize));
   const parsed = (await call(started.materialize.read_with, { task_ids: [started.materialize.task_id] })).results[0];
   assert.equal(parsed.parse?.ok, true, JSON.stringify(parsed.parse || parsed.error));
@@ -144,7 +144,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const r = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await call('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'cost'), 'cost');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);
@@ -192,7 +192,7 @@ test('3. the users contract joins the version valid then: 13 attributed rows —
   ]);
   assert.deepEqual({ n: num(built.rows[0].n), distinct: num(built.rows[0].rows) }, { n: 13, distinct: 13 }, 'one install version per spend row');
   // a join that names no moment is refused at the protocol boundary — the key alone would match every version
-  const s = await call('build_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
+  const s = await call('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
   const refused = await callErr('build_model', {
     action: 'add_steps', context_id: s.context_id,
     steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] });
@@ -229,7 +229,7 @@ test('4. the caller picks the ad format: 8 / 4 / 4 rows, and k1 keeps its funnel
 
 test('5. the attrs contract, enforced at the protocol boundary', opts, async (t) => {
   if (skip(t)) return;
-  const start = async () => (await call('build_model', { action: 'start', name: `e2e_${seq++}`, source: 'events' })).context_id;
+  const start = async () => (await call('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name: `e2e_${seq++}`, source: 'events' })).context_id;
   const crash = (attrs) => ({ stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, ...(attrs ? { attrs } : {}) });
 
   // (a) no attrs → refused, and the error lists the joined model's attributes — never an amount.
@@ -308,7 +308,7 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
       { name: 'crashes', type: 'simple', measure: 'crashes' },
     ],
   });
-  const r = await call('query_model', {
+  const r = await call('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks',
     context_id: ctx,
     steps: [{ stage: 'metrics', metrics: ['cost', 'evts', 'crashes'], group_by: [{ time: 'metric_time', grain: 'day' }] }],
   });
@@ -380,7 +380,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 4
 
   // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
   const slice = async (name, steps) => {
-    const d = await call('build_model', { action: 'start', name, from_task: built.task_id });
+    const d = await call('build_model', { description: 'what the test computes', question: 'what the test asks', action: 'start', name, from_task: built.task_id });
     await call('build_model', { action: 'add_steps', context_id: d.context_id, steps });
     return call('build_model', { action: 'materialize', context_id: d.context_id });
   };
@@ -409,7 +409,7 @@ test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const before = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
+  const before = await call('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
   assert.ok(near(num(before.rows[0].cost), 17.5));
   // a metric query is its steps: its metrics named outside a metrics step are no field of it, refused at
@@ -418,7 +418,7 @@ test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64
   assert.match(outside.error.message, /invalid input.*unexpected property 'metrics'/s, JSON.stringify(outside));
 
   // the new metric does not exist yet — the boundary says so rather than answering.
-  const tooEarly = await callErr('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['clicks'] }] });
+  const tooEarly = await callErr('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [{ stage: 'metrics', metrics: ['clicks'] }] });
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
   // add a second amount from the SAME source, choosing its aggregation here and now: the build's
@@ -430,7 +430,7 @@ test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64
   const grown = await call('build_model', { action: 'materialize', context_id: ctx });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 
-  const after = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost', 'clicks'] }] });
+  const after = await call('query_model', { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost', 'clicks'] }] });
   assert.equal(after.ok, true, JSON.stringify(after.error));
   assert.ok(near(num(after.rows[0].cost), 17.5), 'the original metric is unchanged');
   assert.equal(num(after.rows[0].clicks), 64);

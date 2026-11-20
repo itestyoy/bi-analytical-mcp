@@ -17,6 +17,7 @@ import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measure
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
 import { physicalColumnType, isArrayPropertyType, groundedType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
+import { isStructType } from './complex-keys.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
 export { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
@@ -142,6 +143,11 @@ export class Catalog {
         // the semantic layer reads a time column by the warehouse's data type (TIMESTAMP vs DATETIME)
         (m.data_types ||= {})[c.name] = p.dtype;
       }
+      // what a complex payload is held as, in the warehouse's own word (JSON, a text of it, a native
+      // array and its struct's fields) — the value index reads its keys by it (src/complex-keys.js)
+      const held = (name) => types.get(String(name).toLowerCase());
+      if (m.event_data_column && held(m.event_data_column)) m.event_data_type = held(m.event_data_column);
+      for (const prop of Object.values(m.properties || {})) if (prop?.column && isArrayPropertyType(prop.type) && held(prop.column)) prop.data_type = held(prop.column);
       for (const [name, prop] of Object.entries(m.properties || {})) {
         const p = prop?.column && (prop.type === 'numeric' || prop.type === 'string') ? physical(prop.column) : null;
         if (!p || !scalar(p.type)) continue;
@@ -573,6 +579,36 @@ export class Catalog {
   scalarEventProps(fact) {
     fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
+  }
+
+  /**
+   * WHERE A COMPLEX PROPERTY'S ELEMENTS ARE, AND AS WHAT: { column, key, encoding, json, struct, dtype } — its
+   * own column (key null) or a key of the event-data payload; `encoding` native (a warehouse array or struct) or
+   * json; `json` whether the warehouse holds it as its JSON type (false: a text of JSON; null: not known — the
+   * SQL then reads either); `struct` a native ONE
+   * struct, not an array of them (a JSON value says per row which it is); `itemsJson` a native array of JSON
+   * values (its elements read as JSON; `json` then says so of them); `dtype` the warehouse's type, the
+   * declared one until grounding reads it (a native struct's fields are read off it). Also asked of a text
+   * property the value index finds holding JSON (src/complex-keys.js holdsJson).
+   */
+  complexStorage(name, fact) {
+    fact = this._fact(fact);
+    const spec = this.eventPropertySpec(name, fact);
+    if (!spec) return null;
+    const dtype = spec.column ? (spec.data_type || null) : (this.models[fact]?.event_data_type || null);
+    const encoding = spec.column ? (spec.encoding || 'json') : 'json';
+    // a native array of JSON values (BigQuery ARRAY<JSON>, DuckDB JSON[]): its elements are JSON, read as a JSON
+    // array's are (their keys, a key's value) — a JSON value casts to no text
+    const itemsJson = encoding === 'native' && /^\s*(ARRAY\s*<\s*JSON\s*>|JSON\s*\[\d*\])\s*$/i.test(String(dtype || ''));
+    return {
+      column: spec.column || this.eventDataColumn(fact),
+      key: spec.column ? null : name,
+      encoding,
+      itemsJson,
+      json: itemsJson || (dtype ? /^jsonb?$/i.test(String(dtype).trim()) : null),
+      struct: encoding === 'native' && (dtype ? isStructType(dtype) : String(spec.type || '').toLowerCase() === 'struct'),
+      dtype,
+    };
   }
 
   /** COMPLEX (array/struct) event properties (the { property } leaf) — only usable via prepare stages. */

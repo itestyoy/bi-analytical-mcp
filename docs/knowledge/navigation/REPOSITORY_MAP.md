@@ -34,7 +34,7 @@ Fast entrypoint for the repository: one line per area.
 | Pipelines | `src/pipeline.js`, `src/pipeline/`, `src/match-recognize.js`, `src/python-model.js` | Stages, funnels, python stages, and reads of stored tables in the same stages (`renderRead`) |
 | dbt | `src/dbt/` | dbt client (v1 / v2), MetricFlow kept warm (`metricflow-server.js`), environments and their pinned specs |
 | Dialects | `src/dialects/` | DuckDB and BigQuery SQL |
-| Store | `src/store.js`, `src/error-log.js`, `src/memory.js`, `src/value-index*.js` | SQLite store: tasks, value index, memory, errors |
+| Store | `src/store.js`, `src/error-log.js`, `src/memory.js`, `src/value-index*.js`, `src/complex-keys.js` | SQLite store: tasks, value index (with the keys of complex properties), memory, errors |
 | Guides | `src/guide.js`, `src/research-guides.js`, `src/python-guide.js`, `src/recipes.js`, `config/recipes.json` | What `semantic_index({ guide | recipe })` serves |
 | Apps views | `src/apps/` | Result and retentioneering cards (vite build, checked in) |
 | Feature | `src/retentioneering/`, `python/retentioneering_*.py` | Path analysis feature |

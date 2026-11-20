@@ -73,7 +73,7 @@ const add = (e, context_id, stage) => e.build_model({ action: 'add_steps', conte
 const materialize = (e, context_id) => e.build_model({ action: 'materialize', context_id });
 
 async function startedDraft(e, name = 'seg') {
-  const { context_id } = await e.build_model({ action: 'start', name, source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name, source: 'events' });
   await add(e, context_id, AGG);
   await add(e, context_id, PY_STAGE);
   return context_id;
@@ -198,7 +198,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const started = await e.build_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
+  const started = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'slice', source: 'events', materialized: 'view' });
   const { context_id } = started;
   // a start builds nothing yet: it says what it WILL be built as, never that it is built
   assert.deepEqual([started.materializes_as, 'materialized' in started], ['view', false]);
@@ -259,7 +259,7 @@ test('no build holds its call — a python build and an SQL build both answer wi
   runner.finish(true);
   await taskResult(e, out.task_id);
 
-  const { context_id: sql } = await e.build_model({ action: 'start', name: 'grace_sql', source: 'events' });
+  const { context_id: sql } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'grace_sql', source: 'events' });
   await add(e, sql, AGG);
   const sqlStarted = await materialize(e, sql);
   assert.ok(isStartedTask(sqlStarted), 'an SQL build is a task too');

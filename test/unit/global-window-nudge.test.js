@@ -39,7 +39,7 @@ const DERIVE = { stage: 'compute', name: 'price', expr: { property: 'price_in_us
 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'win', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'win', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [DERIVE] });
   await e.build_model({ action: 'add_steps', context_id, steps: [AGG] });
   const out = await e.build_model({
@@ -54,7 +54,7 @@ test('a window with no partition_by is named as a global window, with the aggreg
 
 test('the same window PER GROUP says nothing — a partition is what a window is for', async () => {
   const e = engine();
-  const { context_id } = await e.build_model({ action: 'start', name: 'win2', source: 'events' });
+  const { context_id } = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'win2', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [DERIVE] });
   const out = await e.build_model({
     action: 'add_steps', context_id,

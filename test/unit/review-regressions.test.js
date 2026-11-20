@@ -399,7 +399,7 @@ test('an attribute of a model no source of the context reaches is refused here, 
     metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   await assert.rejects(
-    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['rows'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
+    () => e.query_model({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['rows'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
     /needs model 'crashlytics', which this context does not read/,
   );
   // …while the REACHABLE model of the same context still resolves under its relationship (the fix
@@ -443,12 +443,12 @@ models:
 // instead of a stage-time refusal at add_steps.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
-  const s = await e.build_model({ action: 'start', name: 'items', source: 'events' });
+  const s = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
   const ok = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] });
   assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
-  const agg = await e.build_model({ action: 'start', name: 'items2', source: 'events' });
+  const agg = await e.build_model({ description: 'what the test computes', question: 'what the test asks', action: 'start', name: 'items2', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] }),

@@ -79,13 +79,14 @@ test('a stage that makes a new table is refused in a read, naming the stages a r
   // (above), for a caller past the schema (a card's drill)
   const v = makeValidators(buildSchemas(catalog));
   const q = (request) => validateInput(v.query_model, request);
-  assert.equal(q({ context_id: 'abcdef123456', steps: [{ stage: 'limit', limit: 3 }] }).ok, true);
-  assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
-  assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'nope' }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  assert.equal(q({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [{ stage: 'limit', limit: 3 }] }).ok, true);
+  assert.match(q({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  assert.match(q({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [{ stage: 'nope' }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
   // no steps is a read of the table as it is: the field is left out, never an empty list
-  assert.match(q({ context_id: 'abcdef123456', steps: [] }).errors.join(' | '), /at least 1 item/);
-  assert.equal(q({ context_id: 'abcdef123456' }).ok, true);
-  assert.equal(q({ context_id: 'abcdef123456', queries: [{ steps: [{ stage: 'limit', limit: 3 }] }, { limit: 5 }] }).ok, true);
+  assert.match(q({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [] }).errors.join(' | '), /at least 1 item/);
+  assert.equal(q({ name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456' }).ok, true);
+  assert.equal(q({ context_id: 'abcdef123456' }).ok, false, 'a query says what it is for');
+  assert.equal(q({ context_id: 'abcdef123456', queries: [{ name: 'test_query', description: 'what the test computes', question: 'what the test asks', steps: [{ stage: 'limit', limit: 3 }] }, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', limit: 5 }] }).ok, true);
 });
 
 // The steps after a metric query's metrics step are the same read (STAGE_PLACES.metric_result takes the
@@ -122,11 +123,11 @@ test('a stored table has no source: an event property, a ref and a declared rela
   // …and the read's tool, whose one expression is built for its place, has no such leaf: its schema
   // refuses it before the place is asked
   const v = makeValidators(buildSchemas(catalog));
-  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
+  assert.equal(validateInput(v.query_model, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
   // …while a window's { entity } passes it — after a metrics step it names the result's column a group_by
   // item gave — and a read of a stored table refuses it when the step is built (above)
-  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, true);
-  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: ['user_id'], order_by: [{ key: 'day' }] } } }] }).ok, true);
+  assert.equal(validateInput(v.query_model, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, true);
+  assert.equal(validateInput(v.query_model, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: ['user_id'], order_by: [{ key: 'day' }] } } }] }).ok, true);
 });
 
 // input-validation guards (allowed by the test rules): unsafe input is rejected, a name not a column of
@@ -157,7 +158,7 @@ test('a read written as an earlier `transform` is refused; its converter (for wh
     { stage: 'aggregate', group_by: ['day'], measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] },
   ];
   assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', transform }).ok, false);
-  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps }).ok, true, 'the steps it is now are taken');
+  assert.equal(validateInput(v.query_model, { name: 'test_query', description: 'what the test computes', question: 'what the test asks', context_id: 'abcdef123456', steps }).ok, true, 'the steps it is now are taken');
   // having is a where after the aggregate, order_by its stage, then a second level; a group_by alone counts its rows
   assert.deepEqual(transformStages({ ...transform, having: [{ column: 'rev', op: 'gt', value: 10 }], order_by: [{ key: 'rev', direction: 'desc' }], then: { group_by: ['rev'] } }), [
     ...steps,

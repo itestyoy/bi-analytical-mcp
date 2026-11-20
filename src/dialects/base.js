@@ -119,6 +119,8 @@ export class Dialect {
   keyValueList(_pairs) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
   /** A field of a struct a join bound (`keyValueList`'s k / v). */
   structOf(ref, field) { return `${ref}.${field}`; }
+  /** A number that is finite, else missing (a word a cast reads as NaN or ±infinity — 'nan', 'inf' — is no number). */
+  finiteNumber(_x) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
   /** QUANTILE_POINTS + 1 quantile points of a numeric expression, as JSON text of an array. */
   quantilesJson(_x, _points) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
   /** Up to `n` values of a text expression where `cond` holds, as JSON text of an array. */

@@ -81,3 +81,12 @@ test('MetricFlow\'s CLI frame around its reason is left out: the spinner, its lo
   assert.match(msg, /Unable to resolve group-by item/);
   assert.doesNotMatch(msg, /⠋|metricflow\.log|github\.com\/dbt-labs\/metricflow/);
 });
+
+// dbt writes its rows with Python's json, which prints a float NaN / ±infinity bare: a key's MIN over a
+// text a cast reads as NaN ('nan') made the whole answer unparseable and it was read as no rows at all
+test('a NaN or an infinity dbt printed reads as a missing value, never as an empty answer', async () => {
+  const { parseShowJson, withoutNonFinite } = await import('../../src/dbt/output.js');
+  const out = '12:00:00  Running with dbt=1.12\n{"show": [{"k": "word_name", "num_min": NaN, "num_max": Infinity, "lo": -Infinity, "text": "NaN Infinity \\" NaN"}, {"k": "x", "num_min": 1.5}]}\n';
+  assert.deepEqual(parseShowJson(out), [{ k: 'word_name', num_min: null, num_max: null, lo: null, text: 'NaN Infinity " NaN' }, { k: 'x', num_min: 1.5 }]);
+  assert.equal(withoutNonFinite('[NaN, "NaN"]'), '[null, "NaN"]');
+});

@@ -175,3 +175,20 @@ test('a delta adds to what is kept; a key the payload never had is counted over 
   assert.equal(line.min, Math.min(...lines));
   assert.equal(line.max, Math.max(...lines));
 });
+
+test('a text that reads as a non-finite number (Infinity, nan) keeps every value of the scan', opts, async (t) => {
+  if (skip(t)) return;
+  // a report whose frames name files a number cast reads as ±Infinity / NaN: the values of the whole scan are kept
+  await wh.exec(`INSERT INTO fct_crashlytics_events SELECT * REPLACE (event_time + INTERVAL 31 DAY AS event_time, '[{"file":"Infinity","line":5,"in_app":true},{"file":"nan","line":6,"in_app":false},{"file":"-inf","line":7,"in_app":false}]' AS stack_frames_of_event_data) FROM fct_crashlytics_events WHERE event_name = 'fatal_crash' ORDER BY event_time LIMIT 1`);
+  await indexer.refresh();
+  for (const key of ['file', 'line', 'in_app']) {
+    assert.deepEqual(stored('crashlytics', 'stack_frames_of_event_data', key), await truthValues('fct_crashlytics_events', 'stack_frames_of_event_data', key), key);
+  }
+  // a number's summary counts the numbers only — a word is no number, whatever a cast makes of it
+  const lines = Object.entries(await truthValues('fct_crashlytics_events', 'stack_frames_of_event_data', 'line')).flatMap(([v, n]) => Array(n).fill(Number(v)));
+  const line = index.keys('crashlytics', 'stack_frames_of_event_data').find((k) => k.field === 'line').numeric;
+  assert.equal(line.count, lines.length);
+  assert.equal(line.max, Math.max(...lines));
+  const file = index.keys('crashlytics', 'stack_frames_of_event_data').find((k) => k.field === 'file');
+  assert.equal(file.numeric?.count ?? 0, 0, 'no file name is counted as a number');
+});

@@ -107,12 +107,36 @@ function exactIntegers(_key, value, context) {
 }
 
 /**
+ * A NON-FINITE NUMBER IS A MISSING ONE. dbt writes its rows with Python's json, which prints a float NaN
+ * or ±infinity as a bare NaN / Infinity / -Infinity — no JSON — and the whole answer failed to parse, read
+ * as no rows at all (a key's values lost in the value index: MAX(SAFE_CAST('nan' AS FLOAT64)) is NaN). Those
+ * tokens, outside a string, become null; the text inside strings is left as it is.
+ */
+export function withoutNonFinite(text) {
+  let out = ''; let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (ch === '\\') { out += text[i + 1] ?? ''; i += 1; } else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    const m = /^(-?Infinity|NaN)/.exec(text.slice(i, i + 9));
+    if (m) { out += 'null'; i += m[1].length - 1; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+/**
  * Parse `dbt show --output json` stdout: log lines, then the rows. dbt 1.x prints them as
  * { "show": [ {col:val}, ... ] }; dbt v2 prints the bare array [ {col:val}, ... ]. Both are read.
  */
 export function parseShowJson(stdout) {
   const cleaned = stripAnsi(stdout);
-  const tryParse = (from, to) => { try { return JSON.parse(cleaned.slice(from, to + 1), exactIntegers); } catch { return undefined; } };
+  const parse = (text) => { try { return JSON.parse(text, exactIntegers); } catch { return undefined; } };
+  const tryParse = (from, to) => { const text = cleaned.slice(from, to + 1); return parse(text) ?? parse(withoutNonFinite(text)); };
   const obj = cleaned.indexOf('{"show"') >= 0 ? tryParse(cleaned.indexOf('{"show"'), cleaned.lastIndexOf('}')) : undefined;
   if (Array.isArray(obj?.show)) return obj.show;
   // a JSON array of rows on a line of its own (v2), or the 1.x object spread over several lines

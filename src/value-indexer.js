@@ -244,6 +244,7 @@ export class BackgroundIndexer {
       const why = await scan(g, { record: g.props.length === 1 });
       if (!why || g.props.length === 1) continue;
       this.logger?.(`sync #${runId} complex-coverage '${fact}': the batch of ${g.props.length} failed (${why.split('\n')[0]}) — each property on its own`);
+      this.index.recordRunNote?.(runId, `complex-coverage batch of '${fact}' failed, scanned again one property at a time [${g.props.map((p) => p.name).join(', ')}]: ${why}`);
       for (const p of g.props) await scan({ ...g, props: [p] }, { record: true });
     }
     return { props: done, values: written };
@@ -261,7 +262,6 @@ export class BackgroundIndexer {
    * their keys found, their and their keys' coverage, their keys' values, their examples — and written.
    */
   async _complexGroup(runId, fact, g, { d, ref, evCol, bundleCol, timeCol, windowCond }) {
-    const now = Date.now();
     const where = (cond) => (cond ? ` WHERE ${cond}` : '');
     const valuesOf = new Map();
 
@@ -291,7 +291,10 @@ export class BackgroundIndexer {
       }
       if (skipped.length) this.index.recordRunNote?.(runId, `complex keys not read as fields (not a plain name): ${skipped.slice(0, 20).join(', ')}${skipped.length > 20 ? ', …' : ''}`);
     }
-    const known = (p) => new Set(this.index.keys(fact, p.name).map((k) => k.field));
+    // a kept key whose values were never counted (its rows carry it, no value stored — an answer lost to an
+    // earlier version) is counted again over the whole history, as a new one is
+    const unfilled = (p, k) => { const id = keyId(p.name, k); const kept = this.index.keys(fact, p.name).find((x) => x.field === k); return !kept?.elements && (this.index.stats?.(fact, id)?.totalCount || 0) > 0; };
+    const known = (p) => new Set(this.index.keys(fact, p.name).map((k) => k.field).filter((k) => !unfilled(p, k)));
     // the keys counted here: those found, and — on a delta — every key already kept (its rows without it
     // add to its NULLs), but of a native struct only the fields its type has now (one the type dropped
     // cannot be read); a key first seen in a delta is counted over the whole history on its own
@@ -310,8 +313,9 @@ export class BackgroundIndexer {
     const late = g.props.filter((p) => freshKeys.get(p.name).length);
     const full = late.length ? await this._complexCounts(fact, late, freshKeys, windowCond, { d, ref, evCol, bundleCol, timeCol, withExamples: false }) : null;
     // a key is seen when some element holds a value of it (a native struct's field the data stopped filling
-    // goes inactive, as a JSON key the payload dropped does)
-    const seenAt = (c) => ((c?.elements || 0) > 0 ? now : null);
+    // goes inactive, as a JSON key the payload dropped does) — at the moment it is written, so a key first
+    // written now is never last seen before it was first seen
+    const seenAt = (c) => ((c?.elements || 0) > 0 ? Date.now() : null);
 
     for (const p of g.props) {
       const cov = counted.coverage.get(p.name);
@@ -387,7 +391,7 @@ export class BackgroundIndexer {
         return `SELECT ${p.i} AS p, ${d.structOf(kv.el, 'k')} AS k, ${d.structOf(kv.el, 'v')} AS v FROM ${ref} ${e.join} ${kv.join}${where}`;
       });
       const kvRows = `(${branches.join(' UNION ALL ')}) AS kvrows`;
-      const num = d.fromText('v', 'float');
+      const num = d.finiteNumber(d.fromText('v', 'float'));
       const top = d.approxTopK('v', this.maxValues);
       const statRows = await this._rows(`SELECT p, k, ${top ? `${top} AS top, ` : ''}${d.approxCountDistinct('v')} AS dc, COUNT(v) AS nn, COUNT(${num}) AS num_n, MIN(${num}) AS num_min, MAX(${num}) AS num_max, ${d.quantilesJson(num, QUANTILE_POINTS)} AS q FROM ${kvRows} WHERE v IS NOT NULL GROUP BY p, k`, 100000);
       const tops = new Map();
@@ -395,6 +399,12 @@ export class BackgroundIndexer {
         const exact = await this._rows(`SELECT p, k, v, n FROM (SELECT p, k, v, COUNT(*) AS n FROM ${kvRows} WHERE v IS NOT NULL GROUP BY p, k, v) AS counted QUALIFY ROW_NUMBER() OVER (PARTITION BY p, k ORDER BY n DESC, v) <= ${this.maxValues}`, 1000000);
         for (const r of exact) { const id = `${r.p}\u0000${r.k}`; if (!tops.has(id)) tops.set(id, []); tops.get(id).push({ value: String(r.v), freq: Number(r.n) }); }
       }
+      // keys the coverage found carried, and no row of their values: the answer was lost, not empty — fail
+      // the group (written nothing, scanned again next sync) rather than store keys with no values
+      const carried = keyCols.filter(({ p, k }) => withKeys.includes(p) && keysOf.get(p.name).includes(k) && (keys.get(`${p.name}\u0000${k}`)?.cov.total || 0) > 0);
+      const answered = new Set(statRows.map((r) => `${r.p}\u0000${r.k == null ? '' : r.k}`));
+      const lost = carried.filter(({ p, k }) => !answered.has(`${p.i}\u0000${k}`));
+      if (lost.length) throw new Error(`the values of ${lost.length} key(s) the coverage found came back as no rows (${lost.slice(0, 5).map(({ p, k }) => keyPath(p.name, k)).join(', ')}${lost.length > 5 ? ', …' : ''}) — not written`);
       for (const r of statRows) {
         const p = withKeys.find((x) => x.i === Number(r.p));
         if (!p) continue;

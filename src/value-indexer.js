@@ -261,7 +261,6 @@ export class BackgroundIndexer {
    * their keys found, their and their keys' coverage, their keys' values, their examples — and written.
    */
   async _complexGroup(runId, fact, g, { d, ref, evCol, bundleCol, timeCol, windowCond }) {
-    const now = Date.now();
     const where = (cond) => (cond ? ` WHERE ${cond}` : '');
     const valuesOf = new Map();
 
@@ -310,8 +309,9 @@ export class BackgroundIndexer {
     const late = g.props.filter((p) => freshKeys.get(p.name).length);
     const full = late.length ? await this._complexCounts(fact, late, freshKeys, windowCond, { d, ref, evCol, bundleCol, timeCol, withExamples: false }) : null;
     // a key is seen when some element holds a value of it (a native struct's field the data stopped filling
-    // goes inactive, as a JSON key the payload dropped does)
-    const seenAt = (c) => ((c?.elements || 0) > 0 ? now : null);
+    // goes inactive, as a JSON key the payload dropped does) — at the moment it is written, so a key first
+    // written now is never last seen before it was first seen
+    const seenAt = (c) => ((c?.elements || 0) > 0 ? Date.now() : null);
 
     for (const p of g.props) {
       const cov = counted.coverage.get(p.name);

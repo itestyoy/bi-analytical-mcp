@@ -73,6 +73,12 @@ export function form({ title, description, tag, tagDescription, optionalTag = fa
 
 /** A moment as every time window takes it: an ISO date, or a date-time (seconds, a fraction, an offset optional). */
 export const ISO_TIME = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:?\\d{2})?)?$' };
+/**
+ * A FIELD OF A JSON OBJECT (or a struct): a key, or a path of keys joined by '.' — the one form every place
+ * that reads a field takes (json_field, an unnest's `field`, { property, field }); the dialect checks each
+ * segment again as it writes the path (fieldPath).
+ */
+export const FIELD_PATH = (what) => ({ type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$', description: `${what} A nested one by its path: additional_info.arrow.` });
 /** An IANA timezone name, spelled as the zone database spells it ("UTC", "Europe/Berlin", "America/Argentina/Buenos_Aires"). */
 export const TIMEZONE = { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$' };
 

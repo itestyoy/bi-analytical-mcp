@@ -192,3 +192,26 @@ test('a text that reads as a non-finite number (Infinity, nan) keeps every value
   const file = index.keys('crashlytics', 'stack_frames_of_event_data').find((k) => k.field === 'file');
   assert.equal(file.numeric?.count ?? 0, 0, 'no file name is counted as a number');
 });
+
+test('a struct the declaration names inside the elements: its keys are read off the data by their path, it is no key itself', opts, async (t) => {
+  if (skip(t)) return;
+  const prop = 'stack_frames_of_event_data';
+  // the catalog says the frames carry a struct `pos` (as an action log's additional_info: struct)
+  const spec = indexer.catalog.eventPropertySpec(prop, 'crashlytics');
+  spec.fields = { ...spec.fields, pos: 'struct' };
+  await wh.exec(`INSERT INTO fct_crashlytics_events SELECT * REPLACE (event_time + INTERVAL 32 DAY AS event_time, '[{"file":"P.kt","line":1,"pos":{"arrow":"up","cell":3}},{"file":"P.kt","line":2,"pos":{"arrow":"left","cell":7}},{"file":"Q.kt","line":3,"pos":{"arrow":"up"}}]' AS stack_frames_of_event_data) FROM fct_crashlytics_events WHERE event_name = 'non_fatal' ORDER BY event_time LIMIT 2`);
+  await indexer.refresh();
+  const fields = index.keys('crashlytics', prop).map((k) => k.field);
+  assert.ok(fields.includes('pos.arrow') && fields.includes('pos.cell'), fields.join(', '));
+  assert.ok(!fields.includes('pos'), 'the struct is their container, no key with values');
+  for (const key of ['pos.arrow', 'pos.cell']) {
+    assert.deepEqual(stored('crashlytics', prop, key), await truthValues('fct_crashlytics_events', prop, key.replace('.', '"."')), key);
+  }
+  const cell = index.keys('crashlytics', prop).find((k) => k.field === 'pos.cell').numeric;
+  assert.equal(cell.count, 2 * 2); assert.equal(cell.min, 3); assert.equal(cell.max, 7);
+  // a nested key's view, and search by its own name
+  const view = await engine.semantic_index({ source: 'crashlytics', property: prop, field: 'pos.arrow' });
+  assert.deepEqual(Object.fromEntries(view.sample_values.map((v) => [v.value, v.freq])), { up: 4, left: 2 });
+  const found = await engine.semantic_index({ search: 'arrow' });
+  assert.ok(found.property_matches.some((m) => m.property === prop && m.field === 'pos.arrow'), JSON.stringify(found.property_matches.slice(0, 5)));
+});

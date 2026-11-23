@@ -122,7 +122,7 @@ export class CatalogSearch {
     // the values, so searched live: a key found is named { source, property, field }, its view's address
     const keyItems = c.facts.flatMap((f) => (this.valueIndex.keys?.(f) || []).filter((k) => k.field !== '').map((k) => ({ source: f, property: k.property, field: k.field })));
     if (keyItems.length) {
-      const keys = new FuzzyIndex(keyItems, { keys: [{ name: 'name', get: (k) => k.field }], tiebreak: (k) => `${k.source}.${k.property}.${k.field}` });
+      const keys = new FuzzyIndex(keyItems, { keys: [{ name: 'name', get: (k) => k.field }, { name: 'leaf', get: (k) => k.field.split('.').pop() }], tiebreak: (k) => `${k.source}.${k.property}.${k.field}` });
       for (const { item: k, score, match } of keys.search(query, opts)) {
         property_matches.push({ property: k.property, field: k.field, path: keyPath(k.property, k.field), source: k.source, type: 'key', events: appliesOf(k.source)[k.property] || null, score: round3(score), match });
       }

@@ -209,7 +209,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   incrementally: a delta is added, a key first seen in a delta is counted over the whole history, a
   key unseen for `KEY_STALE_MS` is said inactive, never deleted. A property declared a plain text whose
   indexed values are JSON (`holdsJson`) has its keys counted alike — its own row stays the scalar
-  pass's, its key pass keeps its own watermark (`KEY_PASS`). A batch the warehouse refuses is scanned
+  pass's, its key pass keeps its own watermark (`KEY_PASS`). Inside an element the index goes where the
+  catalog says, never to a guessed depth: a field declared `struct` in `fields` (`additional_info: struct`,
+  or `{ type: struct, fields }` for deeper ones — `declaredStructPaths`) has its keys read off the data and
+  counted by their path (`additional_info.arrow`), the struct itself their container and no key; a native
+  struct's nested fields are its type's (`nativeLeafPaths`). A batch the warehouse refuses is scanned
   again property by property, and a group writes nothing until every query it needs has run (a key
   first seen in a delta is never lost behind an advanced watermark). A key is named `{ source, property, field }`
   (semantic_index's key view, search); its store id (`<property>[].<field>`) is internal.
@@ -402,7 +406,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the type the catalog declares (text where it declares none; an array as it is stored — a native one of
   its items, as its column is tracked (`nativeArrayType`, the one reader — a `{ property }` read's and an
   unnest's): the warehouse's where it was asked, else the catalog's `items`; JSON text otherwise, a
-  payload key's read as its JSON), a JSON object's `field` (the leaf's, json_field's) text, an array's
+  payload key's read as its JSON), a JSON object's `field` (the leaf's, json_field's, an unnest's — a key, or
+  a path of keys joined by '.', `additional_info.arrow`: one schema, `FIELD_PATH`, src/schema-kit.js, each
+  segment checked again as the dialect writes it, `fieldPath`) text, an array's
   element (element_at, array_last, an unnested one) the type it is stored as — a native array's items
   (not claimed where they are not known; a native struct is no JSON, so not claimed either), a JSON
   array's text, an unpivot's value column the one type of the columns it folds (numbers of any kind

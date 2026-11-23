@@ -14,7 +14,7 @@
 
 import { NAME, statAccuracyNote, EXPR, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
 import { exprDefs, exprSql, conditionListSql, mapAggregates, foldWhere, exprCalls } from './compute.js';
-import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
+import { form, strEnum, SCALAR, conditionSlot, measureForm, FIELD_PATH } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
 import { METRICS_STEP, SEMANTIC_MODEL_STEP } from '../schema/fields.js';
 import { TIME_PART, describeContract, onPartsError, contractOnSchema } from '../catalog/joins.js';
@@ -131,7 +131,7 @@ export const STAGES = {
         stage: { enum: ['unnest'] },
         expr: { ...EXPR, description: 'The array.' },
         name: { type: 'string', pattern: NAME },
-        field: { type: 'string', description: 'For an array of structs: one field; omitted, the whole element.' },
+        field: FIELD_PATH('For an array of structs: one field; omitted, the whole element.'),
       },
     }),
     build: ({ d, catalog, cols, source, place }, p) => {

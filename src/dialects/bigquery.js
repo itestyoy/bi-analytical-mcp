@@ -117,8 +117,8 @@ export class BigQueryDialect extends Dialect {
   }
 
   jsonStructField(column, key, field, type = 'string') {
-    this.ident(key); this.ident(field);
-    return this.fromText(`JSON_VALUE(${column}, '$.${key}.${field}')`, type);
+    this.ident(key);
+    return this.fromText(`JSON_VALUE(${column}, '$.${key}${this._jsonPath(field)}')`, type);
   }
 
   /** A key's value as its JSON text — an array or an object as JSON (JSON_VALUE takes only a scalar). */
@@ -136,15 +136,12 @@ export class BigQueryDialect extends Dialect {
     const col = this.quoteIdent(column);
     // Native ARRAY/REPEATED column → unnest directly.
     if (key == null && encoding === 'native') {
-      return { join: `CROSS JOIN UNNEST(${col}) AS ${e}`, element: this.fromText(field ? `${e}.${this.quoteIdent(field)}` : e, type) };
+      return { join: `CROSS JOIN UNNEST(${col}) AS ${e}`, element: this.fromText(field ? `${e}.${this.fieldPath(field).map((s) => this.quoteIdent(s)).join('.')}` : e, type) };
     }
     // Array-of-JSON elements: a key inside a json column (blob), or the flat STRING column
     // parsed as a JSON array (encoding 'json').
     const jarr = key != null ? (this.ident(key), `JSON_QUERY_ARRAY(${col}, '$.${key}')`) : `JSON_EXTRACT_ARRAY(${col}, '$')`;
-    if (field) {
-      this.ident(field);
-      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: this.fromText(`JSON_VALUE(${e}, '$.${field}')`, type) };
-    }
+    if (field) return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: this.fromText(`JSON_VALUE(${e}, '$${this._jsonPath(field)}')`, type) };
     if (type === 'json') { // bind the whole struct element as a JSON column
       return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: e };
     }
@@ -187,11 +184,15 @@ export class BigQueryDialect extends Dialect {
     return `(CASE JSON_TYPE(${j}) WHEN 'object' THEN JSON_KEYS(${j}, 1) WHEN 'string' THEN [''] WHEN 'number' THEN [''] WHEN 'boolean' THEN [''] ELSE ARRAY<STRING>[] END)`;
   }
 
+  // (a field by its path — additional_info.arrow — as every field read takes it: fieldPath)
   elementField(e, field, st) {
-    this.ident(field);
-    if (st.encoding === 'native' && !st.itemsJson) return `CAST(${e}.${this.quoteIdent(field)} AS STRING)`;
-    return `JSON_VALUE(${e}, '$.${field}')`;
+    if (st.encoding === 'native' && !st.itemsJson) return `CAST(${e}.${this.fieldPath(field).map((s) => this.quoteIdent(s)).join('.')} AS STRING)`;
+    return `JSON_VALUE(${e}, '$${this._jsonPath(field)}')`;
   }
+
+  // the object at a path of a JSON element, of the element's own kind (JSON, or a text of it) — its keys read
+  // as an element's are (elementKeys)
+  elementNode(e, path) { return `JSON_QUERY(${e}, '$${this._jsonPath(path)}')`; }
 
   elementText(e, st) {
     // (a JSON element — of a JSON array, or of a native ARRAY<JSON> — is read by JSON_VALUE: JSON casts to no text)
@@ -227,9 +228,11 @@ export class BigQueryDialect extends Dialect {
 
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
-    this.ident(field);
-    return this.fromText(`JSON_VALUE(${column}, '$.${field}')`, type);
+    return this.fromText(`JSON_VALUE(${column}, '$${this._jsonPath(field)}')`, type);
   }
+
+  // a field's JSON path after '$' — '.additional_info.arrow' (fieldPath checks every segment)
+  _jsonPath(field) { return this.fieldPath(field).map((s) => `.${s}`).join(''); }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
   jsonColumnArrayLength(column) {

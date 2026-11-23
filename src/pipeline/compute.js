@@ -32,7 +32,7 @@ import { isArrayPropertyType, arrayColumnType, elementType, nativeArrayType, isB
 // (sql.js is read when a function runs, never as this module loads)
 import { fillPlaceholders, rawNamedColumns, unquotedSql, frameClause, requireCol, sqlAgg, TYPE, SORT_KEY, sourceProp, partitionItem, partitionColumn } from './sql.js';
 import { OPS, predicateSql, typedValue } from '../conditions.js';
-import { form, strEnum, SCALAR, conditionSlot } from '../schema-kit.js';
+import { form, strEnum, SCALAR, conditionSlot, FIELD_PATH } from '../schema-kit.js';
 import { REFS, VALUE_REFS, REF_PLACES, refKind, valueRefForms } from '../schema/refs.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { isValidTimezone } from '../time-range.js';
@@ -100,7 +100,7 @@ const params = ({ ref }) => ({
   len: { type: 'integer', minimum: 0 },
   search: { type: 'string' },
   replacement: { type: 'string' },
-  field: { type: 'string' },
+  field: FIELD_PATH('The key read, as text.'),
   index: { type: 'integer', minimum: 1, description: '1-based.' },
   unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'Whole units elapsed, truncated toward zero; a day is 24 hours, not a calendar day.' },
   grain: { enum: GRAINS, description: 'A week is the ISO week (from Monday).' },
@@ -635,7 +635,7 @@ export const propertyLeaf = (values) => form({
   description: 'An event property of the source, read as the type the catalog declares.',
   properties: {
     property: strEnum(values || []),
-    field: { type: 'string', description: 'A field of a JSON object property, as text.' },
+    field: FIELD_PATH('A field of a JSON object property, as text.'),
   },
 });
 

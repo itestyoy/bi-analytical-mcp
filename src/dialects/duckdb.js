@@ -91,8 +91,8 @@ export class DuckDBDialect extends Dialect {
   }
 
   jsonStructField(column, key, field, type = 'string') {
-    this.ident(key); this.ident(field);
-    return this.fromText(this._whenJson(column, `json_extract_string(${column}, '$."${key}"."${field}"')`), type);
+    this.ident(key);
+    return this.fromText(this._whenJson(column, `json_extract_string(${column}, '$."${key}"${this._jsonPath(field)}')`), type);
   }
 
   /** A key's value as its JSON text — an array or an object as JSON, a string quoted — as BigQuery's
@@ -116,15 +116,12 @@ export class DuckDBDialect extends Dialect {
     const lateral = (list) => `CROSS JOIN LATERAL (SELECT unnest(${list}) AS v) AS ${e}`;
     const cast = (x) => this.fromText(x, type);
     const src = `${pa}${this.quoteIdent(column)}`;
-    if (key == null && encoding === 'native') return { join: lateral(src), element: cast(field ? `struct_extract(${e}.v, '${this.ident(field)}')` : `${e}.v`) };
+    if (key == null && encoding === 'native') return { join: lateral(src), element: cast(field ? this.fieldPath(field).reduce((x, s) => `struct_extract(${x}, '${s}')`, `${e}.v`) : `${e}.v`) };
     let path;
     if (key != null) { this.ident(key); path = `$."${key}"`; } else { path = '$'; }
     const isArray = `json_type(${src}, '${path}') = 'ARRAY'`;
     const elements = (fn) => `COALESCE(${this._whenJson(src, `${fn}(${src}, '${path}[*]')`, isArray)}, [])`;
-    if (field) {
-      this.ident(field);
-      return { join: lateral(elements('json_extract')), element: cast(`json_extract_string(${e}.v, '$."${field}"')`) };
-    }
+    if (field) return { join: lateral(elements('json_extract')), element: cast(`json_extract_string(${e}.v, '$${this._jsonPath(field)}')`) };
     if (type === 'json') return { join: lateral(elements('json_extract')), element: `${e}.v` }; // the whole struct element, for multi-field extraction downstream
     return { join: lateral(elements('json_extract_string')), element: cast(`${e}.v`) };
   }
@@ -191,9 +188,11 @@ export class DuckDBDialect extends Dialect {
 
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
-    this.ident(field);
-    return this.fromText(`json_extract_string(${column}, '$."${field}"')`, type);
+    return this.fromText(`json_extract_string(${column}, '$${this._jsonPath(field)}')`, type);
   }
+
+  // a field's JSON path after '$' — '."additional_info"."arrow"' (fieldPath checks every segment)
+  _jsonPath(field) { return this.fieldPath(field).map((s) => `."${s}"`).join(''); }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
   // (a value that is no JSON array — NULL, a scalar, no JSON — is a missing array: length 0)
@@ -210,8 +209,7 @@ export class DuckDBDialect extends Dialect {
   arrayContains(column, value) { return `list_contains(${column}, ${this.sqlLiteral(value)})`; }
 
   jsonColumnStructField(column, field, type = 'string') {
-    this.ident(field);
-    return this.fromText(this._whenJson(column, `json_extract_string(${column}, '$."${field}"')`), type);
+    return this.fromText(this._whenJson(column, `json_extract_string(${column}, '$${this._jsonPath(field)}')`), type);
   }
 
   // ── time / scalar / statistical ────────────────────────────────────────────

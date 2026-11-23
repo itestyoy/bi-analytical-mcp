@@ -83,6 +83,17 @@ export class Dialect {
   }
 
   /**
+   * A FIELD OF A JSON OBJECT (or a struct) is a key, or a PATH of keys joined by '.' — additional_info.arrow
+   * reads the arrow inside the element's additional_info object. Every segment is an identifier, checked as
+   * one (the path is written into SQL). → the segments.
+   */
+  fieldPath(field) {
+    const segments = String(field ?? '').split('.');
+    for (const s of segments) if (!IDENT.test(s)) throw new Error(`unsafe JSON field: '${field}' — a key, or keys joined by '.' (additional_info.arrow), each letters, digits and _ and not starting with a digit`);
+    return segments;
+  }
+
+  /**
    * A STORED TABLE WRITTEN AS ONE CSV FILE at `file` (under the export destination, EXPORT_URI), with a
    * header row: the statements that write it and then count its rows — the last one's one row is
    * { row_count }. They name the table as __MCP_RELATION__ — the dbt client's execute() puts it in. A

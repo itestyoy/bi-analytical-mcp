@@ -402,7 +402,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the type the catalog declares (text where it declares none; an array as it is stored — a native one of
   its items, as its column is tracked (`nativeArrayType`, the one reader — a `{ property }` read's and an
   unnest's): the warehouse's where it was asked, else the catalog's `items`; JSON text otherwise, a
-  payload key's read as its JSON), a JSON object's `field` (the leaf's, json_field's) text, an array's
+  payload key's read as its JSON), a JSON object's `field` (the leaf's, json_field's, an unnest's — a key, or
+  a path of keys joined by '.', `additional_info.arrow`: one schema, `FIELD_PATH`, src/schema-kit.js, each
+  segment checked again as the dialect writes it, `fieldPath`) text, an array's
   element (element_at, array_last, an unnested one) the type it is stored as — a native array's items
   (not claimed where they are not known; a native struct is no JSON, so not claimed either), a JSON
   array's text, an unpivot's value column the one type of the columns it folds (numbers of any kind

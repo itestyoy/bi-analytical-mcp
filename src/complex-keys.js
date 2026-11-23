@@ -33,6 +33,42 @@ export const KEY_PASS = '*';
 /** A key this index reads as a field: a name the JSON path and every warehouse take as it is. */
 export const READABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
+/**
+ * THE STRUCTS INSIDE AN ELEMENT ARE WHERE ITS DECLARATION SAYS — never a depth guessed. A field the catalog
+ * declares `struct` (`fields: { additional_info: struct }`, or `{ type: struct, fields: {...} }`) is an object
+ * whose keys the value index reads off the data and counts as keys of their own, by their path
+ * (additional_info.arrow); the struct itself is their container, no key with values. A struct declared with
+ * its own `fields` names the structs inside it alike. → [{ path, nested: [paths of structs declared in it] }]
+ * flattened: every declared struct's path, outermost first.
+ */
+export function declaredStructPaths(fields, prefix = '') {
+  const out = [];
+  for (const [name, t] of Object.entries(fields || {})) {
+    const type = String(t?.type ?? t ?? '').toLowerCase();
+    if (type !== 'struct') continue;
+    const path = prefix ? `${prefix}.${name}` : name;
+    out.push(path);
+    if (t && typeof t === 'object' && t.fields) out.push(...declaredStructPaths(t.fields, path));
+  }
+  return out;
+}
+
+/**
+ * The scalar leaves of a native struct by their path — its type's fields, a STRUCT field's own fields under
+ * its name (a.b), however deep the type nests them; an array inside is no leaf. `fields` as structFieldsOfType
+ * gives them, or as a declaration names them ({ name, type, scalar, fields? }).
+ */
+export function nativeLeafPaths(fields, prefix = '') {
+  const out = [];
+  for (const f of fields || []) {
+    const path = prefix ? `${prefix}.${f.name}` : f.name;
+    if (f.scalar) { out.push(path); continue; }
+    const inner = f.fields || (isStructType(f.type) ? structFieldsOfType(f.type) : []);
+    if (inner.length) out.push(...nativeLeafPaths(inner, path));
+  }
+  return out;
+}
+
 /** A key not seen in the data for this long is inactive — kept, and said so. */
 export const KEY_STALE_MS = 30 * 24 * 3600 * 1000;
 

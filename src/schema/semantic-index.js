@@ -4,7 +4,7 @@
 import { RESEARCH_DOMAINS } from '../research-guides.js';
 import { refForms, REF_PLACES } from './refs.js';
 import { aboutSchema, aboutDefs } from './memory.js';
-import { timeRange } from '../schema-kit.js';
+import { timeRange, FIELD_PATH } from '../schema-kit.js';
 
 /** Which of a task's two vectors is compared (src/task-index.js SPACES). */
 const TASK_SPACE = { enum: ['question', 'computation'], default: 'question', description: 'question (the default): by the person\'s question each task answers — what the company asks; computation: by what each computed.' };
@@ -57,7 +57,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     source_column: refView('source_column', '{ source, column }', () => 'One column: its meaning, values, NULL coverage.', paging),
     // a key of a complex property's elements (src/complex-keys.js), as the data shows it — the property's
     // view lists its keys
-    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app; with field, one key of an array\'s or a struct\'s elements (the property\'s view lists them).', { ...paging, ...include, field: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]{0,127}$', description: 'A key of the elements, as the property\'s keys list it.' } }),
+    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app; with field, one key of an array\'s or a struct\'s elements (the property\'s view lists them).', { ...paging, ...include, field: FIELD_PATH('A key of the elements, as the property\'s keys list it.') }),
   };
 
   // The single-view fields, written once.

@@ -147,11 +147,13 @@ export class DuckDBDialect extends Dialect {
     return `(CASE WHEN json_type(${e}) = 'OBJECT' THEN json_keys(${e}) WHEN json_type(${e}) IN ('VARCHAR', 'BIGINT', 'UBIGINT', 'DOUBLE', 'BOOLEAN') THEN [''] ELSE []::VARCHAR[] END)`;
   }
 
+  // (a field by its path — additional_info.arrow — as every field read takes it: fieldPath)
   elementField(e, field, st) {
-    this.ident(field);
-    if (st.encoding === 'native' && !st.itemsJson) return `CAST(struct_extract(${e}, '${field}') AS VARCHAR)`;
-    return `json_extract_string(${e}, '$."${field}"')`;
+    if (st.encoding === 'native' && !st.itemsJson) return `CAST(${this.fieldPath(field).reduce((x, s) => `struct_extract(${x}, '${s}')`, e)} AS VARCHAR)`;
+    return `json_extract_string(${e}, '$${this._jsonPath(field)}')`;
   }
+
+  elementNode(e, path) { return `json_extract(${e}, '$${this._jsonPath(path)}')`; }
 
   elementText(e, st) {
     return st.encoding === 'native' && !st.itemsJson ? `CAST(${e} AS VARCHAR)` : `json_extract_string(${e}, '$')`;

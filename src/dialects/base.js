@@ -120,8 +120,11 @@ export class Dialect {
   /** The top-level key names of a JSON element `e` (an array): a scalar element is the one key '' (the
    *  element itself), a null one none. */
   elementKeys(_e, _st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
-  /** A key's value in element `e`, as its text (NULL where absent or not a scalar). */
+  /** A key's value in element `e` — a key, or a path of keys (fieldPath) — as its text (NULL where absent or
+   *  not a scalar). */
   elementField(_e, _field, _st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
+  /** The object at a path of a JSON element `e` (a struct the catalog declares inside it), of `e`'s kind. */
+  elementNode(_e, _path) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
   /** A scalar element's text. */
   elementText(_e, _st) { throw new Error(`complex keys are not read on the ${this.name} warehouse`); }
   /** Whether some element of `arr` satisfies `body(x)` (x names the element). */

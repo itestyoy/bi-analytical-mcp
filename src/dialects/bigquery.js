@@ -184,11 +184,15 @@ export class BigQueryDialect extends Dialect {
     return `(CASE JSON_TYPE(${j}) WHEN 'object' THEN JSON_KEYS(${j}, 1) WHEN 'string' THEN [''] WHEN 'number' THEN [''] WHEN 'boolean' THEN [''] ELSE ARRAY<STRING>[] END)`;
   }
 
+  // (a field by its path — additional_info.arrow — as every field read takes it: fieldPath)
   elementField(e, field, st) {
-    this.ident(field);
-    if (st.encoding === 'native' && !st.itemsJson) return `CAST(${e}.${this.quoteIdent(field)} AS STRING)`;
-    return `JSON_VALUE(${e}, '$.${field}')`;
+    if (st.encoding === 'native' && !st.itemsJson) return `CAST(${e}.${this.fieldPath(field).map((s) => this.quoteIdent(s)).join('.')} AS STRING)`;
+    return `JSON_VALUE(${e}, '$${this._jsonPath(field)}')`;
   }
+
+  // the object at a path of a JSON element, of the element's own kind (JSON, or a text of it) — its keys read
+  // as an element's are (elementKeys)
+  elementNode(e, path) { return `JSON_QUERY(${e}, '$${this._jsonPath(path)}')`; }
 
   elementText(e, st) {
     // (a JSON element — of a JSON array, or of a native ARRAY<JSON> — is read by JSON_VALUE: JSON casts to no text)

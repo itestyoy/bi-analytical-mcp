@@ -114,3 +114,13 @@ test('a native array of JSON is read as JSON whatever spelling its type has; one
   assert.deepEqual(storage('json', 'JSON', 'array<struct>'), { itemsJson: false, json: true, struct: false });
   assert.equal(storage('json', undefined, 'array<struct>').json, null, 'a type not known: neither');
 });
+
+// Where the value index reads keys inside an element: the structs its declaration names (a struct inside a
+// declared struct, by its path), never a depth guessed; a native struct's scalar leaves however its type nests.
+test('the structs a declaration names inside an element, and a native struct\'s scalar leaves', async () => {
+  const { declaredStructPaths, nativeLeafPaths } = await import('../../src/complex-keys.js');
+  assert.deepEqual(declaredStructPaths({ action_type: 'string', duration: 'int', additional_info: 'struct' }), ['additional_info']);
+  assert.deepEqual(declaredStructPaths({ a: { type: 'struct', fields: { b: 'struct', c: 'int' } }, d: 'STRUCT' }), ['a', 'a.b', 'd']);
+  assert.deepEqual(declaredStructPaths(null), []);
+  assert.deepEqual(nativeLeafPaths(structFieldsOfType('ARRAY<STRUCT<id INT64, pos STRUCT<arrow STRING, cell INT64>, tags ARRAY<STRING>>>')), ['id', 'pos.arrow', 'pos.cell']);
+});

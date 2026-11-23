@@ -6,7 +6,7 @@
 import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
 import { conditionListSql } from './pipeline/compute.js';
-import { keyId, keyPath, READABLE_KEY, QUANTILE_POINTS, structFieldsOfType, mergeNumeric, holdsJson } from './complex-keys.js';
+import { keyId, keyPath, READABLE_KEY, QUANTILE_POINTS, structFieldsOfType, mergeNumeric, holdsJson, declaredStructPaths, nativeLeafPaths } from './complex-keys.js';
 
 const DAY_MS = 86400000;
 
@@ -200,9 +200,12 @@ export class BackgroundIndexer {
       const typed = native ? structFieldsOfType(st.dtype) : [];
       const fields = native ? (typed.length ? typed : declaredFields) : null;
       const structs = native && (fields.length > 0 || st.struct || /struct/i.test(String(spec.type || '')));
+      // the structs inside a JSON element, where its declaration says (declaredStructPaths): their keys are read
+      // off the data too, by their path; a native struct's nested ones are its type's (nativeLeafPaths)
+      const structPaths = native ? [] : declaredStructPaths(spec.fields);
       // present on a row = it has an element (a native array never NULL — only its length tells; a JSON
       // value that is no array or object, or no JSON, has none). NULL → not counted, on every path.
-      return { i, name, spec, st, native, structs, held: held.has(name), presence: `${d.arrayLength(elems)} > 0`, expr: this._valueExpr(name, fact), elems, fields };
+      return { i, name, spec, st, native, structs, structPaths, held: held.has(name), presence: `${d.arrayLength(elems)} > 0`, expr: this._valueExpr(name, fact), elems, fields };
     }).filter(Boolean);
     // where its counts stand: a declared one's row's watermark; a held one's key pass's (the scalar pass
     // moves its row's — src/complex-keys.js KEY_PASS)
@@ -265,29 +268,36 @@ export class BackgroundIndexer {
     const where = (cond) => (cond ? ` WHERE ${cond}` : '');
     const valuesOf = new Map();
 
-    // 1) THE KEYS the data holds: a JSON element's own keys, a native struct's fields (its type), '' for a
-    //    scalar element. A key no JSON path reads as it is (a space, a dot) is left out, and said.
+    // 1) THE KEYS the data holds: a JSON element's own keys, and those of every struct its declaration names
+    //    inside it (additional_info.arrow — the struct itself a container, no key); a native struct's scalar
+    //    fields, however its type nests them; '' for a scalar element. A key no JSON path reads as it is (a
+    //    space, a dot) is left out, and said.
     const found = new Map(g.props.map((p) => [p.name, new Set()]));
     const jsonProps = g.props.filter((p) => !p.native);
     for (const p of g.props.filter((x) => x.native)) {
-      const scalarFields = p.fields.filter((f) => f.scalar).map((f) => f.name);
       // a struct whose fields are not known is not read (its text is no element value)
-      for (const k of p.structs ? scalarFields : ['']) found.get(p.name).add(k);
+      for (const k of p.structs ? nativeLeafPaths(p.fields) : ['']) found.get(p.name).add(k);
       if (p.structs && !p.fields.length) this.index.recordRunNote?.(runId, `complex keys of '${fact}.${p.name}' not read: its struct's fields are neither in the warehouse type nor declared`);
     }
     if (jsonProps.length) {
-      const branches = jsonProps.map((p) => {
+      // one branch per element's own keys (s 0) and per declared struct inside it (s 1…: its path's keys)
+      const branches = jsonProps.flatMap((p) => ['', ...p.structPaths].map((path, s) => {
         const e = d.unnestJoin(p.elems, 'e');
-        const k = d.unnestJoin(d.elementKeys(e.el, p.st), 'k');
-        return `SELECT ${p.i} AS p, ${k.el} AS k FROM ${ref} ${e.join} ${k.join}${where(g.cond)}`;
-      });
-      const rows = await this._rows(`SELECT p, k, COUNT(*) AS n FROM (${branches.join(' UNION ALL ')}) AS keyrows GROUP BY p, k`, 100000);
+        const k = d.unnestJoin(d.elementKeys(path ? d.elementNode(e.el, path) : e.el, p.st), 'k');
+        return `SELECT ${p.i} AS p, ${s} AS s, ${k.el} AS k FROM ${ref} ${e.join} ${k.join}${where(g.cond)}`;
+      }));
+      const rows = await this._rows(`SELECT p, s, k, COUNT(*) AS n FROM (${branches.join(' UNION ALL ')}) AS keyrows GROUP BY p, s, k`, 100000);
       const skipped = [];
       for (const r of rows) {
         const prop = jsonProps.find((x) => x.i === Number(r.p));
         const k = r.k == null ? null : String(r.k);
         if (!prop || k == null) continue;
-        if (k === '' || READABLE_KEY.test(k)) found.get(prop.name).add(k); else skipped.push(`${prop.name}: '${k}'`);
+        const path = Number(r.s) ? prop.structPaths[Number(r.s) - 1] : '';
+        if (path && k === '') continue; // a declared struct holding a scalar on a row: no key of it
+        if (k !== '' && !READABLE_KEY.test(k)) { skipped.push(`${prop.name}: '${path ? `${path}.` : ''}${k}'`); continue; }
+        const key = path ? `${path}.${k}` : k;
+        if (prop.structPaths.includes(key)) continue; // a struct the declaration names: its keys are the keys
+        found.get(prop.name).add(key);
       }
       if (skipped.length) this.index.recordRunNote?.(runId, `complex keys not read as fields (not a plain name): ${skipped.slice(0, 20).join(', ')}${skipped.length > 20 ? ', …' : ''}`);
     }

@@ -61,7 +61,9 @@ export const SETTING_GROUPS = [
     S('MCP_ERROR_MAX_ROWS', 'int', null, { default: 10000 }),
   ]],
   ['value index (background profiling of values)', [
-    S('VALUE_INDEX_REFRESH_MS', 'number', 'How often to re-index (ms). 0: one pass at start, no schedule. Default 6 hours.', { default: 21600000 }),
+    S('VALUE_INDEX_REFRESH_MS', 'number', 'How often to re-index (ms). 0: one pass at start, no schedule. Default 6 hours. Not used when VALUE_INDEX_CRON is set.', { default: 21600000 }),
+    S('VALUE_INDEX_CRON', 'string', 'When to re-index — and, with MCP_INDEX_DBT_RUN, to `dbt run` the source models first — as a cron expression\n(minute hour day-of-month month day-of-week, e.g. "30 3 * * *": every day at 03:30; or @hourly, @daily, @weekly …).\nIt takes the place of VALUE_INDEX_REFRESH_MS; a pass at start runs either way. Empty: the interval.', { shown: '' }),
+    S('VALUE_INDEX_CRON_TZ', 'string', 'The time zone VALUE_INDEX_CRON is read in (an IANA name, e.g. Europe/Moscow).', { default: 'UTC' }),
     S('VALUE_INDEX_MAX_VALUES', 'int', 'Top values kept per property.', { default: 50, min: 1 }),
     S('MCP_INDEX_BATCH', 'int', 'Properties scanned per query.', { default: 40, min: 1 }),
     S('MCP_INDEX_WINDOW_DAYS', 'number', 'Scan only the last N days. 0: the whole history.', { default: 0 }),

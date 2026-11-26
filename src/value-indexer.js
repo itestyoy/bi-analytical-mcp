@@ -58,12 +58,15 @@ export async function buildSourceModels({ runner, catalog, dir, select = null })
 }
 
 export class BackgroundIndexer {
-  constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, modelsBuilt = false, logger } = {}) {
+  constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, schedule = null, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, modelsBuilt = false, logger } = {}) {
     this.catalog = catalog;
     this.runner = runner;
     this.index = index;
     this.baseProjectDir = baseProjectDir;
     this.intervalMs = intervalMs;
+    // A CRON SCHEDULE (src/cron.js CronSchedule), when one is set, says when the syncs after the first
+    // run — in place of the interval, which it overrides; the first runs at start either way.
+    this.schedule = schedule || null;
     this.maxValues = maxValues;
     // Per-scan dbt timeout (ms) for the index queries ONLY — these are heavy full-fact
     // aggregates and were getting SIGTERM-killed at the runner's default 180s. A larger value
@@ -113,14 +116,37 @@ export class BackgroundIndexer {
   start() {
     // Fire-and-forget the initial pass — startup MUST NOT block on the warehouse.
     this.refresh().catch(() => {});
-    if (this.intervalMs > 0) {
+    if (this.schedule) {
+      this.logger?.(`schedule: ${this.schedule} — a sync at start, then at each time it names${this.intervalMs > 0 ? ' (VALUE_INDEX_REFRESH_MS is not used)' : ''}`);
+      this._armCron(new Date());
+    } else if (this.intervalMs > 0) {
       this._timer = setInterval(() => { this.refresh().catch(() => {}); }, this.intervalMs);
       this._timer.unref?.();
     }
   }
 
+  /**
+   * The next sync of the cron schedule, after `from`. A timer holds at most ~24.8 days (2^31-1 ms): a
+   * time further off is waited for in steps. A sync still running when the time comes is not doubled —
+   * the time is passed over, and said.
+   */
+  _armCron(from) {
+    const at = this.schedule.next(from);
+    if (!at) { this.logger?.(`schedule: ${this.schedule} names no time after ${from.toISOString()} — no more syncs`); return; }
+    const wait = Math.max(0, at.getTime() - Date.now());
+    const step = Math.min(wait, 2 ** 31 - 1);
+    this._timer = setTimeout(() => {
+      if (step < wait) { this._armCron(from); return; }
+      if (this._running) this.logger?.(`schedule: the sync due at ${at.toISOString()} is skipped — the previous sync still runs`);
+      else this.refresh().catch(() => {});
+      this._armCron(at);
+    }, step);
+    this._timer.unref?.();
+  }
+
   stop() {
-    if (this._timer) clearInterval(this._timer);
+    // (a timeout and an interval are cleared alike in Node)
+    if (this._timer) clearTimeout(this._timer);
     this._timer = null;
   }
 

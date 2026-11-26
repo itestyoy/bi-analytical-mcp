@@ -24,6 +24,7 @@ import { Engine } from './engine.js';
 import { resolveFeatures } from './features.js';
 import { loadProjectSemantics } from './project-semantics.js';
 import { BackgroundIndexer, buildSourceModels } from './value-indexer.js';
+import { CronSchedule } from './cron.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
@@ -319,6 +320,8 @@ export function createApp(engine, opts = {}) {
 // Entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
   const S = loadSettings();
+  // the value index's schedule is read before anything is built, so a mistyped one stops the start at once
+  const schedule = S.VALUE_INDEX_CRON ? new CronSchedule(S.VALUE_INDEX_CRON, S.VALUE_INDEX_CRON_TZ) : null;
   const engine = await makeEngine();
   const app = createApp(engine);
   const port = S.PORT;
@@ -336,7 +339,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Background value index: populate REAL event-property values from the warehouse
   // (top values + cardinality) for semantic_index. Initial pass is fire-and-forget
   // (start() does NOT await) so server startup is never blocked; then refreshes on
-  // an unref'd interval. VALUE_INDEX_REFRESH_MS=0 → one initial pass, no schedule.
+  // an unref'd interval. VALUE_INDEX_REFRESH_MS=0 → one initial pass, no schedule. VALUE_INDEX_CRON, when
+  // set, takes the interval's place (read in VALUE_INDEX_CRON_TZ, above); a schedule that does not parse
+  // stopped the start, naming what is wrong — a mistyped one is never run as something else.
   const intervalMs = S.VALUE_INDEX_REFRESH_MS;
   const maxValues = S.VALUE_INDEX_MAX_VALUES;
   // Optional cost lever: bound indexing scans to the last N days on the anchor time column
@@ -374,7 +379,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const runModels = S.MCP_INDEX_DBT_RUN;
   const runModelsSelect = S.MCP_INDEX_DBT_RUN_SELECT || null;
   const modelsBuilt = !!engine.sourceModelsBuiltAtStart;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.warehouseDir(), intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, modelsBuilt, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.warehouseDir(), intervalMs, schedule, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, modelsBuilt, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the runner and the SQLite handle.

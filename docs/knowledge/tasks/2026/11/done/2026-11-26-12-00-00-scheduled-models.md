@@ -48,7 +48,12 @@ the server keeps fresh, readable by id from any chat, with the meaning of every 
 - test/unit/scheduled-models.test.js: order (base first), once a day, sleep, idle 0.
 - Not run on BigQuery: persist_docs of the descriptions onto the table.
 
-## Open
+## Review (2026-11-26) and the user's answers
 
-- A dashboard reading the table directly is no query the server sees: such a model falls asleep after
-  the idle period unless something queries it through query_model.
+- Fixed: a first build that does not stand leaves no scheduled model (and drops the tables it built);
+  delete refused while a refresh or query runs; a base an awake dependent reads stays awake; python /
+  match_recognize columns are their own; dry_run is no use; refreshes are not in the task index;
+  duplicate column descriptions refused.
+- By decision, unchanged: a table read straight from the warehouse is not a use — not used, not
+  refreshed. No refresh of its own when the value index does not sync (VALUE_INDEX_REFRESH_MS=0): the
+  index syncs at least daily in every deployment.

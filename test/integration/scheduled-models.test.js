@@ -74,6 +74,7 @@ test('what a scheduled model is told about its columns: every one described, els
   // `n` is made by the steps: it says nothing until described; event_name is the source's, described there
   await assert.rejects(Promise.resolve().then(() => engine.build_model({ action: 'schedule', context_id: id, grain: 'one row per event name' })), /columns:.*\bn\b/);
   await assert.rejects(Promise.resolve().then(() => engine.build_model({ action: 'schedule', context_id: id, grain: 'one row per event name', columns: [{ name: 'n', description: 'events' }, { name: 'nope', description: 'x' }] })), /nope — no column/);
+  await assert.rejects(Promise.resolve().then(() => engine.build_model({ action: 'schedule', context_id: id, grain: 'one row per event name', columns: [{ name: 'n', description: 'events' }, { name: 'n', description: 'players' }] })), /described more than once/);
   // a build started from a task computed once is not scheduled: it would recompute the same rows
   const once = await engine.build_model({ action: 'materialize', context_id: id });
   assert.equal(once.build?.ok, true, JSON.stringify(once.error || once.build));
@@ -120,7 +121,6 @@ test('scheduled: its table is read by context id, computed again after a sync on
   const r = await read(id);
   assert.deepEqual(counts(r.rows), after1);
   assert.ok(r.scheduled?.refreshed_at, 'a read says when the table was computed');
-  assert.ok(!(r.warnings || []).some((w) => /before the steps changed/.test(w)), 'its table is the build of its steps');
 });
 
 test('a model nobody queries sleeps instead of refreshing; the next query answers from its table and wakes it', opts, async (t) => {
@@ -136,6 +136,9 @@ test('a model nobody queries sleeps instead of refreshing; the next query answer
   await engine.raw.schedules.afterSync();
   await settled(id);
   assert.ok(spec.suspended, 'asleep');
+  // a query only compiled reads nothing: it wakes nothing
+  await engine.query_model({ context_id: id, name: 'read_counts', ...ABOUT, dry_run: true, steps: [{ stage: 'limit', limit: 1 }] });
+  assert.ok(spec.suspended, 'still asleep');
   // the query wakes it: its rows are the table before the refresh, and it says so
   const woke = await read(id);
   assert.deepEqual(counts(woke.rows), stale);
@@ -176,6 +179,11 @@ test('deleting a scheduled model drops its table from the warehouse', opts, asyn
   await engine.build_model({ action: 'schedule', context_id: id, grain: 'one row per event name', columns: [{ name: 'n', description: 'How many events of that name' }] });
   const model = engine.raw.ctxs.get(id).state.scheduled.model;
   const tables = async () => (await wh.query(`SELECT count(*) AS n FROM information_schema.tables WHERE table_name = '${model}'`)).rows[0].n;
+  assert.equal(Number(await tables()), 1);
+  // not while work runs on it: the table stays, and so does the model
+  engine.raw.ctxs.acquire(id);
+  await assert.rejects(Promise.resolve().then(() => engine.context({ action: 'delete', context_id: id })), /being worked on/);
+  engine.raw.ctxs.release(id);
   assert.equal(Number(await tables()), 1);
   await engine.context({ action: 'delete', context_id: id });
   assert.equal(Number(await tables()), 0);

@@ -656,11 +656,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   written onto the table where the warehouse keeps them (`persistsDocs`: BigQuery's persist_docs). It is
   refreshed DAILY: after each sync of the value index (which first `dbt run`s the source models), every
   scheduled model not refreshed that UTC day — base first; there is no schedule of its own. A refresh runs
-  the model's own files as written, beside its context's queries (they read the table as it stands). A model
-  nobody QUERIES for MCP_SCHEDULED_IDLE_DAYS is put to sleep instead (`suspended`); the next query answers
-  from the table as it is — saying so in its result's `scheduled` — and its refresh starts once that query is
-  answered. Its context id is its key, as every context's: read with query_model, described by context
-  describe (`scheduled`), deleted with its table. Neither the context TTL nor table expiry touches it.
+  the model's own files as written, beside its context's queries (they read the table as it stands), and is
+  no question asked (the task index does not record it). A model nobody QUERIES for MCP_SCHEDULED_IDLE_DAYS
+  is put to sleep instead (`suspended`) — a query only compiled (dry_run) is no use, and a base an awake
+  dependent reads is in use; a table read straight from the warehouse is not seen, so such a model sleeps:
+  not used, not refreshed. The next query answers from the table as it is — saying so in its result's
+  `scheduled` — and its refresh starts once that query is answered. A first build that does not stand (it
+  fails, or the process ends during it) leaves no scheduled model: the mark goes with its files and the
+  tables it built, and the draft is open again. Its context id is its key, as every context's: read with
+  query_model, described by context describe (`scheduled`), deleted with its table — never while a refresh
+  or a query runs on it. Neither the context TTL nor table expiry touches it.
 - A FEATURE IS SWITCHED ON AS A WHOLE, OR IS NOT THERE (src/features.js). A part of the server that a
   deployment may not want — today only retentioneering — is a feature: off unless its flag says on
   (`MCP_RETENTIONEERING=on`), and left out WITH ITS REASON (in the overview) when asked for where it

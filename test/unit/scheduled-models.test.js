@@ -68,3 +68,14 @@ test('idle period 0: never put to sleep', async () => {
   assert.deepEqual(order, ['idle']);
   assert.equal(states.idle.suspended, undefined);
 });
+
+test('a base read by an awake dependent is in use: it stays awake while the dependent is queried', async () => {
+  const states = {
+    base: { refreshed_at: ago(DAY), last_queried_at: ago(30 * DAY) },
+    dependent: { refreshed_at: ago(DAY), last_queried_at: ago(0), base: { context_id: 'base' } },
+  };
+  const { s, order } = service(states);
+  await s.afterSync();
+  assert.deepEqual(order, ['base', 'dependent']);
+  assert.equal(states.base.suspended, undefined);
+});

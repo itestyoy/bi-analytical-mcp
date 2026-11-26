@@ -48,6 +48,9 @@ function stepOrigin(st, name, step) {
 
 /** The columns a step keeps under their name while it re-derives the rows (its grouping keys). */
 const keysOf = (st) => (['aggregate', 'pivot'].includes(st.stage) ? (st.group_by || []).filter((k) => typeof k === 'string') : st.stage === 'unpivot' ? (st.keep || []).filter((k) => typeof k === 'string') : []);
+/** The stages that make their rows anew: a column of theirs is theirs, unless it is a key they keep. A python
+ *  stage's frame and a funnel's matches are new rows, whatever their columns are named. */
+const REDERIVES = ['aggregate', 'pivot', 'unpivot', 'python', 'match_recognize'];
 
 export const scheduledMethods = {
   /** The dbt model a scheduled build's table is — a name no build of the draft takes. */
@@ -77,7 +80,7 @@ export const scheduledMethods = {
       const st = spelled.get(raw) ?? raw;
       const after = this._columnsAfter(draft, physSet, i + 1, last).map((c) => c.name);
       const kept = keysOf(st);
-      const rederives = ['aggregate', 'pivot', 'unpivot'].includes(st.stage);
+      const rederives = REDERIVES.includes(st.stage);
       const next = new Map();
       for (const n of after) {
         const carried = origins.has(n) && (rederives ? kept.includes(n) : true);
@@ -132,6 +135,8 @@ export const scheduledMethods = {
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const columns = this._draftColumns(draft, physSet);
     const origins = this._columnOrigins(draft, physSet, columns);
+    const twice = (input.columns || []).map((c) => c.name).filter((n, i, all) => all.indexOf(n) !== i);
+    if (twice.length) throw new ToolError(`columns: ${[...new Set(twice)].join(', ')} described more than once — one description per column`, { stage: 'validate', field: 'columns' });
     const given = new Map((input.columns || []).map((c) => [c.name, c]));
     const unknown = [...given.keys()].filter((n) => !columns.some((c) => c.name === n));
     if (unknown.length) throw new ToolError(`columns: ${unknown.join(', ')} — no column of the table; its columns: ${columns.map((c) => c.name).join(', ')}`, { stage: 'validate', field: 'columns' });
@@ -169,6 +174,8 @@ export const scheduledMethods = {
       ...(base ? { base } : {}),
       ...(warnings.length ? { warnings } : {}),
       created_at: now, last_queried_at: now,
+      // the table the context read before (a materialized draft's): read again if the first build fails
+      ...(ctx.state.model ? { before: plain({ engine: ctx.state.engine, model: ctx.state.model, pipeline_model: ctx.state.pipeline_model }) } : {}),
     };
     this.ctxs.touch(ctx.id);
 
@@ -180,34 +187,62 @@ export const scheduledMethods = {
       });
       return this._taskStarted(taskId, { context_id: ctx.id, model });
     };
-    return draft.semantic ? this._materializeLayer(ctx, draft, { buildTable: build }) : build();
+    try {
+      return draft.semantic ? await this._materializeLayer(ctx, draft, { buildTable: build }) : build();
+    } catch (e) {
+      await this._unschedule(ctx);
+      throw e;
+    }
+  },
+
+  /**
+   * A model whose first build did not stand is no scheduled model: the mark goes, and with it what the
+   * build left — its files, and the tables of its chain that did build (they carry no expiry). The draft is
+   * open again, to be fixed.
+   */
+  async _unschedule(ctx) {
+    const spec = ctx.state.scheduled;
+    if (!spec || spec.refreshed_at) return;
+    const models = [...new Set(this.ctxs.pipelineFiles(ctx.id, spec.model).filter((f) => /\.(sql|py)$/.test(f)).map((f) => f.replace(/\.(sql|py)$/, '')))];
+    await this._dropScheduledTables(ctx, models);
+    this.ctxs.removePipelineFiles(ctx.id, spec.model);
+    if (ctx.state.model === spec.model) {
+      delete ctx.state.engine; delete ctx.state.model; delete ctx.state.pipeline_model;
+      if (spec.before) Object.assign(ctx.state, spec.before);
+    }
+    delete ctx.state.scheduled;
+    this.ctxs.touch(ctx.id);
   },
 
   /** The first build of a scheduled model, in its task: the table, its description, its relation. */
   async _scheduledFirstBuild(ctx, draft, stages, taskId, warnings) {
     const spec = ctx.state.scheduled;
     const startedAt = new Date().toISOString();
-    const result = await this._registerPipeline({
-      name: draft.name, context_id: ctx.id, materialized: 'table',
-      ...(draft.description ? { description: draft.description } : {}),
-      pipeline: { source: draft.source, time_range: draft.base ? undefined : (draft.time_range || undefined), stages },
-      ...(draft.base ? { from_checkpoint: { at: 0, model: draft.base.model, columns: draft.base.columns } } : {}),
-      model_name: spec.model,
-      scheduled: spec,
-      ...(draft.semantic ? { declared: draft.semantic } : {}),
-    }, { taskId });
-    if (!result || result.ok === false) {
-      // a model whose first build fails is no scheduled model: the draft is open again, to be fixed
-      delete ctx.state.scheduled;
-      this.ctxs.removePipelineFiles(ctx.id, spec.model);
-      this.ctxs.touch(ctx.id);
+    const failed = async (result) => {
+      await this._unschedule(ctx);
       return { ...result, scheduled: false, note: 'the first build failed, so nothing is scheduled: the draft is open again — fix it and schedule it again' };
+    };
+    let result;
+    try {
+      result = await this._registerPipeline({
+        name: draft.name, context_id: ctx.id, materialized: 'table',
+        ...(draft.description ? { description: draft.description } : {}),
+        pipeline: { source: draft.source, time_range: draft.base ? undefined : (draft.time_range || undefined), stages },
+        ...(draft.base ? { from_checkpoint: { at: 0, model: draft.base.model, columns: draft.base.columns } } : {}),
+        model_name: spec.model,
+        scheduled: spec,
+        ...(draft.semantic ? { declared: draft.semantic } : {}),
+      }, { taskId });
+    } catch (e) {
+      return failed({ ok: false, context_id: ctx.id, kind: 'pipeline', error: { stage: e?.stage || 'build', message: e?.message || String(e) } });
     }
+    if (!result || result.ok === false) return failed(result || { ok: false, error: { stage: 'build', message: 'the build returned nothing' } });
     spec.models = (result.models || []).map((m) => m.model);
     if (!spec.models.length) spec.models = [spec.model];
     spec.table = await this._scheduledRelation(ctx, spec);
     spec.last_run = { task_id: taskId, started_at: startedAt, finished_at: new Date().toISOString(), ok: true, rows: result.page?.total ?? result.row_count ?? null, reason: 'scheduled' };
     spec.refreshed_at = spec.last_run.finished_at;
+    delete spec.before;
     this.ctxs.touch(ctx.id);
     return {
       ...result,
@@ -265,7 +300,7 @@ export const scheduledMethods = {
   _refreshScheduled(id, reason = 'daily') {
     const ctx = this.ctxs.has(id) ? this.ctxs.get(id) : null;
     const spec = ctx?.state?.scheduled;
-    if (!spec?.refreshed_at) return null; // its first build has not stood yet
+    if (!spec?.refreshed_at || spec.deleting) return null; // its first build has not stood yet, or it is going
     if (!this.runner) return null;
     if (this._scheduledRefreshing(spec)) return spec.last_run.task_id;
     const startedAt = new Date().toISOString();
@@ -291,7 +326,7 @@ export const scheduledMethods = {
         this.ctxs.touch(ctx.id);
       }
       return out.ok ? { ...out, scheduled: this._scheduledView(ctx) } : out;
-    }, { input: { action: 'refresh', context_id: ctx.id, reason }, batch: { before: null } });
+    }, { input: { action: 'refresh', context_id: ctx.id, reason }, batch: { before: null }, asked: false });
     spec.last_run = { task_id: taskId, started_at: startedAt, reason };
     this.ctxs.touch(ctx.id);
     // its table is what a read of the task pages (it keeps no rows of its own)
@@ -372,11 +407,11 @@ export const scheduledMethods = {
   },
 
   /** Drop a scheduled model's tables from the warehouse (its chain's models), before its context goes. */
-  async _dropScheduledTables(ctx) {
+  async _dropScheduledTables(ctx, models = null) {
     const spec = ctx.state.scheduled;
     if (!spec || !this.runner?.execute) return [];
     const dropped = [];
-    for (const model of [...(spec.models || [spec.model])].reverse()) {
+    for (const model of [...(models || spec.models || [spec.model])].reverse()) {
       const r = await this.runner.execute(this.ctxs.dir(ctx.id), model, ['DROP TABLE IF EXISTS __MCP_RELATION__']).catch(() => null);
       if (r?.ok) dropped.push(model);
     }

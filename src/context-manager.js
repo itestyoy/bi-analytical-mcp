@@ -174,6 +174,8 @@ export class ContextManager {
         // A build cannot survive the process that ran it: an in-flight marker read back from the
         // registry is stale, and keeping it would wedge the draft as "already building".
         if (st.draft?.building) delete st.draft.building;
+        // …nor a scheduled model's first build: one that never stood is no scheduled model (its draft open again)
+        if (st.scheduled && !st.scheduled.refreshed_at) delete st.scheduled;
         this.contexts.set(c.id, c);
       }
     } catch {

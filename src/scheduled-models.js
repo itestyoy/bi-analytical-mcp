@@ -35,6 +35,22 @@ export class ScheduledModels {
     this._round = null;
   }
 
+  /**
+   * When a model was last used: queried — itself, or a scheduled model that starts from its table and is
+   * awake (that one's refresh reads it every day, for those who query it).
+   */
+  _lastUse(id, seen = new Set()) {
+    seen.add(id);
+    const spec = this.ctxs.get(id)?.state?.scheduled;
+    let t = Date.parse(spec?.last_queried_at || spec?.created_at || 0) || 0;
+    for (const other of this._ids()) {
+      const s = this.ctxs.get(other).state.scheduled;
+      if (seen.has(other) || s.suspended || s.base?.context_id !== id) continue;
+      t = Math.max(t, this._lastUse(other, seen));
+    }
+    return t;
+  }
+
   /** The ids of the scheduled contexts. */
   _ids() {
     return this.ctxs.list().map((c) => c.context_id).filter((id) => this.ctxs.get(id)?.state?.scheduled);
@@ -84,7 +100,7 @@ export class ScheduledModels {
     if (!spec || spec.suspended) return null; // a model asleep is woken by a query, not by a sync
     // once a UTC day: a refresh that failed is tried again after the next sync
     if (spec.refreshed_at && utcDay(spec.refreshed_at) === utcDay(now)) return null;
-    const used = Date.parse(spec.last_queried_at || spec.created_at || 0);
+    const used = this._lastUse(id);
     if (this.idleMs && now - used > this.idleMs) {
       spec.suspended = { at: new Date(now).toISOString(), reason: 'unused', idle_days: Math.round((this.idleMs / 86400000) * 10) / 10, last_queried_at: spec.last_queried_at || null };
       this.ctxs.touch(id);

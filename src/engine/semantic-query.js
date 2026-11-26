@@ -434,7 +434,9 @@ export const semanticQueryMethods = {
     // (src/engine/scheduled.js): its answer is the table as it is, and a refresh starts after it
     const sched = ctx.state.scheduled ? this._scheduledQuery(ctx) : null;
     const wrap = sched ? sched.wrap : (work) => work;
-    const started = (answer) => { sched?.after(answer.task_ids || [answer.task_id]); return answer; };
+    // (a query only compiled — dry_run — reads nothing: it is no use of the model and wakes nothing)
+    const reads = input.queries ? input.queries.some((q) => !q.dry_run) : !input.dry_run;
+    const started = (answer) => { if (reads) sched?.after(answer.task_ids || [answer.task_id]); return answer; };
     // A BATCH (queries): every query is validated before any starts, and they run side by side — one
     // task each, of the kind its steps say, read together with { task_ids }.
     if (input.queries) {

@@ -547,7 +547,11 @@ export class Engine {
         // a scheduled model's tables live until it is deleted: they go from the warehouse with it (once
         // nothing refuses the delete — another draft reading it, without force)
         const ctx = this.ctxs.has(input.context_id) ? this.ctxs.get(input.context_id) : null;
-        const tables = ctx?.state?.scheduled && (input.force || !this._checkpointConsumers(ctx.id).length) ? await this._dropScheduledTables(ctx) : [];
+        const goes = ctx?.state?.scheduled && (input.force || !this._checkpointConsumers(ctx.id).length);
+        // (a refresh or a query running on it would write the table back, or read it gone: it waits for them)
+        if (goes && this.ctxs.leases.get(ctx.id)) throw new ToolError(`scheduled model ${ctx.id} is being worked on — a refresh or a query runs on it now; delete it once they are done (query_model({ request: { task_ids, cancel: true } }) stops a query of yours)`, { stage: 'validate', field: 'context_id' });
+        if (goes) ctx.state.scheduled.deleting = true;
+        const tables = goes ? await this._dropScheduledTables(ctx) : [];
         const out = this._dropContext({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
         return tables.length ? { ...out, warehouse_tables_dropped: tables.length } : out;
       }

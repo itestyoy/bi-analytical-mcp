@@ -23,7 +23,7 @@ Fast entrypoint for asynchronous work: tasks, background indexing, protocol noti
 | Tasks | `src/task-runner.js`, `src/jobs.js` | Every build and query is a task: started in the call, run in order per context (a batch side by side), read with `{ task_ids }`, cancelled with `{ task_ids, cancel: true }`; persisted in `jobs` |
 | Protocol tasks | `src/mcp-server.js`, `src/tasks.js` | The Tasks extension: a long call becomes a protocol task the host polls |
 | dbt processes | `src/dbt/process.js` | One process per warehouse turn (DuckDB is one file); a task's AbortController stops its process |
-| Value index | `src/value-index.js`, `src/value-indexer.js`, timer in `src/server.js` | Profiles property values per `(source, property)` at start and every `VALUE_INDEX_REFRESH_MS` |
+| Value index | `src/value-index.js`, `src/value-indexer.js`, timer in `src/server.js`, `src/cron.js` | Profiles property values per `(source, property)` (after a `dbt run` of the source models, `MCP_INDEX_DBT_RUN`) at start, then at each time of `VALUE_INDEX_CRON` (in `VALUE_INDEX_CRON_TZ`) when set, else every `VALUE_INDEX_REFRESH_MS` |
 | Context GC | `src/server.js` (`engine.gc`) | Drops contexts idle longer than `CONTEXT_TTL_MS` (0: never); the project's own contexts are pinned |
 | Sessions | `src/legacy-sessions.js` | 2025 clients' sessions; idle ones closed after `MCP_SESSION_IDLE_SECONDS` |
 | Surface change | `src/surface-change.js` | Announces `tools/list_changed` / `resources/list_changed` after a deploy that changed the surface |

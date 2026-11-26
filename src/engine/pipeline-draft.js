@@ -45,6 +45,8 @@ export const pipelineDraftMethods = {
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
     const ctx = this._ctx(input.context_id);
     const draft = ctx.state.draft;
+    // a scheduled model's steps are fixed: it is previewed, forked or deleted, never changed (src/engine/scheduled.js)
+    if (ctx.state.scheduled && input.action !== 'preview') throw this._scheduledFixed(ctx);
     if (!draft) throw new ToolError(`no draft in context '${input.context_id}' — start one with build_model({ request: { action: 'start', name, source } })`, { stage: 'validate', field: 'context_id' });
     this.ctxs.touch(ctx.id);
     const inc = included(input);
@@ -69,6 +71,7 @@ export const pipelineDraftMethods = {
         : this._draftDeleteStep(ctx, draft, input.index, inc.columns, inc.steps)));
     }
     if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
+    if (input.action === 'schedule') return this._scheduleDraft(ctx, draft, input);
     if (input.action === 'discard') {
       delete ctx.state.draft;
       // (the context stays — it may hold a built model or a layer — and says how it goes too)

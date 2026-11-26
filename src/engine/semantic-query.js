@@ -430,13 +430,20 @@ export const semanticQueryMethods = {
     // (a draft that is only its semantic_model step is a semantic layer, with no table to read)
     const pipelineContext = ctx.state.engine === 'pipeline' || !!ctx.state.pipeline_model || (!!ctx.state.draft && !(ctx.state.draft.semantic && !ctx.state.draft.stages.length && !ctx.state.draft.base));
     const metricQuery = (q) => !pipelineContext || (q.steps || []).some((st) => st?.stage === METRICS_STEP.stage);
+    // A SCHEDULED MODEL's queries say how fresh its table is, and a query of one asleep wakes it
+    // (src/engine/scheduled.js): its answer is the table as it is, and a refresh starts after it
+    const sched = ctx.state.scheduled ? this._scheduledQuery(ctx) : null;
+    const wrap = sched ? sched.wrap : (work) => work;
+    // (a query only compiled — dry_run — reads nothing: it is no use of the model and wakes nothing)
+    const reads = input.queries ? input.queries.some((q) => !q.dry_run) : !input.dry_run;
+    const started = (answer) => { if (reads) sched?.after(answer.task_ids || [answer.task_id]); return answer; };
     // A BATCH (queries): every query is validated before any starts, and they run side by side — one
     // task each, of the kind its steps say, read together with { task_ids }.
     if (input.queries) {
-      return this._startBatch(ctx, (q) => (metricQuery(q) ? 'query_semantic_model' : 'query_pipeline_model'), input.queries,
-        (q) => (metricQuery(q) ? this._metricQueryWork(ctx, { ...q, context_id: ctx.id }) : this._pipelineQueryWork(ctx, readOnly(q))));
+      return started(this._startBatch(ctx, (q) => (metricQuery(q) ? 'query_semantic_model' : 'query_pipeline_model'), input.queries,
+        (q) => wrap(metricQuery(q) ? this._metricQueryWork(ctx, { ...q, context_id: ctx.id }) : this._pipelineQueryWork(ctx, readOnly(q)))));
     }
-    if (!metricQuery(input)) return this._startPipelineQuery(ctx, readOnly(input));
+    if (!metricQuery(input)) return started(this._startPipelineQuery(ctx, readOnly(input), wrap));
     // The project's context is never written after start (nothing is built on it) and every
     // conversation queries it: its queries run side by side, like a batch's members, instead of
     // each waiting for the one before it.
@@ -445,7 +452,7 @@ export const semanticQueryMethods = {
     const project = ctx.state.engine === 'project';
     const compileOnly = !!input.dry_run;
     const slot = project ? { batch: { before: null } } : compileOnly ? { batch: this.tasks.afterBuilds(ctx) } : {};
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', this._metricQueryWork(ctx, input), { input, ...slot }), { context_id: ctx.id });
+    return started(this._taskStarted(this._startTask(ctx, 'query_semantic_model', wrap(this._metricQueryWork(ctx, input)), { input, ...slot }), { context_id: ctx.id }));
   },
 
   /** The work of one metric query (a query with a metrics step) on `ctx`: checked now, run by its task. */

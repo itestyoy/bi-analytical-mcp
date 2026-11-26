@@ -643,6 +643,29 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   public surface — `engine.tasks` (the task runtime), `engine.host` (validation, a context, the time
   window, a source's columns, a model's config), `engine.ctxs`, the catalog and the job registry —
   never against the engine's private `_` members.
+- A SCHEDULED MODEL IS A BUILD WHOSE TABLE IS COMPUTED AGAIN DAILY, KEPT WITH WHAT IT MEANS
+  (src/engine/scheduled.js; when: src/scheduled-models.js). `build_model({ action: "schedule", context_id,
+  grain, columns })` turns a draft with steps into one: its steps are FIXED from then on (every change
+  refused — `_scheduledFixed`; a change is a fork, scheduled anew, and the old one deleted), its table a dbt
+  model of its own (`pipe_<name>_<context>_sched`) with no expiry, built from where the draft starts — the
+  source, or ANOTHER SCHEDULED MODEL's table (a table computed once is refused: it would be recomputed the
+  same) — never from a checkpoint. What it means is REQUIRED: the draft's description and question, what one
+  row is (`grain`), and every column's description (a unit where it has one); a column taken unchanged from
+  the source or the scheduled base may take the description it has there. Where each column comes from
+  (`computed`: the step, its expression) is read off the steps, never written by hand; the descriptions are
+  written onto the table where the warehouse keeps them (`persistsDocs`: BigQuery's persist_docs). It is
+  refreshed DAILY: after each sync of the value index (which first `dbt run`s the source models), every
+  scheduled model not refreshed that UTC day — base first; there is no schedule of its own. A refresh runs
+  the model's own files as written, beside its context's queries (they read the table as it stands), and is
+  no question asked (the task index does not record it). A model nobody QUERIES for MCP_SCHEDULED_IDLE_DAYS
+  is put to sleep instead (`suspended`) — a query only compiled (dry_run) is no use, and a base an awake
+  dependent reads is in use; a table read straight from the warehouse is not seen, so such a model sleeps:
+  not used, not refreshed. The next query answers from the table as it is — saying so in its result's
+  `scheduled` — and its refresh starts once that query is answered. A first build that does not stand (it
+  fails, or the process ends during it) leaves no scheduled model: the mark goes with its files and the
+  tables it built, and the draft is open again. Its context id is its key, as every context's: read with
+  query_model, described by context describe (`scheduled`), deleted with its table — never while a refresh
+  or a query runs on it. Neither the context TTL nor table expiry touches it.
 - A FEATURE IS SWITCHED ON AS A WHOLE, OR IS NOT THERE (src/features.js). A part of the server that a
   deployment may not want — today only retentioneering — is a feature: off unless its flag says on
   (`MCP_RETENTIONEERING=on`), and left out WITH ITS REASON (in the overview) when asked for where it

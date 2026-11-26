@@ -24,7 +24,7 @@
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
 //   engine/task-results.js        reading a task back, query_model, display_model_result
 
-import { buildSchemas, transportSchema, METHOD_CONTRACTS } from './schema.js';
+import { buildSchemas, transportSchema, METHOD_CONTRACTS, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE, UNKNOWN_TASK } from './validate.js';
 import { abTest, srmCheck, sampleSize } from './experiment.js';
@@ -61,6 +61,8 @@ import { semanticQueryMethods } from './engine/semantic-query.js';
 import { semanticPreviewMethods } from './engine/semantic-preview.js';
 import { taskResultMethods } from './engine/task-results.js';
 import { exportMethods } from './engine/export.js';
+import { scheduledMethods } from './engine/scheduled.js';
+import { ScheduledModels } from './scheduled-models.js';
 import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
 import { RESEARCH_GUIDES } from './research-guides.js';
@@ -88,7 +90,7 @@ export const TASK_KINDS = {
 const DESCRIBED_TASKS = 5;
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false, exportUri = null, exportMaxBytes = 500e6 }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = false, exportUri = null, exportMaxBytes = 500e6, scheduledIdleDays = 7 }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -220,6 +222,13 @@ export class Engine {
     // its vector — semantic_index({ request: { tasks } }); never a way back to a task's data
     this.taskIndex = new TaskIndex({ store: this.store, embedder, toolOf: (kind) => this.tasks?.toolOf(kind) || kind, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} task-index ${m}`) });
     this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a), onStart: (id, tool, ctx, input) => this.taskIndex.record({ id, tool, ctx, input }) });
+    // when scheduled models are computed again — after the value index's sync, daily (src/scheduled-models.js)
+    this.schedules = new ScheduledModels({
+      ctxs: this.ctxs,
+      refresh: (id, reason) => this._refreshScheduled(id, reason),
+      awaitTasks: async (ids) => { while (ids.some((t) => this.jobs.get(t)?.status === 'running')) await this.tasks.await(ids, MAX_WAIT_SECONDS); },
+      idleMs: Number(scheduledIdleDays) > 0 ? Number(scheduledIdleDays) * 86400000 : 0,
+    });
     // WHAT A FEATURE MAY USE OF THE ENGINE (src/features.js), besides its task runtime (engine.tasks),
     // the dbt project's contexts (engine.ctxs), the catalog and the job registry: the one surface it
     // is written against, so an engine method can change without reaching into a feature
@@ -280,6 +289,7 @@ export class Engine {
   _ctxToWrite(id, field = 'context_id') {
     const ctx = this._ctx(id);
     if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_model({ request: { context_id: '${id}', steps: [{ stage: 'metrics', metrics }] } }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
+    if (ctx.state.scheduled) throw this._scheduledFixed(ctx);
     return ctx;
   }
 
@@ -318,10 +328,11 @@ export class Engine {
   }
 
   /** The `{{ config(...) }}` line of a SQL model built for a task: how it is materialized, and when it expires. */
-  _modelConfigLine(materialized = 'table', { pipeline = false } = {}) {
+  _modelConfigLine(materialized = 'table', { pipeline = false, expires = true } = {}) {
     // a pipeline written in a syntax dbt's own parser does not read says so (dbt v2 would warn on it)
     const unparsed = pipeline && getDialect(this.catalog.dialect).writesPipeSyntax ? this.runner?.unparsedSqlConfig?.() || {} : {};
-    const cfg = { materialized, ...this._expiryConfig('sql'), ...unparsed };
+    // (a scheduled model's table lives until the model is deleted: no expiry)
+    const cfg = { materialized, ...(expires ? this._expiryConfig('sql') : {}), ...unparsed };
     return `{{ config(${Object.entries(cfg).map(([k, v]) => `${k}=${typeof v === 'number' ? v : `'${String(v).replace(/'/g, "\\'")}'`}`).join(', ')}) }}`;
   }
 
@@ -515,7 +526,10 @@ export class Engine {
     const ran = this.jobs.list().filter((j) => j.context_id === describe.context_id).map((j) => ({ task_id: j.task_id, ...(j.tool ? { tool: this.tasks.toolOf(j.tool) } : {}), status: j.status }));
     // (the latest ones: a long-lived context's whole history is counted, not listed)
     const shown = ran.slice(-DESCRIBED_TASKS);
-    return out && !out.task_id && ran.length ? { ...out, task_ids: shown, ...(ran.length > shown.length ? { task_count: ran.length } : {}) } : out;
+    // a scheduled model says what it is, what its columns mean and how it is kept (src/engine/scheduled.js)
+    const scheduled = out && !out.task_id && this.ctxs.has(describe.context_id) ? this._scheduledView(this.ctxs.get(describe.context_id)) : null;
+    const described = scheduled ? { ...out, scheduled } : out;
+    return described && !described.task_id && ran.length ? { ...described, task_ids: shown, ...(ran.length > shown.length ? { task_count: ran.length } : {}) } : described;
   }
 
   /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context
@@ -529,7 +543,18 @@ export class Engine {
     switch (input.what || 'context') {
       case 'pipeline_model': return this._deletePipelineModel({ context_id: input.context_id });
       case 'semantic_model': return this._deleteSemanticModel({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
-      default: return this._dropContext({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
+      default: {
+        // a scheduled model's tables live until it is deleted: they go from the warehouse with it (once
+        // nothing refuses the delete — another draft reading it, without force)
+        const ctx = this.ctxs.has(input.context_id) ? this.ctxs.get(input.context_id) : null;
+        const goes = ctx?.state?.scheduled && (input.force || !this._checkpointConsumers(ctx.id).length);
+        // (a refresh or a query running on it would write the table back, or read it gone: it waits for them)
+        if (goes && this.ctxs.leases.get(ctx.id)) throw new ToolError(`scheduled model ${ctx.id} is being worked on — a refresh or a query runs on it now; delete it once they are done (query_model({ request: { task_ids, cancel: true } }) stops a query of yours)`, { stage: 'validate', field: 'context_id' });
+        if (goes) ctx.state.scheduled.deleting = true;
+        const tables = goes ? await this._dropScheduledTables(ctx) : [];
+        const out = this._dropContext({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
+        return tables.length ? { ...out, warehouse_tables_dropped: tables.length } : out;
+      }
     }
   }
 
@@ -839,4 +864,4 @@ export class Engine {
   }
 }
 
-mixin(Engine, semanticIndexMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods, exportMethods);
+mixin(Engine, semanticIndexMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods, exportMethods, scheduledMethods);

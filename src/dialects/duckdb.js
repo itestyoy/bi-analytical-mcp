@@ -57,6 +57,7 @@ export class DuckDBDialect extends Dialect {
 
   /** A pipeline is lowered to chained CTEs: plain SQL any parser reads. */
   get writesPipeSyntax() { return false; }
+  get persistsDocs() { return false; }
 
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
 

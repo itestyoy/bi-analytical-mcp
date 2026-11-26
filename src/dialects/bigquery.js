@@ -43,6 +43,9 @@ export class BigQueryDialect extends Dialect {
 
   /** A pipeline is lowered to BigQuery's pipe syntax (FROM … |> …), which dbt's own SQL parser (dbt v2) does not read. */
   get writesPipeSyntax() { return true; }
+  // a model's description and its columns' are written onto the table (dbt's persist_docs): a scheduled
+  // model's meaning is read where its table is, by a dashboard as by the console
+  get persistsDocs() { return true; }
 
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
 

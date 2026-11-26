@@ -257,11 +257,11 @@ export const taskResultMethods = {
    * upstream recomputed), keeps its first `limit` rows and returns its task_id at once — with dry_run, the
    * read's SQL instead of its rows.
    */
-  _startPipelineQuery(ctx, input) {
+  _startPipelineQuery(ctx, input, wrap = (work) => work) {
     // A read only compiled (dry_run) runs nothing on the warehouse: it waits for the build it reads,
     // not behind the reads queued before it — as a metric query only compiled does.
     const slot = input.dry_run ? { batch: this.tasks.afterBuilds(ctx) } : {};
-    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', this._pipelineQueryWork(ctx, input), { input, ...slot }), { context_id: ctx.id });
+    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', wrap(this._pipelineQueryWork(ctx, input)), { input, ...slot }), { context_id: ctx.id });
   },
 
   /** One query over a context's built pipeline model, checked against its columns; returns the work its task runs. */

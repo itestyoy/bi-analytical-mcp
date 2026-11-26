@@ -124,10 +124,11 @@ export class TaskRunner {
   }
 
   /** Start `work(id)` as a task of `tool` on `ctx` (null: no context). Returns the task id. */
-  start(ctx, tool, work, { input = null, batch = null } = {}) {
+  start(ctx, tool, work, { input = null, batch = null, asked = true } = {}) {
     const id = this.jobs.create({ ...(ctx ? { contextId: ctx.id } : {}), tool });
-    // what the task computes is recorded as it starts; a record that fails takes nothing from the task
-    try { this.onStart(id, tool, ctx, input); } catch { /* best effort */ }
+    // what the task computes is recorded as it starts — a task someone asked for (`asked`: not a scheduled
+    // model's daily refresh, which asks nothing); a record that fails takes nothing from the task
+    if (asked) try { this.onStart(id, tool, ctx, input); } catch { /* best effort */ }
     if (ctx) this.ctxs.acquire(ctx.id);
     // a member of a batch waits for what was queued before the BATCH, and runs beside the other members
     const before = batch ? batch.before : ctx ? this.queue.get(ctx.id) : null;

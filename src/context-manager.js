@@ -139,7 +139,8 @@ export function mergeCompiled(state, compiled) {
 export function builtBehind(state) {
   const built = state?.pipeline_model?.model;
   const draft = state?.draft;
-  if (!built || !draft || !Array.isArray(draft.stages)) return false;
+  // a scheduled model's table is the build of its steps, fixed as they were scheduled
+  if (!built || !draft || !Array.isArray(draft.stages) || state.scheduled?.model === built) return false;
   return !(draft.checkpoints || []).some((cp) => cp.at === draft.stages.length && cp.model === built);
 }
 
@@ -173,6 +174,8 @@ export class ContextManager {
         // A build cannot survive the process that ran it: an in-flight marker read back from the
         // registry is stale, and keeping it would wedge the draft as "already building".
         if (st.draft?.building) delete st.draft.building;
+        // …nor a scheduled model's first build: one that never stood is no scheduled model (its draft open again)
+        if (st.scheduled && !st.scheduled.refreshed_at) delete st.scheduled;
         this.contexts.set(c.id, c);
       }
     } catch {
@@ -398,6 +401,16 @@ export class ContextManager {
         writeFileSync(overlayPath, dumpProperties(rest));
       }
     }
+    // a generated SQL model's own entry (a scheduled model's description and columns, src/engine/scheduled.js)
+    // joins ours: dbt takes one entry per model
+    for (const name of ours.keys()) {
+      const file = join(this.generatedDir(id), `${name}.yml`);
+      if (merged.has(name) || !existsSync(join(this.generatedDir(id), `${name}.sql`)) || !existsSync(file)) continue;
+      try {
+        const entry = (yaml.load(readFileSync(file, 'utf8'))?.models || []).find((m) => m?.name === name);
+        if (entry) { merged.set(name, entry); rmSync(file, { force: true }); }
+      } catch { /* an unreadable entry stays where it is */ }
+    }
     const models = render.latest.models.map((m) => mergeModelEntry(merged.get(m.name), m));
     const doc = render.latest.metrics.length ? { models, metrics: render.latest.metrics } : { models };
     return this.writeYaml(id, yaml.dump(doc, { lineWidth: 120, noRefs: true, quotingType: '"' }));
@@ -612,6 +625,7 @@ export class ContextManager {
     for (const c of [...this.contexts.values()]) {
       if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
       if (c.state?.pinned) continue; // …nor one served for as long as the server runs (the project's own semantic layer)
+      if (c.state?.scheduled) continue; // …nor a scheduled model: it lives until it is deleted
       // …nor one whose materialized prefix another (live) context reads: dropping it would take
       // that table with it, which is exactly what a context delete refuses to do
       // without force. A consumer in use keeps this one's lastUsedAt fresh, so an owner is only

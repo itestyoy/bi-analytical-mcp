@@ -57,6 +57,7 @@ export const SETTING_GROUPS = [
     S('MCP_DB_RESET', 'flag', 'true: wipe the store at start (memory and the error log are kept).', { default: false, example: 'false' }),
     S('CONTEXT_TTL_MS', 'number', 'Drop contexts idle for longer than this (ms). 0: never.', { default: 0, example: '0' }),
     S('MCP_TABLE_EXPIRATION_DAYS', 'int', 'Tables built for tasks on BigQuery expire this many days after they are built. 0: keep them.', { default: 30 }),
+    S('MCP_SCHEDULED_IDLE_DAYS', 'number', 'A scheduled model nobody has queried for this many days is no longer refreshed; the next query wakes it. 0: never.', { default: 7 }),
     S('MCP_ERROR_RETENTION_DAYS', 'int', 'How long the error log keeps a failure (days), and at most how many it keeps.', { default: 30 }),
     S('MCP_ERROR_MAX_ROWS', 'int', null, { default: 10000 }),
   ]],

@@ -159,10 +159,14 @@ export const semanticBuildMethods = {
    * its steps build, that build goes first — or the table that already stands for them, a checkpoint or a
    * task's — and the layer is written once it stands.
    */
-  async _materializeLayer(ctx, draft) {
+  async _materializeLayer(ctx, draft, { buildTable = null } = {}) {
     let table = null;
     let built = null; // the build of the steps before the step, when they are no table yet
-    if (draft.stages.length || draft.base) {
+    // (a scheduled model builds its own table first: buildTable starts it — src/engine/scheduled.js)
+    if (buildTable) {
+      built = buildTable();
+      table = built.model;
+    } else if (draft.stages.length || draft.base) {
       const plan = draft.stages.length ? this._renderPlan(draft, draft.stages, { forBuild: true }) : null;
       if (!draft.stages.length) table = draft.base.model;
       else if (plan.checkpoint && !plan.stages.length) table = plan.checkpoint.model;

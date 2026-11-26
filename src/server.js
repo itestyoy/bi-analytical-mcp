@@ -184,7 +184,7 @@ export async function makeEngine(opts = {}) {
   if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
   if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);
   // MCP_RESULT_CARDS: a model result drawn as a card (display_model_result, drill_result) — off unless asked for
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project, resultCards: opts.resultCards ?? S.MCP_RESULT_CARDS, exportUri: opts.exportUri ?? S.EXPORT_URI, exportMaxBytes: (opts.exportMaxMb ?? S.EXPORT_MAX_MB) * 1e6 });
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project, resultCards: opts.resultCards ?? S.MCP_RESULT_CARDS, exportUri: opts.exportUri ?? S.EXPORT_URI, exportMaxBytes: (opts.exportMaxMb ?? S.EXPORT_MAX_MB) * 1e6, scheduledIdleDays: S.MCP_SCHEDULED_IDLE_DAYS });
   // Persistence surfaces as semantic_index({ request: { status } }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.
@@ -379,7 +379,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const runModels = S.MCP_INDEX_DBT_RUN;
   const runModelsSelect = S.MCP_INDEX_DBT_RUN_SELECT || null;
   const modelsBuilt = !!engine.sourceModelsBuiltAtStart;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.warehouseDir(), intervalMs, schedule, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, modelsBuilt, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.warehouseDir(), intervalMs, schedule, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, modelsBuilt,
+    // after each sync (the source models built before it), the scheduled models not refreshed today are
+    onSyncDone: () => engine.schedules.afterSync(),
+    logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the runner and the SQLite handle.

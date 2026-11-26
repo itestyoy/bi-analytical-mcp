@@ -58,7 +58,7 @@ export async function buildSourceModels({ runner, catalog, dir, select = null })
 }
 
 export class BackgroundIndexer {
-  constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, schedule = null, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, modelsBuilt = false, logger } = {}) {
+  constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, schedule = null, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, modelsBuilt = false, onSyncDone = null, logger } = {}) {
     this.catalog = catalog;
     this.runner = runner;
     this.index = index;
@@ -67,6 +67,8 @@ export class BackgroundIndexer {
     // A CRON SCHEDULE (src/cron.js CronSchedule), when one is set, says when the syncs after the first
     // run — in place of the interval, which it overrides; the first runs at start either way.
     this.schedule = schedule || null;
+    // what follows a sync, whatever it ended in (the scheduled models' daily refresh: src/scheduled-models.js)
+    this.onSyncDone = onSyncDone;
     this.maxValues = maxValues;
     // Per-scan dbt timeout (ms) for the index queries ONLY — these are heavy full-fact
     // aggregates and were getting SIGTERM-killed at the runner's default 180s. A larger value
@@ -973,6 +975,7 @@ export class BackgroundIndexer {
       const ms = Date.now() - startedAt;
       try { this.index.finishRun?.(runId, { status, propertiesIndexed: props, valuesWritten: values, errors, error: lastError }); } catch { /* never let logging break the indexer */ }
       this.logger?.(`sync #${runId} done: status=${status}, properties=${props}/${targets.length}, values=${values}, errors=${errors}, duration=${ms}ms`);
+      try { this.onSyncDone?.(); } catch (e) { this.logger?.(`after sync #${runId}: ${e?.message || e}`); }
     }
   }
 }

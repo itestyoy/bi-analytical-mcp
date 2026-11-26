@@ -107,7 +107,8 @@ export const pipelineMaterializeMethods = {
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
-      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, ymlConfig: this._expiryConfig('python'), pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
+      // (a scheduled model's chain lives until the model is deleted: no expiry)
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, ymlConfig: pipeline?.scheduled ? {} : this._expiryConfig('python'), pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'step' }); }
   },
 
@@ -360,7 +361,8 @@ export const pipelineMaterializeMethods = {
     // leaves nothing behind. The context id is CHOSEN first (a new one is not created yet), so the
     // chain is laid out ONCE, under its final names, and its python bodies are gated on that very
     // layout — one render, one compile per python stage.
-    const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
+    // (a scheduled model's own build writes the context its schedule fixes: src/engine/scheduled.js)
+    const existing = input.context_id ? (input.scheduled ? this._ctx(input.context_id) : this._ctxToWrite(input.context_id)) : null;
     const ctxId = existing ? existing.id : (presetCtxId || this.ctxs.newId());
     // The caller may pass the name: every build of a draft gets its own (`_c2`, `_c3`, …), because
     // a rebuild must never overwrite the table it reads as its checkpoint, nor one a fork
@@ -385,10 +387,13 @@ export const pipelineMaterializeMethods = {
     // …nor an orphan an earlier version left: a model reading a checkpoint since retired would fail
     // this build's compile ("depends on a node named … which was not found")
     this.ctxs.pruneDanglingModels(ctx.id);
+    const expires = !input.scheduled;
     for (const m of models) {
-      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table', { pipeline: true })}\n${header}${m.sql}\n`);
+      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table', { pipeline: true, expires })}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
     }
+    // a scheduled model's meaning goes with its table: the model's and its columns' descriptions
+    if (input.scheduled) this._writeScheduledDocs(ctx.id, last, input.scheduled);
     const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) : null;
     const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';

@@ -127,6 +127,12 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     after: { type: 'integer', minimum: 0, description: 'The fork keeps steps 1..after (omitted: all).' },
     validate: { type: 'boolean', description: VALIDATE('dbt run --empty, reading no data', 'query_model') },
     include: { type: 'array', uniqueItems: true, items: { enum: ['columns', 'steps'] }, description: 'Every column / every step, not only what changed.' },
+    // a SCHEDULED model (src/engine/scheduled.js): the build's table refreshed on a cron, its meaning kept with it
+    grain: { type: 'string', minLength: 1, maxLength: 500, description: 'What one row of the table is ("one row per player and day").' },
+    columns: {
+      type: 'array', uniqueItems: true, description: 'What each column of the table means. Every column needs one; a column the steps take unchanged from the source (or from the scheduled model they start from) may leave it to the description it has there.',
+      items: { type: 'object', additionalProperties: false, required: ['name', 'description'], properties: { name: { type: 'string', minLength: 1 }, description: { type: 'string', minLength: 1, maxLength: 1000, description: 'What the value means and how to read it.' }, unit: { type: 'string', minLength: 1, maxLength: 40, description: 'Its unit, where it has one (USD, seconds, share 0-1).' } } },
+    },
   };
   // what an answer about the steps shows beyond what changed: offered to the actions that change them (and
   // fork), not to preview — which lists both already — nor to materialize / discard, whose answers carry neither
@@ -152,6 +158,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
       step('fork', 'fork the draft', 'fork: a new draft from steps 1..after', ABOUT_FIELDS, ['after']),
       step('preview', 'preview the draft', 'preview: the steps and their SQL', [], ['validate'], []),
       step(['materialize', 'discard'], 'materialize or discard', 'materialize builds; discard drops the draft', [], [], []),
+      step('schedule', 'schedule the build', 'schedule: its table computed again daily, after the warehouse\'s own models are, with what it means — read by context_id with query_model, by name in the warehouse', ['grain'], ['columns'], []),
     ],
   };
 
